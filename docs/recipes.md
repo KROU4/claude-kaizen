@@ -9,7 +9,7 @@ Generated from `recipes/catalog.json` (31 recipes). Do not edit by hand; run `no
 *Не спрашивать разрешение на read-only команды, которые вы запускаете постоянно*
 
 - Impact: **high**, risk: low, scope: project / user
-- Why: Every interactive permission prompt costs a context switch. Read-only commands (git status, grep, test runners) are safe to pre-approve; interpreters and shells are never included.
+- Why: Every interactive permission prompt costs a context switch. Strictly read-only commands (git status, git diff, git log, ls, grep, ...) are safe to pre-approve; runners (npm run, make, npx, test runners), interpreters, shells and anything that writes or deletes are never included.
 - Trigger: `{"all":[{"metric":"friction.permissionPrompts","gte":10},{"metric":"sessions.bypassShare","lt":0.8},{"metric":"tools.suggestedAllowRules.length","gte":3}]}`
 - Actions: settings.append permissions.allow
 - Inspired by: Anthropic /fewer-permission-prompts algorithm; everyinc claude-permissions-optimizer
@@ -330,7 +330,7 @@ Generated from `recipes/catalog.json` (31 recipes). Do not edit by hand; run `no
 | `sessions.longSessions` | Sessions with 40+ human prompts |
 | `tools.errorRate` | tool_result is_error / tool_use |
 | `tools.slowCommandsTotal` | Bash commands that took 30 s or longer |
-| `tools.suggestedAllowRules` | Read-only Bash verbs run 3+ times, formatted as permission rules |
+| `tools.suggestedAllowRules` | Strictly read-only Bash verbs (git status/diff/log, ls, grep, ...; never runners or writers) run 3+ times, formatted as permission rules |
 | `friction.interruptions` | User pressed Esc while Claude worked |
 | `friction.compactions` | Context compactions (summaries injected into sessions) |
 | `friction.permissionPrompts` | Permission decisions made interactively (not by mode, rule, hook or classifier) |
@@ -344,8 +344,8 @@ Generated from `recipes/catalog.json` (31 recipes). Do not edit by hand; run `no
 | `friction.slowHooks` | Hooks averaging 1.5 s+ or peaking at 10 s+ |
 | `autonomy.askUserQuestions` | AskUserQuestion tool uses |
 | `delegation.share` | Share of sessions that spawned subagents |
-| `skills.unusedCount` | Installed skills never invoked in the window |
-| `mcp.unusedCount` | Configured MCP servers with zero calls in the window |
+| `skills.unusedCount` | Installed skills never invoked in the window (0 when the window has fewer than 3 sessions) |
+| `mcp.unusedCount` | Configured MCP servers with zero calls in the window (0 when the window has fewer than 3 sessions) |
 | `context.peakTokensMax` | Largest prompt (input + cache) seen in one request |
 | `context.claudeMdTokens` | Estimated tokens of all CLAUDE.md / rules files that load every session |
 | `quality.editsWithoutTestsShare` | Share of sessions that edited files but never ran a test command |

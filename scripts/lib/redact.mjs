@@ -19,7 +19,9 @@ const PATTERNS = [
   ['url-credentials', /(https?:\/\/)([^\s/:@]+):([^\s@]+)@/g],
   [
     'assignment',
-    /\b((?:api[_-]?key|access[_-]?token|auth[_-]?token|secret[_-]?key|client[_-]?secret|password|passwd|pwd|token|secret)\s*[:=]\s*["']?)([^\s"'<>]{6,})/gi,
+    // An identifier prefix is allowed (PGPASSWORD=, DB_PASSWORD=, MY_SECRET=, GITHUB_TOKEN=): `\b` before the key
+    // name alone would not match inside such a word.
+    /(?<![A-Za-z0-9])((?:[A-Za-z0-9_-]{0,40}?)(?:api[_-]?key|access[_-]?token|auth[_-]?token|secret[_-]?key|client[_-]?secret|password|passwd|pwd|token|secret)\s*[:=]\s*["']?)([^\s"'<>]{6,})/gi,
   ],
 ];
 

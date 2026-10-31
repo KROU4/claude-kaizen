@@ -5,6 +5,8 @@ import { detectLang } from './i18n.mjs';
 import { topN } from './transcripts.mjs';
 
 export const MEASURE_VERSION = 1;
+/** Fewer sessions than this cannot show that a skill or MCP server is unused, so those metrics stay empty. */
+export const MIN_SESSIONS_FOR_UNUSED = 3;
 
 const EXT_LANG = {
   '.py': 'python',
@@ -111,13 +113,17 @@ function shortProjectName(cwd) {
   return parts.slice(-2).join('/');
 }
 
-/** Suggest permission allow rules from Bash verbs that were run repeatedly and are read-only by nature. */
-const SAFE_VERBS = new Set([
-  'git status', 'git diff', 'git log', 'git branch', 'git show', 'git fetch', 'git remote', 'git stash', 'git blame', 'git rev-parse',
-  'ls', 'cat', 'head', 'tail', 'wc', 'grep', 'rg', 'find', 'fd', 'pwd', 'echo', 'which', 'where', 'tree', 'stat', 'file', 'du', 'df',
-  'npm test', 'npm run', 'npm ls', 'npm view', 'npm outdated', 'yarn test', 'pnpm test', 'bun test', 'node --test', 'npx tsc', 'npx vitest', 'npx jest', 'npx eslint', 'npx prettier',
-  'pytest', 'python -m', 'python3 -m', 'uv run', 'poetry run', 'ruff', 'mypy', 'black', 'cargo test', 'cargo check', 'cargo build', 'cargo fmt', 'cargo clippy', 'go test', 'go build', 'go vet', 'gofmt',
-  'dotnet build', 'dotnet test', 'make', 'docker ps', 'docker compose', 'docker logs', 'kubectl get', 'gh pr', 'gh issue', 'gh run', 'gh api',
+/**
+ * Strict allowlist for the "read-only" permission recipe. `Bash(<verb>:*)` is a prefix match, so a verb is listed only
+ * when EVERY invocation starting with it is read-only: no runners (npm run, npx, make, uv run, python/node, test
+ * runners that execute project code), nothing that writes, deletes, redirects or mutates remote state (find -delete/-exec,
+ * git branch -D, git stash drop, git remote set-url, gh pr/api/run, docker compose, cat/echo > file, rg --pre, fd -x).
+ * Every entry must be a verb that commandVerb() in transcripts.mjs can actually produce (tests enforce it).
+ */
+export const SAFE_VERBS = new Set([
+  'git status', 'git diff', 'git log', 'git show', 'git blame', 'git rev-parse',
+  'ls', 'pwd', 'head', 'tail', 'wc', 'grep', 'which', 'where', 'stat', 'file', 'du', 'df',
+  'npm ls', 'npm view', 'npm outdated', 'docker ps', 'docker logs', 'kubectl get',
 ]);
 
 export function suggestAllowRules(bashVerbs, { minCount = 3 } = {}) {
@@ -412,7 +418,9 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
   const installedSkillNames = inventory.skills.map((s) => s.name);
   const usedSkillNames = new Set(Object.keys(skillsUsed).map((k) => k.split(':').pop()));
   const usedSlashNames = new Set(Object.keys(slash).map((k) => k.split(':').pop()));
-  const unusedSkills = inventory.skills.filter((s) => !usedSkillNames.has(s.name) && !usedSlashNames.has(s.name));
+  // "Never used" is only a finding when the window holds enough sessions to have seen the usage at all.
+  const enoughUsage = S.length >= MIN_SESSIONS_FOR_UNUSED;
+  const unusedSkills = enoughUsage ? inventory.skills.filter((s) => !usedSkillNames.has(s.name) && !usedSlashNames.has(s.name)) : [];
   // plugins none of whose skills were used (candidates for disabling)
   const pluginUsage = {};
   for (const s of inventory.skills) {
@@ -423,7 +431,7 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
     p.skills++;
     if (used) p.used++;
   }
-  const unusedPlugins = inventory.plugins.installed
+  const unusedPlugins = (enoughUsage ? inventory.plugins.installed : [])
     .filter((p) => pluginUsage[p.name] && pluginUsage[p.name].used === 0 && !Object.keys(mcpUsedByPlugin(S)).includes(p.name))
     .map((p) => `${p.name}@${p.marketplace}`);
   const skills = {
@@ -442,7 +450,7 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
   };
   const configured = new Set([...inventory.mcp.user, ...inventory.mcp.project, ...inventory.mcp.local]);
   const usedServers = new Set(Object.keys(mcpUsed).map((k) => k.replace(/^plugin_/, '')));
-  const unusedMcp = [...configured].filter((name) => !usedServers.has(name) && ![...usedServers].some((u) => u.includes(name) || name.includes(u)));
+  const unusedMcp = (enoughUsage ? [...configured] : []).filter((name) => !usedServers.has(name) && ![...usedServers].some((u) => u.includes(name) || name.includes(u)));
   const mcp = {
     used: Object.fromEntries(
       Object.entries(mcpUsed)
@@ -669,7 +677,7 @@ export const METRIC_DOCS = {
   'sessions.longSessions': 'Sessions with 40+ human prompts',
   'tools.errorRate': 'tool_result is_error / tool_use',
   'tools.slowCommandsTotal': 'Bash commands that took 30 s or longer',
-  'tools.suggestedAllowRules': 'Read-only Bash verbs run 3+ times, formatted as permission rules',
+  'tools.suggestedAllowRules': 'Strictly read-only Bash verbs (git status/diff/log, ls, grep, ...; never runners or writers) run 3+ times, formatted as permission rules',
   'friction.interruptions': 'User pressed Esc while Claude worked',
   'friction.compactions': 'Context compactions (summaries injected into sessions)',
   'friction.permissionPrompts': 'Permission decisions made interactively (not by mode, rule, hook or classifier)',
@@ -683,8 +691,8 @@ export const METRIC_DOCS = {
   'friction.slowHooks': 'Hooks averaging 1.5 s+ or peaking at 10 s+',
   'autonomy.askUserQuestions': 'AskUserQuestion tool uses',
   'delegation.share': 'Share of sessions that spawned subagents',
-  'skills.unusedCount': 'Installed skills never invoked in the window',
-  'mcp.unusedCount': 'Configured MCP servers with zero calls in the window',
+  'skills.unusedCount': 'Installed skills never invoked in the window (0 when the window has fewer than 3 sessions)',
+  'mcp.unusedCount': 'Configured MCP servers with zero calls in the window (0 when the window has fewer than 3 sessions)',
   'context.peakTokensMax': 'Largest prompt (input + cache) seen in one request',
   'context.claudeMdTokens': 'Estimated tokens of all CLAUDE.md / rules files that load every session',
   'quality.editsWithoutTestsShare': 'Share of sessions that edited files but never ran a test command',

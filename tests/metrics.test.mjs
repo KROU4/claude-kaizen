@@ -8,9 +8,9 @@ import assert from 'node:assert/strict';
 import { readInsights } from '../scripts/lib/insights.mjs';
 import { inventory } from '../scripts/lib/inventory.mjs';
 import { detectLang } from '../scripts/lib/i18n.mjs';
-import { METRIC_DOCS, MEASURE_VERSION, buildMeasure, suggestAllowRules } from '../scripts/lib/metrics.mjs';
+import { METRIC_DOCS, MEASURE_VERSION, MIN_SESSIONS_FOR_UNUSED, SAFE_VERBS, buildMeasure, suggestAllowRules } from '../scripts/lib/metrics.mjs';
 import { loadCatalog, resolvePath } from '../scripts/lib/recipes.mjs';
-import { newSessionSummary, scanTranscripts } from '../scripts/lib/transcripts.mjs';
+import { commandVerb, newSessionSummary, scanTranscripts } from '../scripts/lib/transcripts.mjs';
 import { PROJECTS_FIXTURE, USAGE_DATA_FIXTURE, cleanupTempDirs, materializeHome, setEnv } from './helpers.mjs';
 
 let restoreEnv;
@@ -25,6 +25,11 @@ const ENV = { windowDays: 30, since: '2026-10-01T00:00:00.000Z', configDir: '/fi
 /** A session summary for scenario tests: zeroed counters (filesEdited as a number, as after finalize) plus overrides. */
 function makeSession(over = {}) {
   return { ...newSessionSummary('/projects/p/s.jsonl'), filesEdited: 0, durationMin: 0, ...over };
+}
+
+/** Empty sessions so that a scenario with one interesting session still has enough sessions for the "unused" metrics. */
+function padding(n = MIN_SESSIONS_FOR_UNUSED - 1) {
+  return Array.from({ length: n }, () => makeSession());
 }
 
 function findNonFinite(value, trail = '$') {
@@ -284,7 +289,7 @@ describe('friction', () => {
   });
 
   it('counts hook runs and errors, and lists slow hooks', () => {
-    assert.equal(measure.friction.hookRuns, 3);
+    assert.equal(measure.friction.hookRuns, 8); // 3 Stop-hook runs + 5 tool-hook attachments
     assert.equal(measure.friction.hookErrors, 1);
     assert.equal(measure.friction.hookNonBlockingErrors, 2);
     assert.deepEqual(measure.friction.slowHooks, [{ hook: 'x.mjs', runs: 2, avgMs: 2000, maxMs: 2500 }]);
@@ -612,6 +617,32 @@ describe('suggestAllowRules', () => {
     assert.deepEqual(suggestAllowRules({ rm: 50, curl: 50, sudo: 50, 'git push': 50, 'git reset': 50, 'docker rm': 50, bash: 50, sh: 50 }), []);
   });
 
+  it('never suggests runners, interpreters or verbs whose prefix covers writes or deletes', () => {
+    const risky = [
+      'uv run', 'poetry run', 'make', 'npm run', 'npm test', 'npm exec', 'npx', 'node', 'node --test', 'python', 'python -m', 'python3 -m', 'pytest', 'cargo build', 'cargo test', 'go build', 'go test',
+      'docker compose', 'docker run', 'docker exec', 'find', 'echo', 'cat', 'rg', 'fd', 'sed', 'awk', 'tee', 'xargs', 'eval', 'env',
+      'git stash', 'git branch', 'git remote', 'git fetch', 'git checkout', 'git push', 'git reset', 'git clean', 'git config', 'git tag', 'git add',
+      'gh api', 'gh pr', 'gh issue', 'gh run', 'gh release', 'kubectl apply', 'kubectl delete', 'rm', 'mv', 'cp', 'curl', 'wget', 'ssh', 'sudo', 'bash', 'sh', 'powershell',
+    ];
+    const verbs = Object.fromEntries(risky.map((v) => [v, 50]));
+    assert.deepEqual(suggestAllowRules(verbs), []);
+    for (const v of risky) assert.ok(!SAFE_VERBS.has(v), `${v} must not be in SAFE_VERBS`);
+  });
+
+  it('only ever emits rules from the strict read-only allowlist', () => {
+    const rules = suggestAllowRules(Object.fromEntries([...SAFE_VERBS].map((v) => [v, 5]))).map((r) => r.rule);
+    assert.equal(rules.length, SAFE_VERBS.size);
+    for (const rule of rules) {
+      const verb = rule.replace(/^Bash\((.*):\*\)$/, '$1');
+      assert.ok(SAFE_VERBS.has(verb), rule);
+      assert.doesNotMatch(rule, /\b(run|exec|compose|build|install|rm|push|delete)\b/);
+    }
+  });
+
+  it('lists only verbs that commandVerb() can actually produce from a real command line', () => {
+    for (const v of SAFE_VERBS) assert.equal(commandVerb(`${v} some-arg`), v, `dead allowlist entry: ${v}`);
+  });
+
   it('sorts by count and honours minCount', () => {
     const rules = suggestAllowRules({ 'git diff': 4, 'git status': 9, ls: 6 }, { minCount: 4 });
     assert.deepEqual(rules.map((r) => r.count), [9, 6, 4]);
@@ -623,8 +654,19 @@ describe('unused MCP servers', () => {
   const withMcp = (mcp, user = ['github', 'dead-srv']) => {
     const i = structuredClone(inv);
     i.mcp = { user, project: [], local: [], disabledProject: [] };
-    return buildMeasure({ sessions: [makeSession({ mcp })], inventory: i, insights: null, env: ENV }).mcp;
+    return buildMeasure({ sessions: [makeSession({ mcp }), ...padding()], inventory: i, insights: null, env: ENV }).mcp;
   };
+
+  it('stays empty below the minimum number of sessions, so thin data never recommends removing every server', () => {
+    const i = structuredClone(inv);
+    i.mcp = { user: ['github', 'dead-srv'], project: [], local: [], disabledProject: [] };
+    for (const sessions of [[], [makeSession()], padding(MIN_SESSIONS_FOR_UNUSED - 1)]) {
+      const m = buildMeasure({ sessions, inventory: i, insights: null, env: ENV }).mcp;
+      assert.deepEqual(m.unused, []);
+      assert.equal(m.unusedCount, 0);
+      assert.equal(m.configuredCount, 2);
+    }
+  });
 
   it('lists configured servers without calls', () => {
     assert.deepEqual(withMcp({ github: { calls: 2, tools: { x: 2 } } }).unused, ['dead-srv']);
@@ -640,7 +682,18 @@ describe('unused MCP servers', () => {
 });
 
 describe('unused skills and plugins', () => {
-  const run = (session) => buildMeasure({ sessions: [makeSession(session)], inventory: inv, insights: null, env: ENV }).skills;
+  const run = (session) => buildMeasure({ sessions: [makeSession(session), ...padding()], inventory: inv, insights: null, env: ENV }).skills;
+
+  it('reports nothing as unused below the minimum number of sessions', () => {
+    for (const sessions of [[], padding(MIN_SESSIONS_FOR_UNUSED - 1)]) {
+      const skills = buildMeasure({ sessions, inventory: inv, insights: null, env: ENV }).skills;
+      assert.deepEqual(skills.unused, []);
+      assert.equal(skills.unusedCount, 0);
+      assert.equal(skills.unusedShare, 0);
+      assert.deepEqual(skills.unusedPlugins, []);
+      assert.equal(skills.installed, 4);
+    }
+  });
 
   it('counts a slash command with the skill name as use', () => {
     const skills = run({ slashCommands: { 'idle-skill': 2 } });

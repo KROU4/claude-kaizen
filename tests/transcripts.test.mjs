@@ -307,7 +307,8 @@ describe('summarizeTranscript: session A', () => {
   describe('hooks and attachments', () => {
     it('counts stop_hook_summary lines, hook runs and hook errors', () => {
       assert.equal(s.hooks.summaries, 2);
-      assert.equal(s.hooks.hookRuns, 3);
+      // 3 from the Stop summaries (2 + 1) plus 5 PreToolUse/PostToolUse runs that arrive as hook_* attachments
+      assert.equal(s.hooks.hookRuns, 8);
       assert.equal(s.hooks.errors, 1);
     });
 
@@ -320,7 +321,9 @@ describe('summarizeTranscript: session A', () => {
       assert.ok(!('Program' in s.hooks.durations));
       assert.ok(!Object.keys(s.hooks.durations).some((k) => /Program|Files|nodejs/.test(k)));
       assert.deepEqual(s.hooks.durations['x.mjs'], { n: 2, ms: 4000, max: 2500 });
-      assert.deepEqual(s.hooks.durations.prettier, { n: 1, ms: 300, max: 300 });
+      // 1 Stop run (300 ms) + 3 hook_success attachments (300 ms each) + 1 hook_non_blocking_error attachment (80 ms)
+      assert.deepEqual(s.hooks.durations.prettier, { n: 5, ms: 1280, max: 300 });
+      assert.deepEqual(s.hooks.durations['guard.mjs'], { n: 1, ms: 120, max: 120 });
     });
 
     it('counts non-blocking hook errors from attachments', () => {
@@ -565,6 +568,115 @@ describe('summarizeTranscript: edge cases on inline transcripts', () => {
     assert.deepEqual(s.mcp, { github: { calls: 1, tools: { get_issue: 1 } } });
     assert.equal(s.assistantMessages, 0);
     assert.equal(s.sidechainMessages, 2);
+  });
+
+  const asst = (id, blocks, extra = {}) => ({ type: 'assistant', uuid: `u-${id}`, requestId: `r-${id}`, message: { id: `m-${id}`, role: 'assistant', content: blocks }, timestamp: '2026-10-29T09:00:00.000Z', ...extra });
+  const toolUse = (id, name, input) => ({ type: 'tool_use', id, name, input });
+  const toolResult = (id, content, isError = true) => ({ type: 'tool_result', tool_use_id: id, is_error: isError, content });
+
+  it('does not count `!` shell turns (bash-input / bash-stdout / bash-stderr) as prompts, stems or samples', async () => {
+    const s = await summarizeLines([
+      userLine('<bash-input>git status</bash-input>', { uuid: 'u1' }),
+      userLine('<bash-stdout>On branch main\nnothing to commit, working tree clean</bash-stdout><bash-stderr></bash-stderr>', { uuid: 'u2' }),
+      userLine('<bash-input>git status</bash-input>', { uuid: 'u3' }),
+      userLine('<bash-stdout>On branch main\nnothing to commit, working tree clean</bash-stdout><bash-stderr></bash-stderr>', { uuid: 'u4' }),
+      userLine('please look at the failing build', { uuid: 'u5' }),
+    ]);
+    assert.equal(s.userMessages, 1);
+    assert.deepEqual(s.promptStems, { 'please look at the failing build': 1 });
+    assert.ok(!JSON.stringify(s.promptSamples).includes('nothing to commit'));
+    assert.ok(!JSON.stringify(s.langSample).includes('nothing to commit'));
+    assert.equal(s.promptLengths.length, 1);
+  });
+
+  it('humanText returns nothing for shell turns', () => {
+    assert.equal(humanText('<bash-input>git status</bash-input>'), '');
+    assert.equal(humanText('<bash-stdout>x y z</bash-stdout><bash-stderr>oops</bash-stderr>'), '');
+  });
+
+  it('counts a tool interrupted with Esc once as an interruption and not as a tool error', async () => {
+    const marker = '[Request interrupted by user for tool use]';
+    const s = await summarizeLines([
+      asst('1', [toolUse('t1', 'Bash', { command: 'sleep 600' })]),
+      userLine([toolResult('t1', marker)], { uuid: 'u1' }),
+      userLine([{ type: 'text', text: marker }], { uuid: 'u2' }),
+    ]);
+    assert.equal(s.interruptions, 1);
+    assert.deepEqual(s.toolErrors, {});
+    assert.deepEqual(s.errorClasses, {});
+  });
+
+  it('counts an interruption reported only by the tool_result, and a later plain interrupt separately', async () => {
+    const marker = '[Request interrupted by user for tool use]';
+    const s = await summarizeLines([
+      asst('1', [toolUse('t1', 'Bash', { command: 'sleep 600' })]),
+      userLine([toolResult('t1', marker)], { uuid: 'u1' }),
+      asst('2', [{ type: 'text', text: 'ok' }]),
+      userLine([{ type: 'text', text: '[Request interrupted by user]' }], { uuid: 'u2' }),
+    ]);
+    assert.equal(s.interruptions, 2);
+    assert.deepEqual(s.toolErrors, {});
+  });
+
+  it('still counts a real tool failure next to an interruption', async () => {
+    const s = await summarizeLines([
+      asst('1', [toolUse('t1', 'Bash', { command: 'false' }), toolUse('t2', 'Bash', { command: 'sleep 600' })]),
+      userLine([toolResult('t1', 'Exit code 1'), toolResult('t2', '[Request interrupted by user for tool use]')], { uuid: 'u1' }),
+    ]);
+    assert.deepEqual(s.toolErrors, { Bash: 1 });
+    assert.equal(s.interruptions, 1);
+  });
+
+  it('classifies test failures from pytest, mocha, node:test, dotnet and jest output', async () => {
+    const outputs = [
+      'FAILED tests/test_x.py::test_a - assert 1 == 2\n=== 1 failed, 2 passed in 0.12s ===\nExit code 1',
+      '  1 passing (5ms)\n  1 failing\n\n  1) suite\n       AssertionError: expected 1 to equal 2\nExit code 1',
+      '✖ failing tests:\n# fail 1\nExit code 1',
+      '  Failed MyTests.Adds [5 ms]\nFailed!  - Failed:     1, Passed:     2\nExit code 1',
+      'Tests: 1 failed, 2 passed, 3 total\nExit code 1',
+      '--- FAIL: TestAdd (0.00s)\nFAIL\nexit status 1',
+    ];
+    const lines = [];
+    outputs.forEach((out, i) => {
+      lines.push(asst(`a${i}`, [toolUse(`t${i}`, 'Bash', { command: 'run tests' })]));
+      lines.push(userLine([toolResult(`t${i}`, out)], { uuid: `ru${i}` }));
+    });
+    const s = await summarizeLines(lines);
+    assert.deepEqual(s.errorClasses, { 'test-failure': outputs.length });
+    assert.equal(s.testFailures, outputs.length);
+  });
+
+  it('does not mistake unrelated failures for test failures', async () => {
+    const outputs = ['fetch failed: ECONNREFUSED', 'fatal: unable to access repo\nExit code 128', 'Build failed\nExit code 1'];
+    const lines = [];
+    outputs.forEach((out, i) => {
+      lines.push(asst(`a${i}`, [toolUse(`t${i}`, 'Bash', { command: 'x' })]));
+      lines.push(userLine([toolResult(`t${i}`, out)], { uuid: `ru${i}` }));
+    });
+    const s = await summarizeLines(lines);
+    assert.equal(s.testFailures, 0);
+  });
+
+  it('keeps subagent edits out of filesEdited and extensions, like subagent test runs', async () => {
+    const s = await summarizeLines([
+      asst('1', [toolUse('e1', 'Edit', { file_path: '/w/src/a.ts', old_string: 'a', new_string: 'b' }), toolUse('b1', 'Bash', { command: 'npm test' })], { isSidechain: true }),
+      asst('2', [toolUse('e2', 'Write', { file_path: '/w/src/main.py', content: 'x' })]),
+    ]);
+    assert.equal(s.filesEdited, 1);
+    assert.deepEqual(s.extensions, { '.py': 1 });
+    assert.equal(s.testCommands, 0);
+  });
+
+  it('records hook runs and durations from hook_* attachments', async () => {
+    const att = (type, extra) => ({ type: 'attachment', uuid: `h-${Math.random()}`, attachment: { type, command: 'node "/x/format.mjs"', ...extra } });
+    const s = await summarizeLines([
+      att('hook_success', { durationMs: 4000 }),
+      att('hook_success', { durationMs: 2000 }),
+      att('hook_non_blocking_error', { durationMs: 100, hookEvent: 'PostToolUse' }),
+      { type: 'attachment', uuid: 'h-none', attachment: { type: 'hook_success' } },
+    ]);
+    assert.equal(s.hooks.hookRuns, 3);
+    assert.deepEqual(s.hooks.durations['format.mjs'], { n: 3, ms: 6100, max: 4000 });
   });
 
   it('treats a user line with a <command-args> body as one user message but not as a free-form prompt', async () => {

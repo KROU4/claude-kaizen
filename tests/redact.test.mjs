@@ -70,6 +70,22 @@ describe('redact: key = value assignments', () => {
     assert.equal(redact('curl --header token=abcdef123456 https://api.example.test/v1'), 'curl --header token=[REDACTED:secret] https://api.example.test/v1');
   });
 
+  it('redacts prefixed env-style names (PGPASSWORD=, DB_PASSWORD=, MY_SECRET=, GITHUB_TOKEN=)', () => {
+    assert.equal(redact('PGPASSWORD=hunter2hunter2 psql -h db'), 'PGPASSWORD=[REDACTED:secret] psql -h db');
+    assert.equal(redact('DB_PASSWORD=hunter2hunter2 npm run migrate'), 'DB_PASSWORD=[REDACTED:secret] npm run migrate');
+    assert.equal(redact('export MY_SECRET=abcdefgh12 && ./run.sh'), 'export MY_SECRET=[REDACTED:secret] && ./run.sh');
+    assert.equal(redact('SMTP_PASSWORD="hunter2hunter2" node send.mjs'), 'SMTP_PASSWORD="[REDACTED:secret]" node send.mjs');
+    assert.equal(redact('GITHUB_TOKEN=abcdef123456 gh pr list'), 'GITHUB_TOKEN=[REDACTED:secret] gh pr list');
+    assert.equal(redact('--db-password=hunter2hunter2'), '--db-password=[REDACTED:secret]');
+  });
+
+  it('stays linear on long kebab-case text with no assignment', () => {
+    const long = Array.from({ length: 4000 }, () => 'word').join('-');
+    const t0 = Date.now();
+    assert.equal(redact(long), long);
+    assert.ok(Date.now() - t0 < 1000);
+  });
+
   it('redacts several secrets in one string', () => {
     const text = `a ghp_${rep('Q1', 18)} b password=hunter22hunter c ${`AKIA${rep('ZZ99', 4)}`}`;
     assert.equal(redact(text), 'a [REDACTED:github-token] b password=[REDACTED:secret] c [REDACTED:aws-key]');

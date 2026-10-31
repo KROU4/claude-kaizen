@@ -12,7 +12,7 @@ import { readJsonl } from './jsonl.mjs';
 import { redact, snippet } from './redact.mjs';
 import { ensureDir, readJsonSafe, writeJsonAtomic } from './paths.mjs';
 
-export const SUMMARY_VERSION = 12;
+export const SUMMARY_VERSION = 13;
 
 const INTERRUPT_RE = /\[Request interrupted by user/;
 const COMPACT_RE = /^This session is being continued from a previous conversation/;
@@ -33,6 +33,10 @@ const MACHINE_TAGS = [
   'user-memory-input',
   'pr-link',
   'antml:function_results',
+  // `!cmd` shell turns: the command and its output are not prompts
+  'bash-input',
+  'bash-stdout',
+  'bash-stderr',
 ];
 const MACHINE_BLOCK_RE = new RegExp(`<(${MACHINE_TAGS.join('|')})(?:\\s[^>]*)?>[\\s\\S]*?<\\/\\1>`, 'g');
 const MACHINE_PREFIX_RE = /^\s*(\[SYSTEM NOTIFICATION|\[Request interrupted|<task-notification|<system-reminder)/;
@@ -63,7 +67,9 @@ const ERROR_CLASSES = [
   ['timeout', /timed out|timeout|etimedout|exceeded.*time limit/i],
   ['missing-dependency', /modulenotfounderror|cannot find module|importerror|no module named|could not resolve|package .* not found|not installed/i],
   ['syntax', /syntaxerror|parse error|unexpected token|invalid syntax|unexpected end of/i],
-  ['test-failure', /\bfailed\b.*\b(test|tests|spec|assert)|\b(test|tests)\b.*\bfailed\b|assertionerror|✕|✗|\bFAIL\b/],
+  // Runners differ in case and wording: jest "Tests: 1 failed", pytest "FAILED tests/x.py::t" / "1 failed", mocha "1 failing",
+  // node:test "✖" / "fail 1", dotnet "Failed MyTest [5 ms]" / "Failed: 1".
+  ['test-failure', /\bfailed\b.*\b(test|tests|spec|assert)|\b(test|tests)\b.*\bfailed\b|assertionerror|✕|✗|✖|\b[1-9]\d* (?:failed|failing|failures?)\b|\bfail [1-9]|\bfailed:\s*[1-9]|^\s*failed\s+\S+::|^\s*failed\s+\S+\s+\[\d+\s*m?s\]|^\s*(?:---\s*)?FAIL\b/im],
   ['type-check', /type error|typeerror|error ts\d+|mypy|incompatible types/i],
   ['lint', /eslint|ruff|flake8|pylint|prettier|stylelint|clippy|golangci/i],
   ['network', /econnrefused|enotfound|econnreset|network error|fetch failed|getaddrinfo|ssl|certificate/i],
@@ -139,7 +145,7 @@ export function normalizeCommand(cmd) {
     .slice(0, 200);
 }
 
-function commandVerb(cmd) {
+export function commandVerb(cmd) {
   // Skip leading "cd x &&" chains and env assignments, then take up to two tokens
   let c = String(cmd).trim();
   c = c.replace(/^(?:cd\s+[^&;|]+(?:&&|;)\s*)+/, '');
@@ -255,6 +261,7 @@ export async function summarizeTranscript(file) {
   const seenRequests = new Set(); // one assistant API response spans several lines (text, tool_use, thinking)
   let lastAssistantTs = null;
   let lastUserTs = null;
+  let interruptSeen = false; // a tool_result already reported this Esc; its companion text line must not count twice
 
   for await (const o of readJsonl(file)) {
     const type = o.type;
@@ -298,6 +305,17 @@ export async function summarizeTranscript(file) {
     if (type === 'attachment') {
       const a = o.attachment || {};
       inc(s.attachments, a.type || 'unknown');
+      // PreToolUse / PostToolUse / SessionStart / UserPromptSubmit runs arrive as hook_* attachments with their own
+      // command and duration (Stop hooks come through the stop_hook_summary system line above).
+      if (typeof a.type === 'string' && a.type.startsWith('hook_') && typeof a.command === 'string') {
+        s.hooks.hookRuns++;
+        const d = (s.hooks.durations[hookKey(a.command)] ||= { n: 0, ms: 0, max: 0 });
+        d.n++;
+        if (typeof a.durationMs === 'number') {
+          d.ms += a.durationMs;
+          if (a.durationMs > d.max) d.max = a.durationMs;
+        }
+      }
       if (a.type === 'hook_non_blocking_error' || a.type === 'hook_blocking_error' || a.type === 'hook_error') {
         s.hooks.nonBlockingErrors++;
         if (typeof a.command === 'string') inc(s.hooks.errorsByCommand, `${a.hookEvent || a.hookName || '?'}|${a.command.slice(0, 300)}`);
@@ -330,6 +348,7 @@ export async function summarizeTranscript(file) {
     if (sidechain) s.sidechainMessages++;
 
     if (type === 'assistant') {
+      interruptSeen = false;
       const m = o.message || {};
       const reqKey = o.requestId || (m && m.id) || null;
       const firstOfRequest = !reqKey || !seenRequests.has(reqKey);
@@ -392,7 +411,8 @@ export async function summarizeTranscript(file) {
           srv.calls++;
           inc(srv.tools, tool);
         }
-        if (/^(Edit|Write|MultiEdit|NotebookEdit)$/.test(name) && typeof (input.file_path || input.notebook_path) === 'string') {
+        // Main-session activity only, like the Bash counters above: edits and test runs must cover the same population.
+        if (!sidechain && /^(Edit|Write|MultiEdit|NotebookEdit)$/.test(name) && typeof (input.file_path || input.notebook_path) === 'string') {
           const fp = input.file_path || input.notebook_path;
           s.filesEdited.add(fp);
           const ext = path.extname(fp).toLowerCase() || '(none)';
@@ -434,9 +454,17 @@ export async function summarizeTranscript(file) {
           }
         }
         if (r.is_error === true && (!pend || !pend.sidechain)) {
+          const text = typeof r.content === 'string' ? r.content : textOf(r.content);
+          if (INTERRUPT_RE.test(text)) {
+            // Esc during a tool call is an interruption, not a tool failure
+            if (!interruptSeen) {
+              s.interruptions++;
+              interruptSeen = true;
+            }
+            continue;
+          }
           const name = pend ? pend.name : 'unknown';
           inc(s.toolErrors, name);
-          const text = typeof r.content === 'string' ? r.content : textOf(r.content);
           const cls = classifyError(text, pend ? pend.isBash : false);
           inc(s.errorClasses, cls);
           if (cls === 'user-rejected') s.userRejections++;
@@ -453,7 +481,8 @@ export async function summarizeTranscript(file) {
     const raw = textOf(content);
     if (!raw) continue;
     if (INTERRUPT_RE.test(raw)) {
-      s.interruptions++;
+      if (!interruptSeen) s.interruptions++;
+      interruptSeen = false;
       continue;
     }
     if (o.isCompactSummary === true || COMPACT_RE.test(raw)) {
