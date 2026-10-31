@@ -7,6 +7,7 @@ import { after, afterEach, before, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { inventory } from '../scripts/lib/inventory.mjs';
 import { loadCatalog, recommend } from '../scripts/lib/recipes.mjs';
 import { KIT_ROOT, buildFixtureMeasure, captureOutput, cleanupTempDirs, makeTempDir, materializeHome, prefixOf, readJson, setEnv, snapshotDir, t, toPosix, writeJson, writeText } from './helpers.mjs';
 
@@ -30,7 +31,8 @@ before(async () => {
 
 beforeEach(() => {
   ctx = materializeHome();
-  restoreEnv = setEnv({ ...ctx.env, CLAUDE_PROJECT_DIR: undefined });
+  // the organisation's managed settings are read (never written) by plugins.disable: keep them away from the real system folder
+  restoreEnv = setEnv({ ...ctx.env, CLAUDE_PROJECT_DIR: undefined, KAIZEN_MANAGED_SETTINGS_DIR: path.join(ctx.root, 'managed') });
   // cmdApply falls back to the working directory as "the project": keep it away from the real repository
   process.chdir(ctx.root);
 });
@@ -2378,5 +2380,578 @@ describe('cmdUndo: the backups the partial-undo message talks about', () => {
     });
     assert.ok(saved.some((s) => s.cleanupPeriodDays === 11), 'the state before the partial undo is kept');
     assert.ok(saved.some((s) => s.cleanupPeriodDays === 22), 'the state before the --force run is kept too');
+  });
+});
+
+// ------------------------------------------------------------------ claims for every action type, per-project scripts, dry runs
+
+describe('claims: a batch that relies on what an earlier batch provides', () => {
+  const at = (n, flags) => withFrozenDate(`2026-10-30T13:00:0${n}.000Z`, () => runApply(flags));
+  const batch = (n) => `2026-10-30T13-00-0${n}`;
+  const actions = (n) => readManifest(batch(n)).recipes.flatMap((r) => r.actions);
+  const hooksDir = () => path.join(ctx.stateDir, 'hooks');
+  const hookFiles = () => (fs.existsSync(hooksDir()) ? fs.readdirSync(hooksDir()) : []);
+  const extraFile = () => path.join(ctx.root, 'extra.json');
+  const customRecipe = (id, recipeActions) => ({ id, category: 'settings', impact: 'low', title: { en: id, ru: id }, why: { en: 'w', ru: 'п' }, evidence: { en: 'e', ru: 'д' }, when: true, actions: recipeActions });
+  const addRecipes = (...recipes) => writeJson(extraFile(), { recipes });
+  const applyCustom = (n, ids, extra = {}) => at(n, { recipe: ids, add: extraFile(), ...extra });
+  const settingsBefore = () => readJson(path.join(ctx.root, 'pristine-settings.json'));
+  let pristineClaudeMd;
+
+  beforeEach(() => {
+    writeJson(path.join(ctx.root, 'pristine-settings.json'), readSettings());
+    pristineClaudeMd = read(path.join(ctx.configDir, 'CLAUDE.md'));
+  });
+
+  describe('file: the identical and the kept-for-another-recipe skips', () => {
+    const scriptFile = () => path.join(hooksDir(), 'session-context.mjs');
+
+    it('a repeat of precompact-handoff with other parameters relies on session-context.mjs, so undoing the older batches keeps it', async () => {
+      await at(1, { recipe: 'hooks.session-context' });
+      await at(2, { recipe: 'hooks.precompact-handoff' });
+      await at(3, { recipe: 'hooks.precompact-handoff', param: ['hooks.precompact-handoff.maxPrompts=7'] });
+      assert.ok(actions(3).some((a) => a.type === 'file' && /session-context\.mjs$/.test(a.file) && a.shared === true), 'the third batch records that it relies on the script');
+      await runUndo({}, [batch(2)]);
+      const last = await runUndo({}, [batch(1)]);
+      assert.ok(fs.existsSync(scriptFile()), `the script is still run by the SessionStart hook of the third batch\n${last.stdout}`);
+      assert.ok(!last.stdout.includes('--force'), last.stdout);
+      const groups = readSettings().hooks.SessionStart.filter((g) => g.hooks.some((h) => h.command.includes('session-context.mjs')));
+      assert.equal(groups.length, 1, 'the hook is still wired');
+      await runUndo({}, [batch(3)]);
+      assert.deepEqual(readSettings(), settingsBefore());
+      assert.deepEqual(hookFiles(), []);
+    });
+
+    it('the same script applied at user and at project scope: undoing the user batch leaves the project hook a script to run', async () => {
+      const proj = path.join(ctx.root, 'proj');
+      fs.mkdirSync(proj);
+      const projSettings = path.join(proj, '.claude', 'settings.json');
+      await at(1, { recipe: 'hooks.long-command-nudge', scope: 'user' });
+      await at(2, { recipe: 'hooks.long-command-nudge', scope: 'project', project: proj });
+      const script = path.join(hooksDir(), 'long-command-nudge.mjs');
+      assert.ok(actions(2).some((a) => a.type === 'file' && samePath(a.file, script) && a.shared === true), 'the project batch relies on the script');
+      await runUndo({}, [batch(1)]);
+      assert.ok(fs.existsSync(script), 'the project hook still points at it');
+      assert.ok(readJson(projSettings).hooks.PreToolUse[0].hooks[0].command.includes('long-command-nudge.mjs'));
+      await runUndo({}, [batch(2)]);
+      assert.ok(!fs.existsSync(script), 'the last user of the script took it away');
+      assert.equal(readJson(projSettings).hooks, undefined);
+      assert.deepEqual(readSettings(), settingsBefore());
+    });
+
+    it('a dry run of undo --all reports the same as the real run for a script kept by a claim', async () => {
+      await at(1, { recipe: 'hooks.session-context' });
+      await at(2, { recipe: 'hooks.precompact-handoff' });
+      await at(3, { recipe: 'hooks.precompact-handoff', param: ['hooks.precompact-handoff.maxPrompts=7'] });
+      const dry = await runUndo({ all: true, 'dry-run': true });
+      const real = await runUndo({ all: true });
+      assert.equal(normalizeUndoOutput(dry.stdout), normalizeUndoOutput(real.stdout));
+      assert.deepEqual(hookFiles(), []);
+    });
+  });
+
+  describe('settings.set: the status line', () => {
+    const statusline = () => path.join(ctx.stateDir, 'statusline.mjs');
+
+    it('re-applying statusline.install with other parameters records a claim on statusLine', async () => {
+      await at(1, { recipe: 'statusline.install' });
+      await at(2, { recipe: 'statusline.install', param: ['statusline.install.showCost=false'] });
+      const claim = actions(2).find((a) => a.type === 'settings.set');
+      assert.ok(claim && claim.shared === true && claim.path === 'statusLine', JSON.stringify(actions(2)));
+    });
+
+    it('undoing the older batch keeps both the status line and its script; the newer batch then removes both', async () => {
+      await at(1, { recipe: 'statusline.install' });
+      const first = read(statusline());
+      await at(2, { recipe: 'statusline.install', param: ['statusline.install.showCost=false'] });
+      const second = read(statusline());
+      assert.notEqual(first, second);
+      await runUndo({}, [batch(1)]);
+      assert.equal(readSettings().statusLine.type, 'command', 'the status line of the second batch is still configured');
+      assert.equal(read(statusline()), second);
+      await runUndo({}, [batch(2)]);
+      assert.equal(readSettings().statusLine, undefined);
+      assert.ok(!fs.existsSync(statusline()));
+      assert.deepEqual(readSettings(), settingsBefore());
+    });
+
+    it('three applies undone in every order end in the pristine state, and the status line stays until the last one goes', async () => {
+      const orders = [[1, 2, 3], [3, 2, 1], [2, 1, 3], [2, 3, 1], [1, 3, 2], [3, 1, 2]];
+      for (const order of orders) {
+        fs.rmSync(appliedDir(), { recursive: true, force: true });
+        await at(1, { recipe: 'statusline.install' });
+        await at(2, { recipe: 'statusline.install', param: ['statusline.install.showCost=false'] });
+        await at(3, { recipe: 'statusline.install', param: ['statusline.install.showGit=false'] });
+        for (const n of order) {
+          const { stdout } = await runUndo({}, [batch(n)]);
+          assert.ok(!stdout.includes('--force'), `${order.join(',')}: ${stdout}`);
+          if (n !== order[2]) {
+            assert.ok(readSettings().statusLine, `${order.join(',')}: the status line is still configured after undoing ${n}`);
+            assert.ok(fs.existsSync(statusline()), `${order.join(',')}: and so is its script`);
+          }
+        }
+        assert.deepEqual(readSettings(), settingsBefore(), order.join(','));
+        assert.ok(!fs.existsSync(statusline()));
+      }
+    });
+
+    it('two batches that set different values hand the original over: undo in either order', async () => {
+      addRecipes(customRecipe('custom.v14', [{ type: 'settings.set', path: 'cleanupPeriodDays', value: 14 }]), customRecipe('custom.v21', [{ type: 'settings.set', path: 'cleanupPeriodDays', value: 21 }]));
+      await applyCustom(1, 'custom.v14');
+      await applyCustom(2, 'custom.v21');
+      const older = await runUndo({}, [batch(1)]);
+      assert.equal(readSettings().cleanupPeriodDays, 21, 'the newer value is not touched');
+      assert.ok(!/kept:|changed since apply/.test(older.stdout), older.stdout);
+      await runUndo({}, [batch(2)]);
+      assert.deepEqual(readSettings(), settingsBefore(), 'the original (no value) is back, not the value of the undone batch');
+      await applyCustom(3, 'custom.v14');
+      await applyCustom(4, 'custom.v21');
+      await runUndo({}, [batch(4)]);
+      assert.equal(readSettings().cleanupPeriodDays, 14);
+      await runUndo({}, [batch(3)]);
+      assert.deepEqual(readSettings(), settingsBefore());
+    });
+
+    it('a value another recipe set is relied on by an equal setting of a later recipe, and survives the first one\'s undo', async () => {
+      addRecipes(
+        customRecipe('custom.first', [{ type: 'settings.set', path: 'cleanupPeriodDays', value: 14 }]),
+        customRecipe('custom.second', [{ type: 'settings.set', path: 'cleanupPeriodDays', value: 14 }, { type: 'settings.append', path: 'permissions.deny', values: ['Read(./secret)'] }]),
+      );
+      await applyCustom(1, 'custom.first');
+      const both = await applyCustom(2, 'custom.second');
+      assert.match(both.stdout, /cleanupPeriodDays in .*settings\.json is already set by custom\.first; shared/);
+      assert.ok(actions(2).some((a) => a.type === 'settings.set' && a.shared), 'the claim rides along with the recipe\'s other change');
+      await runUndo({}, [batch(1)]);
+      assert.equal(readSettings().cleanupPeriodDays, 14);
+      await runUndo({}, [batch(2)]);
+      assert.deepEqual(readSettings(), settingsBefore());
+    });
+  });
+
+  describe('settings.append: permission rules', () => {
+    const rules = () => (readSettings().permissions || {}).deny || [];
+    const both = () => [
+      customRecipe('custom.denyA', [{ type: 'settings.append', path: 'permissions.deny', values: ['Read(./a)', 'Read(./b)'] }]),
+      customRecipe('custom.denyB', [{ type: 'settings.append', path: 'permissions.deny', values: ['Read(./b)', 'Read(./c)'] }]),
+    ];
+
+    it('a value another batch added is claimed, and undoing either batch first leaves it in place until the last claimant goes', async () => {
+      addRecipes(...both());
+      for (const [first, second] of [[1, 2], [2, 1]]) {
+        fs.rmSync(appliedDir(), { recursive: true, force: true });
+        await applyCustom(1, 'custom.denyA');
+        await applyCustom(2, 'custom.denyB');
+        const entry = actions(2)[0];
+        assert.deepEqual(entry.added, ['Read(./c)']);
+        assert.deepEqual(entry.claimed, ['Read(./b)']);
+        await runUndo({}, [batch(first)]);
+        assert.ok(rules().includes('Read(./b)'), `Read(./b) is still wanted by the other batch (undo ${first} first)`);
+        await runUndo({}, [batch(second)]);
+        assert.deepEqual(readSettings(), settingsBefore(), `undo ${first} then ${second}`);
+      }
+    });
+
+    it('a batch that only repeats rules records a claim that rides along, and a dry undo --all agrees with the real one', async () => {
+      addRecipes(
+        customRecipe('custom.denyA', [{ type: 'settings.append', path: 'permissions.deny', values: ['Read(./a)'] }]),
+        customRecipe('custom.denyA2', [{ type: 'settings.append', path: 'permissions.deny', values: ['Read(./a)'] }, { type: 'settings.set', path: 'cleanupPeriodDays', value: 5 }]),
+      );
+      await applyCustom(1, 'custom.denyA');
+      await applyCustom(2, 'custom.denyA2');
+      assert.ok(actions(2).some((a) => a.type === 'settings.append' && a.added.length === 0 && a.claimed.includes('Read(./a)')), JSON.stringify(actions(2)));
+      await runUndo({}, [batch(1)]);
+      assert.deepEqual(rules(), ['Read(./a)']);
+      await applyCustom(3, 'custom.denyA');
+      const dry = await runUndo({ all: true, 'dry-run': true });
+      const real = await runUndo({ all: true });
+      assert.equal(normalizeUndoOutput(dry.stdout), normalizeUndoOutput(real.stdout));
+      assert.deepEqual(readSettings(), settingsBefore());
+    });
+  });
+
+  describe('claude-md.block', () => {
+    const claudeMd = () => path.join(ctx.configDir, 'CLAUDE.md');
+
+    it('a block rewritten by a later batch: undoing the older batch first is not "modified since apply", and the original comes back at the end', async () => {
+      await at(1, { recipe: 'claude-md.corrections', param: ['claude-md.corrections.rules=- rule one'] });
+      await at(2, { recipe: 'claude-md.corrections', param: ['claude-md.corrections.rules=- rule two'] });
+      const first = await runUndo({}, [batch(1)]);
+      assert.ok(!/kept:|modified since apply/.test(first.stdout), first.stdout);
+      assert.ok(read(claudeMd()).includes('- rule two'), 'the block of the newer batch stays');
+      assert.equal(readManifest(batch(1)).undone, true);
+      await runUndo({}, [batch(2)]);
+      assert.equal(read(claudeMd()), pristineClaudeMd);
+    });
+
+    it('undo --all --dry-run does not call a block the user edited when an earlier batch of the same run rewrote it', async () => {
+      await at(1, { recipe: 'claude-md.corrections', param: ['claude-md.corrections.rules=- rule one'] });
+      await at(2, { recipe: 'claude-md.corrections', param: ['claude-md.corrections.rules=- rule two'] });
+      const before = snapshotDir(ctx.root);
+      const dry = await runUndo({ all: true, 'dry-run': true });
+      assert.deepEqual(snapshotDir(ctx.root), before, 'a dry run changes nothing');
+      assert.ok(!/kept|modified since apply|--force/.test(dry.stdout), dry.stdout);
+      assert.ok(dry.stdout.includes(prefixOf('cli.undo_dry', { n: 1 })), dry.stdout);
+      const real = await runUndo({ all: true });
+      assert.equal(normalizeUndoOutput(dry.stdout), normalizeUndoOutput(real.stdout));
+      assert.equal(read(claudeMd()), pristineClaudeMd);
+    });
+
+    it('an identical block written again by another recipe is relied on: it stays when the first recipe is undone', async () => {
+      addRecipes(
+        customRecipe('custom.rule1', [{ type: 'claude-md.block', id: 'shared-rule', content: 'Always say hello.' }]),
+        customRecipe('custom.rule2', [{ type: 'claude-md.block', id: 'shared-rule', content: 'Always say hello.' }, { type: 'settings.set', path: 'cleanupPeriodDays', value: 5 }]),
+      );
+      await applyCustom(1, 'custom.rule1');
+      await applyCustom(2, 'custom.rule2');
+      assert.ok(actions(2).some((a) => a.type === 'claude-md.block' && a.shared === true));
+      await runUndo({}, [batch(1)]);
+      assert.ok(read(claudeMd()).includes('Always say hello.'));
+      await runUndo({}, [batch(2)]);
+      assert.equal(read(claudeMd()), pristineClaudeMd);
+      assert.deepEqual(readSettings(), settingsBefore());
+    });
+  });
+
+  describe('mcp.disable and settings.hook.remove', () => {
+    const recipes = () => [
+      customRecipe('custom.rmA', [{ type: 'mcp.disable', servers: ['dead-srv'] }, { type: 'settings.hook.remove', commands: ['npx prettier --write'] }]),
+      customRecipe('custom.rmB', [{ type: 'mcp.disable', servers: ['dead-srv'] }, { type: 'settings.hook.remove', commands: ['npx prettier --write'] }, { type: 'settings.set', path: 'cleanupPeriodDays', value: 5 }]),
+    ];
+
+    it('what another batch removed and this one asked for as well stays out until the last of them is undone, in either order', async () => {
+      const globalBefore = readJson(ctx.claudeJson);
+      addRecipes(...recipes());
+      for (const [first, second] of [[1, 2], [2, 1]]) {
+        fs.rmSync(appliedDir(), { recursive: true, force: true });
+        await applyCustom(1, 'custom.rmA');
+        await applyCustom(2, 'custom.rmB');
+        assert.deepEqual(actions(2).find((a) => a.type === 'mcp.disable').claimed, [{ name: 'dead-srv' }]);
+        assert.equal(actions(2).find((a) => a.type === 'settings.hook.remove').claimed[0].command, 'npx prettier --write');
+        const early = await runUndo({}, [batch(first)]);
+        assert.ok(!/kept|error|--force/.test(early.stdout), early.stdout);
+        assert.ok(!readJson(ctx.claudeJson).mcpServers['dead-srv'], `dead-srv stays removed after undoing ${first} first`);
+        assert.equal((readSettings().hooks || {}).PostToolUse, undefined, 'the prettier hook stays removed');
+        await runUndo({}, [batch(second)]);
+        assert.deepEqual(readJson(ctx.claudeJson), globalBefore, `undo ${first} then ${second}`);
+        assert.deepEqual(readSettings(), settingsBefore());
+      }
+    });
+
+    it('undo --all --dry-run agrees with undo --all', async () => {
+      addRecipes(...recipes());
+      await applyCustom(1, 'custom.rmA');
+      await applyCustom(2, 'custom.rmB');
+      const dry = await runUndo({ all: true, 'dry-run': true });
+      const real = await runUndo({ all: true });
+      assert.equal(normalizeUndoOutput(dry.stdout), normalizeUndoOutput(real.stdout));
+    });
+  });
+
+  describe('plugins.disable', () => {
+    const proj = () => path.join(ctx.root, 'proj');
+    const projSettings = () => path.join(proj(), '.claude', 'settings.json');
+    const localSettings = () => path.join(proj(), '.claude', 'settings.local.json');
+    const installX = (scope = 'project') => {
+      const installPath = path.join(ctx.configDir, 'plugins', 'cache', 'x');
+      writeText(path.join(installPath, 'skills', 's1', 'SKILL.md'), '---\nname: s1\ndescription: d\n---\n');
+      const file = path.join(ctx.configDir, 'plugins', 'installed_plugins.json');
+      const installed = readJson(file);
+      installed.plugins['x@m'] = [{ scope, projectPath: proj(), installPath, version: '1' }];
+      writeJson(file, installed);
+    };
+    const xEnabled = () => inventory({ projectDir: proj() }).plugins.installed.find((p) => p.name === 'x').enabled;
+    const disable = (plugins, o = {}) => run('plugins.disable', { type: 'plugins.disable', plugins }, { projectDir: proj(), ...o });
+
+    it('a plugin enabled in the project settings is switched off where it wins: in settings.local.json, and the repository file is not touched', () => {
+      installX();
+      writeJson(projSettings(), { enabledPlugins: { 'x@m': true } });
+      const projBytes = read(projSettings());
+      const userBytes = read(ctx.settingsFile);
+      assert.equal(xEnabled(), true);
+      const { entry } = disable(['x@m']);
+      assert.equal(entry.file, localSettings());
+      assert.deepEqual(readJson(localSettings()), { enabledPlugins: { 'x@m': false } });
+      assert.equal(read(projSettings()), projBytes);
+      assert.equal(read(ctx.settingsFile), userBytes);
+      assert.equal(xEnabled(), false, 'Claude Code (and the inventory) now see the plugin as disabled');
+      assert.equal(entry.changed[0].created, true);
+    });
+
+    it('undo puts the local file back as it was, and removes it when apply created it', async () => {
+      installX();
+      writeJson(projSettings(), { enabledPlugins: { 'x@m': true } });
+      const { entry } = disable(['x@m']);
+      assert.equal(undoEntry(entry).result, 'ok');
+      assert.ok(!fs.existsSync(localSettings()), 'the file apply created is gone');
+      assert.equal(xEnabled(), true);
+    });
+
+    it('a plugin enabled in settings.local.json is switched off there; one enabled only in the user settings, in the user settings', () => {
+      installX('local');
+      writeJson(localSettings(), { enabledPlugins: { 'x@m': true }, model: 'sonnet' });
+      const { entry } = disable(['x@m', 'idle@fixture-market']);
+      assert.deepEqual(readJson(localSettings()), { enabledPlugins: { 'x@m': false }, model: 'sonnet' });
+      assert.equal(readSettings().enabledPlugins['idle@fixture-market'], false);
+      assert.equal(entry.file, localSettings());
+      assert.deepEqual(entry.changed.map((c) => [c.plugin, c.file || null]), [['x@m', null], ['idle@fixture-market', ctx.settingsFile]]);
+      assert.equal(undoEntry(entry).result, 'ok');
+      assert.deepEqual(readJson(localSettings()), { enabledPlugins: { 'x@m': true }, model: 'sonnet' });
+      assert.equal(readSettings().enabledPlugins['idle@fixture-market'], true);
+    });
+
+    it('a plugin the project settings disable although the user settings enable it is already off: nothing is written', () => {
+      installX();
+      writeJson(projSettings(), { enabledPlugins: { 'x@m': false } });
+      writeSettings({ ...readSettings(), enabledPlugins: { ...readSettings().enabledPlugins, 'x@m': true } });
+      const userBytes = read(ctx.settingsFile);
+      const { entry } = disable(['x@m']);
+      assert.equal(entry.skipped, true);
+      assert.equal(entry.reason, 'already disabled');
+      assert.equal(read(ctx.settingsFile), userBytes);
+      assert.ok(!fs.existsSync(localSettings()));
+    });
+
+    it('a plugin the organisation enables in its managed settings cannot be disabled: it is reported, nothing is written', () => {
+      installX();
+      writeJson(path.join(ctx.root, 'managed', 'managed-settings.json'), { enabledPlugins: { 'x@m': true } });
+      const userBytes = read(ctx.settingsFile);
+      const { entry, io } = disable(['x@m']);
+      assert.equal(entry.skipped, true);
+      assert.match(entry.reason, /none could be disabled/);
+      assert.match(io.notes.join('\n'), /managed settings of your organisation.*x@m/);
+      assert.equal(read(ctx.settingsFile), userBytes);
+      assert.ok(!fs.existsSync(localSettings()));
+      // the part that can be done still is
+      const mixed = disable(['x@m', 'idle@fixture-market']);
+      assert.deepEqual(mixed.entry.changed.map((c) => c.plugin), ['idle@fixture-market']);
+      assert.match(mixed.io.notes.join('\n'), /x@m/);
+    });
+
+    it('apply --dry-run through cmdApply names the file it would change', async () => {
+      installX();
+      writeJson(projSettings(), { enabledPlugins: { 'x@m': true } });
+      addRecipes(customRecipe('custom.off', [{ type: 'plugins.disable', plugins: ['x@m'] }]));
+      const dry = await applyCustom(1, 'custom.off', { 'dry-run': true, project: proj() });
+      assert.ok(dry.stdout.includes(`${localSettings()}: disable plugins x@m`) || dry.stdout.includes(t('apply.plan.plugins_disable', { file: localSettings(), names: 'x@m' })), dry.stdout);
+      assert.ok(!fs.existsSync(localSettings()));
+    });
+
+    it('two batches that switch the same plugin off: undoing the first leaves it off, the second restores it', async () => {
+      addRecipes(
+        customRecipe('custom.off1', [{ type: 'plugins.disable', plugins: ['idle@fixture-market', 'demo@fixture-market'] }]),
+        customRecipe('custom.off2', [{ type: 'plugins.disable', plugins: ['idle@fixture-market'] }, { type: 'settings.set', path: 'cleanupPeriodDays', value: 5 }]),
+      );
+      for (const [first, second] of [[1, 2], [2, 1]]) {
+        fs.rmSync(appliedDir(), { recursive: true, force: true });
+        writeSettings(readJson(path.join(ctx.root, 'pristine-settings.json')));
+        await applyCustom(1, 'custom.off1');
+        await applyCustom(2, 'custom.off2');
+        assert.deepEqual(actions(2).find((a) => a.type === 'plugins.disable').claimed, [{ plugin: 'idle@fixture-market', file: ctx.settingsFile }]);
+        await runUndo({}, [batch(first)]);
+        assert.equal(readSettings().enabledPlugins['idle@fixture-market'], false, `still off after undoing ${first} first`);
+        await runUndo({}, [batch(second)]);
+        assert.deepEqual(readSettings(), settingsBefore(), `undo ${first} then ${second}`);
+      }
+    });
+  });
+
+  describe('journals of 0.1.0 - 0.1.4 (no claims, no per-change file) still undo', () => {
+    it('reverts settings.set, settings.append, plugins.disable, claude-md.block and hook entries written in the old shape', async () => {
+      const id = '2026-01-01T00-00-00';
+      const md = path.join(ctx.configDir, 'CLAUDE.md');
+      const script = path.join(ctx.stateDir, 'hooks', 'old.mjs');
+      const command = `node "${toPosix(script)}"`;
+      const original = read(md);
+      const body = '<!-- kaizen:start old -->\nbody\n<!-- kaizen:end old -->';
+      const tail = original.match(/\s*$/)[0];
+      writeText(md, original.replace(/\s*$/, '') + '\n\n' + body + '\n');
+      writeText(script, '// old script\n');
+      const s = readSettings();
+      s.cleanupPeriodDays = 14;
+      s.permissions.deny = ['Read(./old)'];
+      s.enabledPlugins['gone@fixture-market'] = false;
+      s.hooks.Stop.push({ hooks: [{ type: 'command', command }] });
+      writeSettings(s);
+      const hash = apply.__test.sha('// old script\n');
+      writeJson(path.join(appliedDir(), id, 'manifest.json'), {
+        id,
+        at: '2026-01-01T00:00:00.000Z',
+        kitVersion: '0.1.0',
+        lang: 'en',
+        projectDir: ctx.root,
+        dry: false,
+        recipes: [
+          {
+            id: 'old.recipe',
+            scope: 'user',
+            params: {},
+            actions: [
+              { type: 'file', file: script, existedBefore: false, hash, createdDir: null },
+              { type: 'settings.hook', file: ctx.settingsFile, event: 'Stop', matcher: null, identity: `command|${command}` },
+              { type: 'settings.set', file: ctx.settingsFile, path: 'cleanupPeriodDays', previous: null, hadPrevious: false, value: 14 },
+              { type: 'settings.append', file: ctx.settingsFile, path: 'permissions.deny', added: ['Read(./old)'] },
+              { type: 'plugins.disable', file: ctx.settingsFile, changed: [{ plugin: 'gone@fixture-market', previous: null }] },
+              { type: 'claude-md.block', file: md, id: 'old', existedBefore: true, previousBlock: null, tail },
+            ],
+          },
+        ],
+      });
+      const dry = await runUndo({ 'dry-run': true }, [id]);
+      assert.ok(!/kept|error/.test(dry.stdout), dry.stdout);
+      const { stdout } = await runUndo({}, [id]);
+      assert.ok(!/kept|error|--force/.test(stdout), stdout);
+      assert.equal(normalizeUndoOutput(dry.stdout), normalizeUndoOutput(stdout));
+      assert.deepEqual(readSettings(), settingsBefore());
+      assert.equal(read(md), original);
+      assert.ok(!fs.existsSync(script));
+      assert.equal(readManifest(id).undone, true);
+    });
+  });
+});
+
+describe('hook scripts of a project-scope recipe belong to that project', () => {
+  const at = (n, flags) => withFrozenDate(`2026-10-30T14:00:0${n}.000Z`, () => runApply(flags));
+  const batch = (n) => `2026-10-30T14-00-0${n}`;
+  const hooksDir = () => path.join(ctx.stateDir, 'hooks');
+  const hookFiles = () => (fs.existsSync(hooksDir()) ? fs.readdirSync(hooksDir()).sort() : []);
+  const projA = () => path.join(ctx.root, 'projA');
+  const projB = () => path.join(ctx.root, 'projB');
+  const hookCommand = (proj, event) => readJson(path.join(proj, '.claude', 'settings.json')).hooks[event][0].hooks[0].command;
+  const scriptOf = (command) => command.match(/"([^"]+\.mjs)"\s*$/)[1];
+  beforeEach(() => {
+    fs.mkdirSync(projA(), { recursive: true });
+    fs.mkdirSync(projB(), { recursive: true });
+  });
+
+  it('format-on-edit in two projects: two scripts, each with its own formatter, each project\'s hook runs its own', async () => {
+    await at(1, { recipe: 'hooks.format-on-edit', scope: 'project', project: projA(), param: ['hooks.format-on-edit.formatter=ruff'] });
+    await at(2, { recipe: 'hooks.format-on-edit', scope: 'project', project: projB(), param: ['hooks.format-on-edit.formatter=prettier'] });
+    const a = scriptOf(hookCommand(projA(), 'PostToolUse'));
+    const b = scriptOf(hookCommand(projB(), 'PostToolUse'));
+    assert.notEqual(a, b);
+    assert.ok(a.endsWith(`format-on-edit.${apply.projectKey(projA())}.mjs`), a);
+    assert.ok(b.endsWith(`format-on-edit.${apply.projectKey(projB())}.mjs`), b);
+    assert.equal(path.dirname(a), toPosix(hooksDir()));
+    assert.match(read(a), /const FORMATTER_RAW = 'ruff';/, 'project A is not changed by what was applied to project B');
+    assert.match(read(b), /const FORMATTER_RAW = 'prettier';/);
+    // and it undoes cleanly, one project at a time
+    await runUndo({}, [batch(2)]);
+    assert.ok(fs.existsSync(a) && !fs.existsSync(b));
+    await runUndo({}, [batch(1)]);
+    assert.deepEqual(hookFiles(), []);
+  });
+
+  it('verify-before-stop: choosing remind for one project leaves block in the other', async () => {
+    await at(1, { recipe: 'hooks.verify-before-stop', scope: 'project', project: projA() });
+    await at(2, { recipe: 'hooks.verify-before-stop', scope: 'project', project: projB(), param: ['hooks.verify-before-stop.mode=remind'] });
+    assert.match(read(scriptOf(hookCommand(projA(), 'Stop'))), /MODE_RAW = 'block'/);
+    assert.match(read(scriptOf(hookCommand(projB(), 'Stop'))), /MODE_RAW = 'remind'/);
+  });
+
+  it('every project-scope recipe whose templates bake parameters in gets a project key; user scope and parameter-free scripts keep the shared name', async () => {
+    const catalog = loadCatalog();
+    for (const r of catalog.recipes) {
+      const bakes = (r.actions || []).some((a) => a.type === 'file' && a.template && /\{\{[a-zA-Z0-9_]+\}\}/.test(read(path.join(apply.__test.TEMPLATES, a.template))));
+      assert.equal(apply.hookScriptKey(r, 'project', projA()) !== null, bakes, r.id);
+      assert.equal(apply.hookScriptKey(r, 'user', projA()), null, r.id);
+    }
+    assert.notEqual(apply.hookScriptKey(catalog.recipes.find((r) => r.id === 'hooks.guard-destructive'), 'project', projA()), null);
+    assert.equal(apply.hookScriptKey(catalog.recipes.find((r) => r.id === 'hooks.long-command-nudge'), 'project', projA()), null);
+    await at(1, { recipe: 'hooks.format-on-edit', scope: 'user' });
+    assert.deepEqual(hookFiles(), ['format-on-edit.mjs']);
+  });
+
+  it('the key is stable for a directory (also with a trailing slash) and differs between directories', () => {
+    assert.equal(apply.projectKey(projA()), apply.projectKey(projA() + path.sep));
+    assert.equal(apply.projectKey(projA()), apply.projectKey(path.join(projA(), 'x', '..')));
+    assert.notEqual(apply.projectKey(projA()), apply.projectKey(projB()));
+    assert.match(apply.projectKey(projA()), /^[0-9a-f]{10}$/);
+  });
+
+  it('applying a project recipe twice to one project reuses its script and the hook is wired once', async () => {
+    await at(1, { recipe: 'hooks.format-on-edit', scope: 'project', project: projA(), param: ['hooks.format-on-edit.formatter=ruff'] });
+    await at(2, { recipe: 'hooks.format-on-edit', scope: 'project', project: projA(), param: ['hooks.format-on-edit.formatter=black'] });
+    assert.equal(hookFiles().length, 1);
+    assert.match(read(path.join(hooksDir(), hookFiles()[0])), /const FORMATTER_RAW = 'black';/);
+    assert.equal(readJson(path.join(projA(), '.claude', 'settings.json')).hooks.PostToolUse.length, 1);
+    await runUndo({}, [batch(1)]);
+    assert.equal(hookFiles().length, 1, 'the second batch still needs the script');
+    await runUndo({}, [batch(2)]);
+    assert.deepEqual(hookFiles(), []);
+  });
+});
+
+describe('apply --dry-run simulates the whole batch', () => {
+  const at = (n, flags) => withFrozenDate(`2026-10-30T15:00:0${n}.000Z`, () => runApply(flags));
+  const extraFile = () => path.join(ctx.root, 'extra.json');
+  const customRecipe = (id, recipeActions) => ({ id, category: 'settings', impact: 'low', title: { en: id, ru: id }, why: { en: 'w', ru: 'п' }, evidence: { en: 'e', ru: 'д' }, when: true, actions: recipeActions });
+  /** The lines of an apply run that describe a change or a skip, without the dry-run arrow / check mark. */
+  const plan = (stdout) => stdout.split('\n').filter((l) => /^ {2}[→✓·] /.test(l)).map((l) => l.replace(/^ {2}[→✓] /, '  ~ '));
+  const shape = (manifest) => manifest.recipes.map((r) => r.actions.map((a) => `${a.type}${a.shared ? ':shared' : ''}`));
+
+  async function dryThenReal(flags) {
+    const before = snapshotDir(ctx.root);
+    const dry = await runApply({ ...flags, 'dry-run': true });
+    assert.deepEqual(snapshotDir(ctx.root), before, 'a dry run changes nothing');
+    const real = await runApply(flags);
+    return { dry, real };
+  }
+
+  it('session-context and precompact-handoff in one batch: the dry run shows what the real run does (one hook, no script overwrite)', async () => {
+    const { dry, real } = await dryThenReal({ recipe: 'hooks.session-context,hooks.precompact-handoff' });
+    assert.deepEqual(plan(dry.stdout), plan(real.stdout));
+    assert.deepEqual(shape(dry.manifest), shape(real.manifest));
+    assert.match(dry.stdout, /session-context\.mjs: shared with hooks\.session-context, kept as it is/);
+    assert.match(dry.stdout, /hook for SessionStart is already installed by hooks\.session-context; shared/);
+    assert.equal((dry.stdout.match(/add SessionStart hook/g) || []).length, 1);
+  });
+
+  it('the other order too', async () => {
+    const { dry, real } = await dryThenReal({ recipe: 'hooks.precompact-handoff,hooks.session-context' });
+    assert.deepEqual(plan(dry.stdout), plan(real.stdout));
+    assert.deepEqual(shape(dry.manifest), shape(real.manifest));
+  });
+
+  it('CLAUDE.md blocks, settings and scripts of many recipes in one batch', async () => {
+    seedState();
+    const recipe = 'claude-md.read-before-edit,claude-md.autonomy,settings.cleanup-period,permissions.deny-secrets,hooks.guard-destructive,hooks.protect-secrets';
+    const { dry, real } = await dryThenReal({ recipe });
+    assert.deepEqual(plan(dry.stdout), plan(real.stdout));
+    assert.deepEqual(shape(dry.manifest), shape(real.manifest));
+  });
+
+  it('two recipes that write the same rules block: the second one updates it in the dry run, as in the real run', async () => {
+    writeJson(extraFile(), {
+      recipes: [
+        customRecipe('custom.blk1', [{ type: 'claude-md.block', id: 'x', content: 'Rule one.' }]),
+        customRecipe('custom.blk2', [{ type: 'claude-md.block', id: 'x', content: 'Rule two.' }]),
+        customRecipe('custom.blk3', [{ type: 'claude-md.block', id: 'x', content: 'Rule two.' }, { type: 'settings.set', path: 'cleanupPeriodDays', value: 3 }]),
+      ],
+    });
+    const { dry, real } = await dryThenReal({ recipe: 'custom.blk1,custom.blk2,custom.blk3', add: extraFile() });
+    assert.match(dry.stdout, /update rules block "x"/);
+    assert.deepEqual(plan(dry.stdout), plan(real.stdout));
+    assert.deepEqual(shape(dry.manifest), shape(real.manifest));
+  });
+
+  it('settings written by one recipe are seen by the next: a repeated value is shared in the dry run too', async () => {
+    writeJson(extraFile(), {
+      recipes: [
+        customRecipe('custom.s1', [{ type: 'settings.set', path: 'cleanupPeriodDays', value: 14 }, { type: 'settings.append', path: 'permissions.deny', values: ['Read(./a)'] }]),
+        customRecipe('custom.s2', [{ type: 'settings.set', path: 'cleanupPeriodDays', value: 14 }, { type: 'settings.append', path: 'permissions.deny', values: ['Read(./a)', 'Read(./b)'] }, { type: 'plugins.disable', plugins: ['idle@fixture-market'] }]),
+        customRecipe('custom.s3', [{ type: 'plugins.disable', plugins: ['idle@fixture-market'] }, { type: 'settings.append', path: 'permissions.deny', values: ['Read(./z)'] }]),
+      ],
+    });
+    const { dry, real } = await dryThenReal({ recipe: 'custom.s1,custom.s2,custom.s3', add: extraFile() });
+    assert.deepEqual(plan(dry.stdout), plan(real.stdout));
+    assert.deepEqual(shape(dry.manifest), shape(real.manifest));
+    assert.match(dry.stdout, /already set by custom\.s1; shared/);
+  });
+
+  it('the dry-run plan is the same in Russian', async () => {
+    const flags = { recipe: 'hooks.session-context,hooks.precompact-handoff' };
+    const out = await captureOutput(() => apply.cmdApply({ _: ['apply'], flags: { ...flags, 'dry-run': true } }, { loadMeasure: () => fixtureMeasure, pickLang: () => 'ru' }));
+    assert.match(out.stdout, /общий файл рецепта hooks\.session-context, оставлен как есть/);
+    assert.match(out.stdout, /хук SessionStart уже установлен рецептом hooks\.session-context/);
   });
 });

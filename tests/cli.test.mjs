@@ -551,6 +551,42 @@ describe('kaizen end to end: measure, recommend, apply, verify, undo', () => {
     assert.ok(plan(real.stdout).length >= 4);
     assert.ok(!fs.existsSync(script), 'nothing is left behind');
   });
+
+  it('apply --dry-run with two recipes that share a script prints the plan the real run carries out', () => {
+    const home = measured();
+    const recipes = 'hooks.session-context,hooks.precompact-handoff,claude-md.read-before-edit,claude-md.autonomy';
+    const before = snapshotDir(home.root);
+    const dry = cli(home, ['apply', '--recipe', recipes, '--dry-run']);
+    assert.equal(dry.status, 0, dry.stderr);
+    assert.deepEqual(snapshotDir(home.root), before, 'a dry run changes nothing');
+    const real = cli(home, ['apply', '--recipe', recipes]);
+    assert.equal(real.status, 0, real.stderr);
+    const plan = (out) => out.split('\n').filter((l) => /^ {2}[→✓·] /.test(l)).map((l) => l.replace(/^ {2}[→✓] /, '  ~ '));
+    assert.deepEqual(plan(dry.stdout), plan(real.stdout));
+    assert.match(dry.stdout, /session-context\.mjs: shared with hooks\.session-context, kept as it is/);
+    assert.equal((dry.stdout.match(/add SessionStart hook/g) || []).length, 1, dry.stdout);
+  });
+
+  it('format-on-edit applied to two projects installs one script per project; verify self-tests both and undo --all removes both', () => {
+    const home = measured();
+    const projA = path.join(home.root, 'projA');
+    const projB = path.join(home.root, 'projB');
+    fs.mkdirSync(projA);
+    fs.mkdirSync(projB);
+    const apply = (proj, formatter) => cli(home, ['apply', '--recipe', 'hooks.format-on-edit', '--scope', 'project', '--project', proj, '--param', `hooks.format-on-edit.formatter=${formatter}`]);
+    assert.equal(apply(projA, 'ruff').status, 0);
+    assert.equal(apply(projB, 'prettier').status, 0);
+    const scripts = fs.readdirSync(path.join(home.stateDir, 'hooks')).sort();
+    assert.equal(scripts.length, 2, scripts.join(', '));
+    for (const s of scripts) assert.match(s, /^format-on-edit\.[0-9a-f]{10}\.mjs$/);
+    const texts = scripts.map((s) => fs.readFileSync(path.join(home.stateDir, 'hooks', s), 'utf8'));
+    assert.ok(texts.some((x) => x.includes("const FORMATTER_RAW = 'ruff';")) && texts.some((x) => x.includes("const FORMATTER_RAW = 'prettier';")), 'each project keeps its own formatter');
+    const verify = json(cli(home, ['verify', '--json', '--project', projA]));
+    assert.equal(verify.ok, true, JSON.stringify(verify.checks));
+    for (const s of scripts) assert.ok(verify.checks.some((c) => c.ok && c.text.includes(s) && /self-test ok/.test(c.text)), `${s}: ${JSON.stringify(verify.checks)}`);
+    assert.equal(cli(home, ['undo', '--all']).status, 0);
+    assert.deepEqual(fs.readdirSync(path.join(home.stateDir, 'hooks')), []);
+  });
 });
 
 describe('kaizen verify', () => {

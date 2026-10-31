@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "about": "Each recipe = evidence trigger (when) + what gets written (actions) + how to undo it (automatic: every action is journaled). Titles/why/evidence are bilingual. Placeholders in action strings: {node} {kaizenHome} {configDir} {projectDir} {skillsDir} {agentsDir} {claudeMd} {params.<name>}. Evidence templates read measure.json paths, e.g. {friction.timeouts} or {sessions.bypassShare|pct}.",
+  "about": "Each recipe = evidence trigger (when) + what gets written (actions) + how to undo it (automatic: every action is journaled). Titles/why/evidence are bilingual. Placeholders in action strings: {node} {kaizenHome} {configDir} {projectDir} {skillsDir} {agentsDir} {claudeMd} {params.<name>}. A hook script under {kaizenHome}/hooks whose template bakes in {{param}} values is installed per project when a recipe is applied with scope project (file name format-on-edit.<project key>.mjs), so projects do not overwrite each other's parameters. Evidence templates read measure.json paths, e.g. {friction.timeouts} or {sessions.bypassShare|pct}.",
   "recipes": [
     {
       "id": "permissions.allowlist-readonly",
@@ -143,7 +143,7 @@
       "title": { "en": "Inject git state and the last handoff note at session start", "ru": "Подставлять состояние git и последнюю заметку-передачу в начале сессии" },
       "why": { "en": "Claude starts every session blind. A SessionStart hook adds branch, recent commits, uncommitted files and the handoff saved before the last compaction, so you stop re-explaining where you were.", "ru": "Каждую сессию Claude начинает с нуля. SessionStart-хук добавляет ветку, последние коммиты, незакоммиченные файлы и заметку, сохранённую перед последней компакцией — не нужно заново объяснять, где остановились." },
       "evidence": { "en": "{totals.sessions} sessions in {totals.projects} projects; {friction.compactions} compactions and {sessions.oneShotSessions} one-prompt sessions suggest frequent restarts.", "ru": "{totals.sessions} сессий в {totals.projects} проектах; {friction.compactions} компакций и {sessions.oneShotSessions} сессий из одного запроса говорят о частых перезапусках." },
-      "when": { "all": [ { "metric": "totals.sessions", "gte": 10 }, { "any": [ { "metric": "context.hasSessionStartHook", "falsy": true }, { "all": [ { "metric": "context.hookEvents.SessionStart", "lte": 1 }, { "metric": "context.hookCommandsText", "includes": "session-context.mjs" } ] } ] } ] },
+      "when": { "all": [ { "metric": "totals.sessions", "gte": 10 }, { "any": [ { "metric": "context.hasSessionStartHook", "falsy": true }, { "all": [ { "metric": "context.hookEvents.SessionStart", "lte": 1 }, { "metric": "context.hookCommandsText", "includes": "session-context." } ] } ] } ] },
       "params": [ { "name": "maxChars", "type": "text", "default": "1500", "label": { "en": "Max characters injected", "ru": "Максимум символов" } }, { "name": "includeGit", "type": "select", "options": ["true", "false"], "default": "true", "label": { "en": "Include git summary", "ru": "Включать сводку git" } } ],
       "actions": [
         { "type": "file", "template": "hooks/session-context.mjs", "target": "{kaizenHome}/hooks/session-context.mjs" },

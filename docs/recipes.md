@@ -69,7 +69,7 @@ Generated from `recipes/catalog.json` (31 recipes). Do not edit by hand; run `no
 
 - Impact: **medium**, risk: low, scope: user / project
 - Why: Claude starts every session blind. A SessionStart hook adds branch, recent commits, uncommitted files and the handoff saved before the last compaction, so you stop re-explaining where you were.
-- Trigger: `{"all":[{"metric":"totals.sessions","gte":10},{"any":[{"metric":"context.hasSessionStartHook","falsy":true},{"all":[{"metric":"context.hookEvents.SessionStart","lte":1},{"metric":"context.hookCommandsText","includes":"session-context.mjs"}]}]}]}`
+- Trigger: `{"all":[{"metric":"totals.sessions","gte":10},{"any":[{"metric":"context.hasSessionStartHook","falsy":true},{"all":[{"metric":"context.hookEvents.SessionStart","lte":1},{"metric":"context.hookCommandsText","includes":"session-context."}]}]}]}`
 - Actions: file → {kaizenHome}/hooks/session-context.mjs; settings.hook SessionStart
 
 ### `hooks.long-command-nudge` — Nudge Claude to background or time-limit commands that tend to hang

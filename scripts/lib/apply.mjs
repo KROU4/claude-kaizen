@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { configDir, ensureDir, exists, expandHome, globalConfigPath, kitRoot, projectConfigKey, readJsonSafe, settingsFiles, stateDir, toPosix, writeJsonAtomic } from './paths.mjs';
+import { configDir, ensureDir, exists, expandHome, globalConfigPath, kitRoot, managedSettingsFiles, projectConfigKey, readJsonSafe, settingsFiles, stateDir, toPosix, writeJsonAtomic } from './paths.mjs';
 import { nodeCommand } from './platform.mjs';
 import { actionApplies, addExtraRecipes, closeMatches, loadCatalog, readExtraRecipes, recipeDigest, rememberedExtraFile, resolveExtraFile, resolvePath } from './recipes.mjs';
 import { UserError, translator } from './i18n.mjs';
@@ -77,8 +77,35 @@ export function buildContext({ scope = 'user', projectDir = null, params = {} })
   return ctx;
 }
 
+/** A short name for a project directory that is stable across runs (case-insensitive paths on Windows). */
+export function projectKey(projectDir) {
+  const norm = toPosix(path.resolve(projectDir)).replace(/\/+$/, '');
+  return sha(process.platform === 'win32' ? norm.toLowerCase() : norm).slice(0, 10);
+}
+
+/**
+ * The key that makes the hook scripts of a recipe applied to ONE project that project's own (`format-on-edit.<key>.mjs`):
+ * their templates bake parameters into the script (`{{formatter}}`, `{{mode}}`...), so one shared script would be rewritten
+ * by every project and change the behaviour of the others. Null for user scope (the scripts stay where they were) and for
+ * recipes whose scripts have no parameters.
+ */
+export function hookScriptKey(recipe, scope, projectDir) {
+  if (scope !== 'project' || !projectDir) return null;
+  const bakes = (recipe.actions || []).some((a) => {
+    if (a.type !== 'file' || !a.template) return false;
+    try {
+      return /\{\{[a-zA-Z0-9_]+\}\}/.test(fs.readFileSync(path.join(TEMPLATES, a.template), 'utf8'));
+    } catch {
+      return false; // a missing template is reported by the file action itself
+    }
+  });
+  return bakes ? projectKey(projectDir) : null;
+}
+
 export function fill(str, ctx) {
   if (typeof str !== 'string') return str;
+  // the scripts of a project-scope recipe with baked parameters belong to that project (see hookScriptKey)
+  if (ctx.hookKey) str = str.replace(/\{kaizenHome\}\/hooks\/([A-Za-z0-9_-]+)\.mjs/g, (m, name) => `{kaizenHome}/hooks/${name}.${ctx.hookKey}.mjs`);
   return str.replace(/\{(node|kaizenHome|configDir|projectDir|skillsDir|agentsDir|claudeMd)\}/g, (m, k) => ctx[k] ?? m).replace(/\{params\.([a-zA-Z0-9_]+)\}/g, (m, k) => {
     const v = ctx.params[k];
     if (v === undefined || v === null) return '';
@@ -155,8 +182,46 @@ function cmpSeq(a, b) {
   return 0;
 }
 
+/** True when two journal entries are about the same thing: the same file, hook, setting, list or rules block. */
+function sameTarget(a, b) {
+  if (a.type !== b.type) return false;
+  switch (a.type) {
+    case 'file':
+      return samePath(a.file, b.file);
+    case 'settings.hook':
+      return a.event === b.event && a.identity === b.identity && samePath(a.file, b.file);
+    case 'settings.set':
+    case 'settings.append':
+      return a.path === b.path && samePath(a.file, b.file);
+    case 'claude-md.block':
+      return a.id === b.id && samePath(a.file, b.file);
+    default:
+      return false;
+  }
+}
+
+/**
+ * What a handler returns when a batch in force already provides what this action wants (the claim mechanism): the claim is
+ * a journal entry that writes nothing but says "I rely on this". Undoing the batch that provided it then hands the thing
+ * over to the newest claimant instead of removing it. When this recipe itself is among the providers (the same recipe
+ * applied again) the claim rides along with the recipe's other changes of the run (cmdApply adds it only if the run
+ * changed something); when only other recipes provide it, the claim is the action's own journal entry.
+ */
+function shareOrSkip(io, claim, providers, skip, line) {
+  if (providers.some((p) => p.recipe.id === io.recipeId)) return { ...skip, claim };
+  io.describe(line);
+  return claim;
+}
+
+/** A hook command with its whitespace collapsed (how settings.hook.remove compares commands). */
+const normCommand = (c) => String(c).replace(/\s+/g, ' ').trim();
+
+const recipeNames = (providers) => [...new Set(providers.map((p) => p.recipe.id))].join(', ');
+
 // ------------------------------------------------------------- action handlers
-// Each returns a journal entry (or null when nothing changed). `dry` = describe only.
+// Each returns a journal entry (or null when nothing changed). `dry` = describe only: the settings and files a dry run
+// would change are changed in memory (io.load / io.fileText) so that the next action and the next recipe of the run
+// see them, exactly as the real run finds them on the disk.
 
 const handlers = {
   'settings.hook'(a, ctx, io) {
@@ -208,10 +273,8 @@ const handlers = {
     const group = { hooks: [entry] };
     if (matcher) group.matcher = matcher;
     io.describe(io.t('apply.plan.hook_add', { file, event: a.event, matcher: matcher ? ` [${matcher}]` : '', command: entry.command }));
-    if (!io.dry) {
-      list.push(group);
-      io.save(file, settings);
-    }
+    list.push(group);
+    if (!io.dry) io.save(file, settings);
     // wanted: the whole matcher the recipe asked for (matcher is only what this batch added), so that undoing another
     // batch can put back the part of the coverage this recipe still depends on
     return { type: 'settings.hook', file, event: a.event, matcher, wanted: a.matcher || null, identity: id };
@@ -222,12 +285,17 @@ const handlers = {
     const settings = io.load(file);
     const value = fillDeep(a.value, ctx);
     const prev = getPath(settings, a.path);
-    if (JSON.stringify(prev) === JSON.stringify(value)) return { skipped: true, reason: io.t('apply.skip.already_set'), file, path: a.path };
-    io.describe(io.t(prev !== undefined ? 'apply.plan.set_was' : 'apply.plan.set', { file, path: a.path, value: JSON.stringify(value), prev: JSON.stringify(prev) }));
-    if (!io.dry) {
-      setPath(settings, a.path, value);
-      io.save(file, settings);
+    if (JSON.stringify(prev) === JSON.stringify(value)) {
+      const skip = { skipped: true, reason: io.t('apply.skip.already_set'), file, path: a.path };
+      // set by a batch that is still in force: rely on it, so that undoing that batch leaves the value in place
+      const providers = io.live().filter((p) => p.entry.type === 'settings.set' && p.entry.path === a.path && samePath(p.entry.file, file) && JSON.stringify(p.entry.value) === JSON.stringify(value));
+      if (!providers.length) return skip;
+      const claim = { type: 'settings.set', file, path: a.path, value, shared: true };
+      return shareOrSkip(io, claim, providers, skip, io.say(`${a.path} in ${file} is already set by ${recipeNames(providers)}; shared`, `${a.path} в ${file} уже задан рецептом ${recipeNames(providers)}; используется совместно`));
     }
+    io.describe(io.t(prev !== undefined ? 'apply.plan.set_was' : 'apply.plan.set', { file, path: a.path, value: JSON.stringify(value), prev: JSON.stringify(prev) }));
+    setPath(settings, a.path, value);
+    if (!io.dry) io.save(file, settings);
     return { type: 'settings.set', file, path: a.path, previous: prev === undefined ? null : prev, hadPrevious: prev !== undefined, value };
   },
 
@@ -243,13 +311,28 @@ const handlers = {
     const current = getPath(settings, a.path);
     const arr = Array.isArray(current) ? current : [];
     const added = values.filter((v) => !arr.includes(v));
-    if (!added.length) return { skipped: true, reason: io.t('apply.skip.nothing_new'), file, path: a.path };
-    io.describe(io.t('apply.plan.append', { file, path: a.path, items: added.join(', ') }));
-    if (!io.dry) {
-      setPath(settings, a.path, arr.concat(added));
-      io.save(file, settings);
+    // Values that are already in the list because a batch still in force added them: this batch relies on them, so that
+    // undoing the other batch leaves them in place.
+    const holders = (v) => io.live().filter((p) => p.entry.type === 'settings.append' && p.entry.path === a.path && samePath(p.entry.file, file) && ((p.entry.added || []).includes(v) || (p.entry.claimed || []).includes(v)));
+    const claimed = [];
+    const providers = [];
+    for (const v of values) {
+      if (!arr.includes(v)) continue;
+      const hs = holders(v);
+      if (!hs.length) continue;
+      claimed.push(v);
+      providers.push(...hs);
     }
-    return { type: 'settings.append', file, path: a.path, added };
+    if (!added.length) {
+      const skip = { skipped: true, reason: io.t('apply.skip.nothing_new'), file, path: a.path };
+      if (!claimed.length) return skip;
+      const claim = { type: 'settings.append', file, path: a.path, added: [], claimed };
+      return shareOrSkip(io, claim, providers, skip, io.say(`${a.path} in ${file}: ${claimed.join(', ')} already added by ${recipeNames(providers)}; shared`, `${a.path} в ${file}: ${claimed.join(', ')} уже добавлено рецептом ${recipeNames(providers)}; используется совместно`));
+    }
+    io.describe(io.t('apply.plan.append', { file, path: a.path, items: added.join(', ') }));
+    setPath(settings, a.path, arr.concat(added));
+    if (!io.dry) io.save(file, settings);
+    return { type: 'settings.append', file, path: a.path, added, ...(claimed.length ? { claimed } : {}) };
   },
 
   file(a, ctx, io) {
@@ -286,26 +369,29 @@ const handlers = {
     const start = `<!-- kaizen:start ${id} -->`;
     const end = `<!-- kaizen:end ${id} -->`;
     const block = `${start}\n${body}\n${end}`;
-    const existing = exists(target) ? fs.readFileSync(target, 'utf8') : '';
+    const existing = io.fileText(target) ?? ''; // through io: a dry run sees what the recipes before it would have written
     const re = new RegExp(`${escapeRe(start)}[\\s\\S]*?${escapeRe(end)}`);
     let next;
     let had = false;
     if (re.test(existing)) {
       had = true;
-      if (existing.match(re)[0].replace(/\r\n/g, '\n') === block) return { skipped: true, reason: io.t('apply.skip.block_unchanged'), file: target, id };
+      if (existing.match(re)[0].replace(/\r\n/g, '\n') === block) {
+        const skip = { skipped: true, reason: io.t('apply.skip.block_unchanged'), file: target, id };
+        // written by a batch that is still in force: rely on it, so that undoing that batch leaves the block in place
+        const providers = io.live().filter((p) => p.entry.type === 'claude-md.block' && p.entry.id === id && samePath(p.entry.file, target));
+        if (!providers.length) return skip;
+        const claim = { type: 'claude-md.block', file: target, id, shared: true, existedBefore: true, previousBlock: null, tail: null, hash: sha(block) };
+        return shareOrSkip(io, claim, providers, skip, io.say(`${target}: rules block "${id}" is already written by ${recipeNames(providers)}; shared`, `${target}: блок правил "${id}" уже записан рецептом ${recipeNames(providers)}; используется совместно`));
+      }
       next = existing.replace(re, () => block); // function form: the text may contain $&, $', $` or $$
     } else {
       next = existing.replace(/\s*$/, '') + (existing.trim() ? '\n\n' : '') + block + '\n';
     }
     io.describe(io.t(had ? 'apply.plan.block_update' : 'apply.plan.block_add', { target, id, lines: body.split('\n').length }));
-    if (!io.dry) {
-      io.backup(target);
-      ensureDir(path.dirname(target));
-      fs.writeFileSync(target, next, 'utf8');
-    }
+    io.writeFile(target, next);
     // tail: the whitespace an append trimmed from the end of the file, so that undo can give it back exactly
     // hash: of the block as written, so that undo can tell whether the user edited it since
-    return { type: 'claude-md.block', file: target, id, existedBefore: exists(target) && existing.length > 0, previousBlock: had ? existing.match(re)[0] : null, tail: had ? null : existing.match(/\s*$/)[0], hash: sha(block) };
+    return { type: 'claude-md.block', file: target, id, existedBefore: existing.length > 0, previousBlock: had ? existing.match(re)[0] : null, tail: had ? null : existing.match(/\s*$/)[0], hash: sha(block) };
   },
 
   'mcp.disable'(a, ctx, io) {
@@ -326,29 +412,47 @@ const handlers = {
     for (const name of servers) {
       if (cfg.mcpServers && cfg.mcpServers[name]) {
         removed.push({ name, config: cfg.mcpServers[name] }); // user scope: no `where`, as in older journals
-        if (!io.dry) delete cfg.mcpServers[name];
+        delete cfg.mcpServers[name];
       } else if (local && local[name]) {
         removed.push({ name, config: local[name], where: 'local', projectKey: localKey });
-        if (!io.dry) delete local[name];
+        delete local[name];
       } else if (projectServers && projectServers[name]) {
         inProjectFile.push(name);
       } else notFound.push(name);
     }
     if (inProjectFile.length) io.note(io.t('apply.note.mcp_project_file', { file: projectFile, names: inProjectFile.join(', ') }));
+    // Servers that are gone because a batch still in force removed them: this batch relies on that, so that undoing the
+    // other batch does not bring them back.
+    const claimed = [];
+    const providers = [];
+    for (const name of [...notFound]) {
+      for (const p of io.live()) {
+        if (p.entry.type !== 'mcp.disable' || !samePath(p.entry.file, file)) continue;
+        const c = [...(p.entry.removed || []), ...(p.entry.claimed || [])].find((x) => x.name === name && (!x.where || x.projectKey === localKey));
+        if (!c) continue;
+        claimed.push({ name, ...(c.where ? { where: c.where, projectKey: c.projectKey } : {}) });
+        providers.push(p);
+        notFound.splice(notFound.indexOf(name), 1);
+        break;
+      }
+    }
     if (!removed.length) {
       const why = [...notFound, ...inProjectFile.map((name) => io.t('apply.skip.in_project_mcp', { name }))];
-      return { skipped: true, reason: io.t('apply.skip.servers_not_found', { why: why.join(', ') }), file };
+      const skip = { skipped: true, reason: io.t('apply.skip.servers_not_found', { why: why.join(', ') }), file };
+      if (!claimed.length) return skip;
+      const claim = { type: 'mcp.disable', file, removed: [], claimed };
+      return shareOrSkip(io, claim, providers, skip, io.say(`${file}: MCP servers ${claimed.map((c) => c.name).join(', ')} are already removed by ${recipeNames(providers)}; shared`, `${file}: MCP-серверы ${claimed.map((c) => c.name).join(', ')} уже убраны рецептом ${recipeNames(providers)}; используется совместно`));
     }
     if (notFound.length) io.note(io.t('apply.note.mcp_not_found', { names: notFound.join(', ') }));
     io.describe(io.t('apply.plan.mcp_remove', { file, names: removed.map((r) => (r.where === 'local' ? io.t('apply.plan.local_scope', { name: r.name }) : r.name)).join(', ') }));
     if (!io.dry) io.save(file, cfg);
-    return { type: 'mcp.disable', file, removed };
+    return { type: 'mcp.disable', file, removed, ...(claimed.length ? { claimed } : {}) };
   },
 
   'settings.hook.remove'(a, ctx, io) {
     const commands = listParam(a.commands, ctx, /\r?\n/);
     if (!commands.length) return { skipped: true, reason: io.t('apply.skip.no_hooks') };
-    const norm = (c) => String(c).replace(/\s+/g, ' ').trim();
+    const norm = normCommand;
     const wanted = new Set(commands.map(norm));
     const removed = [];
     for (const { file } of settingsFiles(ctx.projectDir || null, configDir())) {
@@ -376,28 +480,119 @@ const handlers = {
         if (!io.dry) io.save(file, settings);
       }
     }
-    if (!removed.length) return { skipped: true, reason: io.t('apply.skip.hooks_not_found') };
-    return { type: 'settings.hook.remove', removed };
+    // Hooks that are gone because a batch still in force removed them: this batch relies on that, so that undoing the other
+    // batch does not put them back.
+    const claimed = [];
+    const providers = [];
+    for (const want of wanted) {
+      if (removed.some((r) => norm(r.hook.command) === want)) continue;
+      for (const p of io.live()) {
+        if (p.entry.type !== 'settings.hook.remove') continue;
+        const c = [...(p.entry.removed || []), ...(p.entry.claimed || [])].find((x) => normCommand(x.hook ? x.hook.command : x.command) === want);
+        if (!c) continue;
+        claimed.push({ file: c.file, event: c.event, command: want });
+        providers.push(p);
+        break;
+      }
+    }
+    if (!removed.length) {
+      const skip = { skipped: true, reason: io.t('apply.skip.hooks_not_found') };
+      if (!claimed.length) return skip;
+      const claim = { type: 'settings.hook.remove', removed: [], claimed };
+      return shareOrSkip(io, claim, providers, skip, io.say(`hooks ${claimed.map((c) => c.command).join(', ')} are already removed by ${recipeNames(providers)}; shared`, `хуки ${claimed.map((c) => c.command).join(', ')} уже убраны рецептом ${recipeNames(providers)}; используется совместно`));
+    }
+    return { type: 'settings.hook.remove', removed, ...(claimed.length ? { claimed } : {}) };
   },
 
   'plugins.disable'(a, ctx, io) {
     const plugins = listParam(a.plugins, ctx, /[,\n]/);
     if (!plugins.length) return { skipped: true, reason: io.t('apply.skip.no_plugins') };
-    const file = path.join(configDir(), 'settings.json');
-    const settings = io.load(file);
-    settings.enabledPlugins ||= {};
+    // Claude Code takes the effective value from the settings files in this order (the later one wins): user, project,
+    // local, managed. A plugin is switched off only by writing `false` where the winning `true` is, or above it.
+    const layers = [...settingsFiles(ctx.projectDir || null, configDir()), ...managedSettingsFiles().map((m) => ({ scope: 'managed', file: m.file, readOnly: true }))];
+    const userLayer = layers[0];
+    const localLayer = layers.find((l) => l.scope === 'local');
+    const readMap = (layer) => {
+      const s = layer.readOnly ? readJsonSafe(layer.file, null) : exists(layer.file) ? io.load(layer.file) : null;
+      return s && s.enabledPlugins && typeof s.enabledPlugins === 'object' ? s.enabledPlugins : null;
+    };
     const changed = [];
+    const claimed = []; // already off because a batch in force switched it off
+    const blocked = []; // on in the organisation's managed settings, which Kaizen never edits
+    const files = new Map();
     for (const p of plugins) {
-      if (settings.enabledPlugins[p] === false) continue;
-      changed.push({ plugin: p, previous: settings.enabledPlugins[p] === undefined ? null : settings.enabledPlugins[p] });
-      if (!io.dry) settings.enabledPlugins[p] = false;
+      let win = null;
+      for (const layer of layers) {
+        const map = readMap(layer);
+        if (map && Object.prototype.hasOwnProperty.call(map, p)) win = { layer, value: map[p] };
+      }
+      if (win && !win.value) {
+        if (pluginHolders(io, { plugin: p, file: win.layer.file }).length) claimed.push({ plugin: p, file: win.layer.file });
+        continue;
+      }
+      if (win && win.layer.readOnly) {
+        blocked.push(p);
+        continue;
+      }
+      // The project file belongs to the repository and is shared: a plugin enabled there is switched off for this user
+      // in settings.local.json, which comes later in the order and is not committed.
+      const target = !win ? userLayer : win.layer.scope === 'project' ? localLayer : win.layer;
+      const settings = io.load(target.file);
+      settings.enabledPlugins ||= {};
+      changed.push({ plugin: p, previous: settings.enabledPlugins[p] === undefined ? null : settings.enabledPlugins[p], file: target.file, ...(exists(target.file) ? {} : { created: true }) });
+      settings.enabledPlugins[p] = false;
+      files.set(target.file, settings);
     }
-    if (!changed.length) return { skipped: true, reason: io.t('apply.skip.already_disabled'), file };
-    io.describe(io.t('apply.plan.plugins_disable', { file, names: changed.map((c) => c.plugin).join(', ') }));
-    if (!io.dry) io.save(file, settings);
-    return { type: 'plugins.disable', file, changed };
+    if (blocked.length) io.note(io.say(`not disabled (enabled by the managed settings of your organisation, which Kaizen never edits): ${blocked.join(', ')}`, `не выключено (включено управляемыми настройками вашей организации, которые Kaizen не правит): ${blocked.join(', ')}`));
+    if (!changed.length) {
+      const skip = { skipped: true, reason: blocked.length && !claimed.length ? io.say('none could be disabled', 'ни один не удалось выключить') : io.t('apply.skip.already_disabled'), file: userLayer.file };
+      if (!claimed.length) return skip;
+      const claim = { type: 'plugins.disable', file: claimed[0].file, changed: [], claimed };
+      const providers = claimed.flatMap((c) => pluginHolders(io, c));
+      return shareOrSkip(io, claim, providers, skip, io.say(`plugins ${claimed.map((c) => c.plugin).join(', ')} are already disabled by ${recipeNames(providers)}; shared`, `плагины ${claimed.map((c) => c.plugin).join(', ')} уже выключены рецептом ${recipeNames(providers)}; используется совместно`));
+    }
+    for (const file of files.keys()) io.describe(io.t('apply.plan.plugins_disable', { file, names: changed.filter((c) => c.file === file).map((c) => c.plugin).join(', ') }));
+    if (!io.dry) for (const [file, settings] of files) io.save(file, settings);
+    // `file` of the entry is the first file; a change names its own file only when it differs (journals of 0.1.x have one file)
+    const first = changed[0].file;
+    for (const c of changed) if (c.file === first) delete c.file;
+    return { type: 'plugins.disable', file: first, changed, ...(claimed.length ? { claimed } : {}) };
   },
 };
+
+/** The same MCP server in the same place (user scope, or the local scope of one project). */
+function sameMcp(a, b) {
+  return a.name === b.name && (a.where || null) === (b.where || null) && (a.projectKey || null) === (b.projectKey || null);
+}
+
+/** The other entries in force that removed an MCP server from ~/.claude.json, or rely on it being gone, oldest first. */
+function mcpHolders(io, file, ref, except) {
+  return io
+    .live()
+    .filter((p) => p.entry.type === 'mcp.disable' && p.entry !== except && samePath(p.entry.file, file) && [...(p.entry.removed || []), ...(p.entry.claimed || [])].some((c) => sameMcp(c, ref)))
+    .sort((x, y) => cmpSeq(x.seq, y.seq));
+}
+
+/** The same hook removed from the same settings file (a removed item holds the hook, a claimed one only its command). */
+function sameRemovedHook(a, b) {
+  return samePath(a.file, b.file) && a.event === b.event && normCommand(a.hook ? a.hook.command : a.command) === normCommand(b.hook ? b.hook.command : b.command);
+}
+
+/** The other entries in force that removed a hook, or rely on it being gone, oldest first. */
+function hookRemoveHolders(io, ref, except) {
+  return io
+    .live()
+    .filter((p) => p.entry.type === 'settings.hook.remove' && p.entry !== except && [...(p.entry.removed || []), ...(p.entry.claimed || [])].some((c) => sameRemovedHook(c, ref)))
+    .sort((x, y) => cmpSeq(x.seq, y.seq));
+}
+
+/** The entries in force that switched a plugin off in a file, or rely on it (journals of 0.1.x name the file once per entry). */
+function pluginHolders(io, ref, except = null) {
+  return io
+    .live()
+    .filter((p) => p.entry.type === 'plugins.disable' && p.entry !== except && [...(p.entry.changed || []), ...(p.entry.claimed || [])].some((c) => c.plugin === ref.plugin && samePath(c.file || p.entry.file, ref.file)))
+    .sort((x, y) => cmpSeq(x.seq, y.seq));
+}
 
 /** The key of ~/.claude.json `projects` that stands for this directory and has servers (same lookup as inventory). */
 function findProjectKey(cfg, projectDir) {
@@ -419,29 +614,30 @@ function paramsUnfilled(content, params) {
 }
 
 function writeManaged(target, content, io, extra = {}) {
-  const existed = exists(target);
-  const current = existed ? fs.readFileSync(target, 'utf8') : null;
+  const current = io.fileText(target); // through io: a dry run sees the files the recipes before it would have written
+  const existed = current !== null;
   // The file is also written by another recipe that is still applied (two recipes can share one hook script). A recipe
   // that wants the very same content, or whose template leaves placeholders unfilled because the parameters belong to
   // the other recipe, keeps the file as it is and records that it uses it: undoing the other recipe then leaves the file.
   const owners = existed ? io.live().filter((p) => p.entry.type === 'file' && samePath(p.entry.file, target)) : [];
   const foreign = owners.filter((p) => p.recipe.id !== io.recipeId);
   if (existed && (current === content || (foreign.length && extra.template && UNFILLED.test(content)))) {
-    if (!foreign.length || foreign.length < owners.length) return { skipped: true, reason: current === content ? io.t('apply.skip.identical_file') : io.say('kept as it is: its parameters belong to another recipe', 'оставлен как есть: его параметры заданы другим рецептом'), file: target };
-    const names = [...new Set(foreign.map((p) => p.recipe.id))].join(', ');
-    io.describe(io.say(`${target}: shared with ${names}, kept as it is`, `${target}: общий файл рецепта ${names}, оставлен как есть`));
+    const skip = { skipped: true, reason: current === content ? io.t('apply.skip.identical_file') : io.say('kept as it is: its parameters belong to another recipe', 'оставлен как есть: его параметры заданы другим рецептом'), file: target };
+    if (!owners.length) return skip; // not written by Kaizen (or by a batch since undone): nothing to rely on
     // hash: what Kaizen itself last wrote to the file (the newest writer in force), never the hash of what is on the disk
     // now: that could be a user's edit, which undo would then take for Kaizen's own content and delete without a word
     const byAge = [...owners].sort((x, y) => cmpSeq(x.seq, y.seq));
     const last = byAge.filter((p) => !p.entry.shared).pop() || byAge[byAge.length - 1];
-    return { type: 'file', file: target, existedBefore: true, hash: last.entry.hash || sha(current), createdDir: null, shared: true };
+    const claim = { type: 'file', file: target, existedBefore: true, hash: current === content ? sha(content) : last.entry.hash || sha(current), createdDir: null, shared: true };
+    return shareOrSkip(io, claim, owners, skip, io.say(`${target}: shared with ${recipeNames(foreign)}, kept as it is`, `${target}: общий файл рецепта ${recipeNames(foreign)}, оставлен как есть`));
   }
-  const ours = io.ownedFiles.has(path.resolve(target));
+  const ours = io.ownedFiles.has(path.resolve(target)) || owners.length > 0;
   if (existed && !ours && !io.force && !target.replace(/\\/g, '/').includes(toPosix(stateDir()))) {
     return { skipped: true, reason: io.t('apply.skip.not_ours'), file: target };
   }
   io.describe(io.t(existed ? 'apply.plan.file_overwrite' : 'apply.plan.file_create', { target, chars: content.length }));
-  if (!io.dry) {
+  if (io.dry) io.writeFile(target, content);
+  else {
     if (existed) io.backup(target);
     ensureDir(path.dirname(target));
     fs.writeFileSync(target, content, 'utf8');
@@ -518,14 +714,10 @@ function makeIo({ dry, force, measure, batchDir, recipeId, t = translator('en'),
       return lang === 'ru' ? ru : en;
     },
     live: liveEntries,
-    /** The other entries in force that touch the same file / hook as this journal entry. */
+    /** The other entries in force that touch the same file / hook / setting / list / rules block as this journal entry, oldest first. */
     peers(e) {
-      const same =
-        e.type === 'file'
-          ? (p) => p.entry.type === 'file' && samePath(p.entry.file, e.file)
-          : (p) => p.entry.type === 'settings.hook' && p.entry.event === e.event && p.entry.identity === e.identity && samePath(p.entry.file, e.file);
       return liveEntries()
-        .filter((p) => p.entry !== e && same(p))
+        .filter((p) => p.entry !== e && sameTarget(p.entry, e))
         .sort((x, y) => cmpSeq(x.seq, y.seq));
     },
     /**
@@ -541,6 +733,7 @@ function makeIo({ dry, force, measure, batchDir, recipeId, t = translator('en'),
       if (dry) sim.set(path.resolve(file), text);
       else {
         this.backup(file);
+        ensureDir(path.dirname(file));
         fs.writeFileSync(file, text, 'utf8');
       }
     },
@@ -712,6 +905,8 @@ export async function cmdApply(args, { loadMeasure, pickLang }) {
   const batchDir = path.join(journalDir(), batchId);
   const manifest = { id: batchId, at: new Date().toISOString(), kitVersion: catalog.version, lang, projectDir, dry, recipes: [], notes: choices.notes || '', discuss: choices.discuss || [] };
   const lines = [];
+  const settingsCache = new Map();
+  const fileSim = new Map();
   for (const sel of choices.selected) {
     const recipe = catalog.recipes.find((r) => r.id === sel.id);
     if (!recipe) {
@@ -727,8 +922,11 @@ export async function cmdApply(args, { loadMeasure, pickLang }) {
     const allowed = Array.isArray(recipe.scope) ? recipe.scope : [recipe.scope || recipe.defaultScope || 'user'];
     if (!allowed.includes(scope)) lines.push(t('apply.scope_warn', { id: recipe.id, scope, allowed: allowed.join(', ') }));
     const ctx = buildContext({ scope, projectDir, params });
-    // the entries of the recipes already handled in this batch count too: two recipes of one run can share a file
-    const io = makeIo({ dry, force: !!flags.force, measure, batchDir, recipeId: recipe.id, t, lang, live: () => collectLive(listManifests(), { extra: { id: batchId, manifest } }) });
+    ctx.hookKey = hookScriptKey(recipe, scope, ctx.projectDir);
+    // the entries of the recipes already handled in this batch count too: two recipes of one run can share a file.
+    // A dry run writes nothing, so what it would have changed is carried from one recipe to the next (the settings files,
+    // CLAUDE.md and the scripts as they would be), and the plan it prints is the one the real run carries out.
+    const io = makeIo({ dry, force: !!flags.force, measure, batchDir, recipeId: recipe.id, t, lang, live: () => collectLive(listManifests(), { extra: { id: batchId, manifest } }), ...(dry ? { cache: settingsCache, sim: fileSim } : {}) });
     const entries = [];
     const claims = []; // hooks an earlier batch of this recipe wired: this batch relies on them if it changes anything
     for (const action of recipe.actions || []) {
@@ -833,6 +1031,7 @@ function undoFile(e, io) {
   // The file stays as it is for the entries left over: they now expect the content that remains.
   for (const p of peers) {
     p.entry.hash = e.hash;
+    if (e.createdDir && !p.entry.createdDir) p.entry.createdDir = e.createdDir; // the one left over cleans up the skill folder
     io.touch(p.box);
   }
   return stillUsedBy();
@@ -915,7 +1114,20 @@ function undoEntry(e, io) {
       return removed ? 'ok' : 'hook was already gone';
     }
     case 'settings.set': {
+      if (e.shared) return 'ok'; // relied on a value another batch set and set nothing itself
       const s = io.load(e.file);
+      // A batch set later than this one (or relying on its value) is in force: the value is theirs now. The oldest of them
+      // takes over what this entry would have put back, so that undoing it later restores the original.
+      const me = io.live().find((p) => p.entry === e);
+      const newer = me ? io.peers(e).filter((p) => cmpSeq(p.seq, me.seq) > 0) : [];
+      if (newer.length) {
+        const heir = newer[0];
+        heir.entry.previous = e.previous;
+        heir.entry.hadPrevious = e.hadPrevious;
+        delete heir.entry.shared;
+        io.touch(heir.box);
+        return `shared: ${e.file} [${e.path}] still in use by ${recipeNames(newer)}`;
+      }
       const cur = getPath(s, e.path);
       if (JSON.stringify(cur) !== JSON.stringify(e.value) && !io.revertEdited) return `kept: ${e.path} changed since apply`;
       if (e.hadPrevious) setPath(s, e.path, e.previous);
@@ -925,23 +1137,54 @@ function undoEntry(e, io) {
       return 'ok';
     }
     case 'settings.append': {
+      if (!(e.added || []).length) return 'ok'; // relied on values another batch added
       const s = io.load(e.file);
       const arr = getPath(s, e.path);
       if (!Array.isArray(arr)) return 'list missing';
-      setPath(s, e.path, arr.filter((v) => !e.added.includes(v)));
-      io.describe(io.t('undo.plan.remove_items', { file: e.file, n: e.added.length, path: e.path }));
+      // A value another batch in force added or relies on stays; the newest of them owns it from now on.
+      const peers = io.peers(e);
+      const kept = new Set();
+      for (const v of e.added) {
+        const holders = peers.filter((p) => (p.entry.added || []).includes(v) || (p.entry.claimed || []).includes(v));
+        if (!holders.length) continue;
+        kept.add(v);
+        const heir = holders[holders.length - 1];
+        if (!(heir.entry.added || []).includes(v)) {
+          heir.entry.added = [...(heir.entry.added || []), v];
+          heir.entry.claimed = (heir.entry.claimed || []).filter((x) => x !== v);
+          io.touch(heir.box);
+        }
+      }
+      const gone = e.added.filter((v) => !kept.has(v));
+      setPath(s, e.path, arr.filter((v) => !gone.includes(v)));
+      if (!gone.length) return `shared: ${e.file} [${e.path}] still in use by ${recipeNames(peers)}`;
+      io.describe(io.t('undo.plan.remove_items', { file: e.file, n: gone.length, path: e.path }));
       if (!io.dry) io.save(e.file, s);
       return 'ok';
     }
     case 'file':
       return undoFile(e, io);
     case 'claude-md.block': {
-      if (!exists(e.file)) return 'file missing';
-      const text = fs.readFileSync(e.file, 'utf8');
+      if (e.shared) return 'ok'; // relied on a block another batch wrote and wrote nothing itself
+      const text = io.fileText(e.file); // through io: a dry run sees the file as the batches undone before this one leave it
+      if (text === null) return 'file missing';
       const start = `<!-- kaizen:start ${e.id} -->`;
       const end = `<!-- kaizen:end ${e.id} -->`;
       const m = new RegExp(`(\\n?\\n?)${escapeRe(start)}[\\s\\S]*?${escapeRe(end)}(\\n?)`).exec(text);
       if (!m) return 'block already gone';
+      // A batch written later than this one (or relying on its block) is in force: the block is theirs now, and the oldest
+      // of them takes over what this entry would have put back, so that undoing it later restores the original file.
+      const me = io.live().find((p) => p.entry === e);
+      const newer = me ? io.peers(e).filter((p) => cmpSeq(p.seq, me.seq) > 0) : [];
+      if (newer.length) {
+        const heir = newer[0];
+        heir.entry.previousBlock = e.previousBlock ?? null;
+        heir.entry.tail = e.tail ?? null;
+        heir.entry.existedBefore = e.existedBefore;
+        delete heir.entry.shared;
+        io.touch(heir.box);
+        return `shared: ${e.file} [${e.id}] still in use by ${recipeNames(newer)}`;
+      }
       // like `file` and `settings.set`: leave alone what the user edited after apply (journals from before the hash was recorded skip this check)
       if (e.hash) {
         const raw = m[0].slice(m[1].length, m[0].length - m[2].length);
@@ -956,18 +1199,31 @@ function undoEntry(e, io) {
       // whitespace that was trimmed from the end of the file (older journals without it assume one newline).
       const next = e.previousBlock ? before + m[1] + e.previousBlock + m[2] + after : before + (typeof e.tail === 'string' ? e.tail : before ? '\n' : '') + after;
       io.describe(io.t('undo.plan.remove_block', { file: e.file, id: e.id }));
-      if (!io.dry) {
-        io.backup(e.file);
-        if (!e.existedBefore && !next.trim()) fs.unlinkSync(e.file); // the file was created by apply and nothing else is in it
-        else fs.writeFileSync(e.file, next, 'utf8');
-      }
+      if (!e.existedBefore && !next.trim()) io.removeFile(e.file); // the file was created by apply and nothing else is in it
+      else io.writeFile(e.file, next);
       return 'ok';
     }
     case 'mcp.disable': {
+      if (!(e.removed || []).length) return 'ok'; // relied on servers another batch removed
       const cfg = io.load(e.file);
       cfg.mcpServers ||= {};
       let restored = 0;
+      const back = []; // the servers nobody else needs gone: they return
+      const kept = [];
       for (const r of e.removed) {
+        const holders = mcpHolders(io, e.file, r, e);
+        if (holders.length) {
+          // another batch in force removed the server too or relies on that: it stays out, the newest of them owns it now
+          const heir = holders[holders.length - 1];
+          if (!(heir.entry.removed || []).some((x) => sameMcp(x, r))) {
+            heir.entry.removed = [...(heir.entry.removed || []), r];
+            heir.entry.claimed = (heir.entry.claimed || []).filter((x) => !sameMcp(x, r));
+            io.touch(heir.box);
+          }
+          kept.push(...holders);
+          continue;
+        }
+        back.push(r);
         let bucket = cfg.mcpServers;
         if (r.where === 'local' && r.projectKey) {
           cfg.projects ||= {};
@@ -979,13 +1235,28 @@ function undoEntry(e, io) {
           restored++;
         }
       }
-      io.describe(io.t('undo.plan.restore_mcp', { file: e.file, names: e.removed.map((r) => r.name).join(', ') }));
+      if (!back.length) return `shared: ${e.file} [${e.removed.map((r) => r.name).join(', ')}] still in use by ${recipeNames(kept)}`;
+      io.describe(io.t('undo.plan.restore_mcp', { file: e.file, names: back.map((r) => r.name).join(', ') }));
       if (!io.dry) io.save(e.file, cfg);
       return restored ? 'ok' : 'servers already present';
     }
     case 'settings.hook.remove': {
+      if (!(e.removed || []).length) return 'ok'; // relied on hooks another batch removed
       let restored = 0;
+      const kept = [];
       for (const r of e.removed) {
+        const holders = hookRemoveHolders(io, r, e);
+        if (holders.length) {
+          // another batch in force removed the hook too or relies on that: it stays out, the newest of them owns it now
+          const heir = holders[holders.length - 1];
+          if (!(heir.entry.removed || []).some((x) => sameRemovedHook(x, r))) {
+            heir.entry.removed = [...(heir.entry.removed || []), r];
+            heir.entry.claimed = (heir.entry.claimed || []).filter((x) => !sameRemovedHook(x, r));
+            io.touch(heir.box);
+          }
+          kept.push(...holders);
+          continue;
+        }
         const s = io.load(r.file);
         s.hooks ||= {};
         const list = (s.hooks[r.event] ||= []);
@@ -998,17 +1269,41 @@ function undoEntry(e, io) {
         io.describe(io.t('undo.plan.restore_hook', { file: r.file, event: r.event, command: hookIdentity(r.hook).split('|')[1] }));
         if (!io.dry) io.save(r.file, s);
       }
+      if (!restored && kept.length) return `shared: ${e.removed[0].file} [${e.removed.map((r) => r.event).join(', ')}] still in use by ${recipeNames(kept)}`;
       return restored ? 'ok' : 'hooks already present';
     }
     case 'plugins.disable': {
-      const s = io.load(e.file);
-      s.enabledPlugins ||= {};
-      for (const c of e.changed) {
-        if (c.previous === null) delete s.enabledPlugins[c.plugin];
-        else s.enabledPlugins[c.plugin] = c.previous;
+      // journals of 0.1.x name one file for the whole entry; a change of a newer journal may name its own
+      const restore = new Map(); // file -> the changes to put back there
+      const kept = [];
+      for (const c of e.changed || []) {
+        const file = c.file || e.file;
+        const holders = pluginHolders(io, { plugin: c.plugin, file }, e);
+        if (holders.length) {
+          // another batch in force switched the plugin off too or relies on it: it stays off, the newest of them owns it
+          const heir = holders[holders.length - 1];
+          if (!(heir.entry.changed || []).some((x) => x.plugin === c.plugin && samePath(x.file || heir.entry.file, file))) {
+            heir.entry.changed = [...(heir.entry.changed || []), { plugin: c.plugin, previous: c.previous, file, ...(c.created ? { created: true } : {}) }];
+            heir.entry.claimed = (heir.entry.claimed || []).filter((x) => !(x.plugin === c.plugin && samePath(x.file, file)));
+            io.touch(heir.box);
+          }
+          kept.push({ plugin: c.plugin, holders });
+        } else restore.set(file, [...(restore.get(file) || []), c]);
       }
-      io.describe(io.t('undo.plan.reenable_plugins', { file: e.file, names: e.changed.map((c) => c.plugin).join(', ') }));
-      if (!io.dry) io.save(e.file, s);
+      for (const [file, changes] of restore) {
+        const s = io.load(file);
+        s.enabledPlugins ||= {};
+        for (const c of changes) {
+          if (c.previous === null || c.previous === undefined) delete s.enabledPlugins[c.plugin];
+          else s.enabledPlugins[c.plugin] = c.previous;
+        }
+        const created = changes.some((c) => c.created); // the file did not exist before apply
+        if (created && !Object.keys(s.enabledPlugins).length) delete s.enabledPlugins;
+        io.describe(io.t('undo.plan.reenable_plugins', { file, names: changes.map((c) => c.plugin).join(', ') }));
+        if (created && !Object.keys(s).length && io.fileText(file) !== null) io.removeFile(file);
+        else if (!io.dry) io.save(file, s);
+      }
+      if (!restore.size && kept.length) return `shared: ${e.file} [${kept.map((k) => k.plugin).join(', ')}] still in use by ${recipeNames(kept.flatMap((k) => k.holders))}`;
       return 'ok';
     }
     default:

@@ -845,6 +845,25 @@ describe('catalog conditions: small samples, nothing to choose, shared hooks', (
     assert.ok(found(withMeasure({ ...lots, 'context.hookEvents': { SessionStart: 1 }, 'context.hookCommandsText': `sessionstart:${SESSION_CONTEXT_CMD}` }), 'hooks.session-context'));
   });
 
+  it('session-context still recognises its own script when it is the per-project one (session-context.<key>.mjs)', () => {
+    const lots = { 'totals.sessions': 20, 'context.hasSessionStartHook': true, 'context.hookEvents': { SessionStart: 1 } };
+    const own = 'sessionstart:node "/home/u/.claude/kaizen/hooks/session-context.3fa9c1d2e4.mjs"';
+    assert.ok(found(withMeasure({ ...lots, 'context.hookCommandsText': own }), 'hooks.session-context'));
+    assert.equal(found(withMeasure({ ...lots, 'context.hookCommandsText': 'sessionstart:node "/x/other-hook.mjs"' }), 'hooks.session-context'), undefined);
+  });
+
+  it('hook scripts with parameters baked in are addressed as {kaizenHome}/hooks/<name>.mjs in both the file action and the hook command, so a project key can be inserted', () => {
+    for (const r of loadCatalog().recipes) {
+      for (const a of (r.actions || []).filter((x) => x.type === 'file' && x.template && /^hooks\//.test(x.template))) {
+        const baked = /\{\{[a-zA-Z0-9_]+\}\}/.test(fs.readFileSync(path.join(KIT_ROOT, 'recipes', 'templates', a.template), 'utf8'));
+        if (!baked) continue;
+        assert.match(a.target, /^\{kaizenHome\}\/hooks\/[A-Za-z0-9_-]+\.mjs$/, `${r.id}: ${a.target}`);
+        const hooks = r.actions.filter((x) => x.type === 'settings.hook' && x.command.includes(a.target));
+        assert.ok(hooks.length, `${r.id}: a settings.hook must run ${a.target}`);
+      }
+    }
+  });
+
   it('prune-unused is not offered without a plugin to disable, nor for plugins that are already disabled', () => {
     const crowded = { 'skills.installed': 24, 'skills.unusedCount': 24, 'skills.unusedShare': 1, 'skills.unusedPlugins': [] };
     assert.equal(found(withMeasure(crowded), 'skills.prune-unused'), undefined);
