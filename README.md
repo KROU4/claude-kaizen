@@ -110,6 +110,8 @@ Full list with definitions: [`docs/recipes.md#metrics-recipes-can-test`](docs/re
 - State lives in `~/.claude/kaizen/` (override with `KAIZEN_STATE_DIR`). Delete the folder to forget everything.
 - Every change is journaled under `~/.claude/kaizen/applied/<batch>/` with backups of the files it touched.
 
+More in the [FAQ](docs/faq.md), [architecture notes](docs/architecture.md) and the [Claude Code formats reference](docs/reference/claude-code-formats.md).
+
 ## How it compares
 
 Kaizen was built after reading ~60 related projects ([docs/prior-art.md](docs/prior-art.md)). The analysis side is crowded (`/insights`, sniffly, ccusage, claude-code-doctor); the writing side is a set of single-surface tools (claude-reflect → CLAUDE.md, cc-safe-setup → hooks, `/fewer-permission-prompts` → allowlist, ccstatusline → status line). Kaizen is the loop: evidence → reviewed, reversible, multi-surface changes → measured again. Zero dependencies, Node only, Windows/macOS/Linux.

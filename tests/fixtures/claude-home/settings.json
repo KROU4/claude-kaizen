@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": ["Bash(git diff:*)", "Read(./docs/**)"],
+    "deny": []
+  },
+  "env": {
+    "DEMO_API_KEY": "synthetic-not-a-real-key",
+    "LOG_LEVEL": "debug"
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [{ "type": "command", "command": "npx prettier --write", "timeout": 30 }]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [{ "type": "command", "command": "node \"C:/Program Files/nodejs/node.exe\" x.mjs" }]
+      }
+    ]
+  },
+  "enabledPlugins": {
+    "demo@fixture-market": true,
+    "idle@fixture-market": true,
+    "retired@fixture-market": false
+  }
+}

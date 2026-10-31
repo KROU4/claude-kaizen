@@ -1,0 +1,19 @@
+{
+  "numStartups": 12,
+  "theme": "dark",
+  "mcpServers": {
+    "used-srv": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["used-srv.mjs"],
+      "env": {}
+    },
+    "dead-srv": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["dead-srv.mjs"],
+      "env": {}
+    }
+  },
+  "projects": {}
+}

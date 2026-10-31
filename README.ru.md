@@ -110,6 +110,8 @@ node scripts/kaizen.mjs undo --last
 - Состояние хранится в `~/.claude/kaizen/` (путь можно переопределить через `KAIZEN_STATE_DIR`). Удалите папку, и Kaizen забудет всё.
 - Каждое изменение записывается в журнал в `~/.claude/kaizen/applied/<batch>/` вместе с резервными копиями затронутых файлов.
 
+Подробнее: [FAQ](docs/faq.md), [заметки об архитектуре](docs/architecture.md) и [справочник форматов Claude Code](docs/reference/claude-code-formats.md) (на английском).
+
 ## Сравнение с аналогами
 
 Kaizen создан после изучения ~60 смежных проектов ([docs/prior-art.md](docs/prior-art.md)). Инструментов для анализа много (`/insights`, sniffly, ccusage, claude-code-doctor); инструменты, которые вносят изменения, — это набор решений, каждое из которых работает с одной областью (claude-reflect → CLAUDE.md, cc-safe-setup → хуки, `/fewer-permission-prompts` → allowlist, ccstatusline → строка состояния). Kaizen — это замкнутый цикл: данные → просмотренные вами, обратимые изменения сразу в нескольких областях → повторное измерение. Без зависимостей, только Node, Windows/macOS/Linux.
