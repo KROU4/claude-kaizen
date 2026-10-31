@@ -37,7 +37,7 @@ measure  →  recommend  →  you choose  →  apply  →  verify  →  (undo)  
 | **Choose** | An interactive console: in the Claude desktop app it is a live artifact Claude reads back; in a terminal it is a local web page; over SSH it falls back to multiple-choice questions. | `… console`, `… choices --import FILE` |
 | **Apply** | Writes hooks into `settings.json`, installs hook scripts, adds permission rules, creates skills and subagents, inserts marked blocks into `CLAUDE.md`, removes dead MCP servers — every write journaled with a backup. | `… apply` (`--param`, `--param-file recipe.name=path`, `--add FILE`) |
 | **Verify** | Self-tests every installed hook and the status line, parses the settings files it writes (`--project` adds the project's `.claude/settings*.json`), checks CLAUDE.md markers. `~/.claude.json` and created skills/agents are checked by the `kaizen-verifier` agent. | `… verify` |
-| **Undo** | Reverts a batch exactly, leaving anything you edited afterwards alone. | `… undo` |
+| **Undo** | Reverts a batch exactly, leaving anything you edited afterwards alone (`--force` reverts those too, after backing them up). | `… undo` |
 
 Everything runs on your machine; the one exception is the optional artifact console in the desktop app (see [Privacy](#privacy)). The only thing a model ever sees is the digest (plus the short scrubbed prompt snippets stored beside it), and none of the agents reads your transcripts directly.
 

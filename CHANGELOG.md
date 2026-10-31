@@ -17,7 +17,7 @@ First public release.
 - Failing-hook detection per command (`friction.failingHooks`) and the `hooks.disable-failing` recipe that removes such entries reversibly.
 - Plugin packaging (`.claude-plugin/`), six skills (`start`, `measure`, `apply`, `undo`, `status`, `recipes`), three subagents (`kaizen-analyst`, `kaizen-smith`, `kaizen-verifier`), weekly SessionStart nudge, a `claude plugin eval` case.
 - English and Russian throughout; language auto-detected from the user's prompts.
-- 450+ tests on synthetic fixtures; CI on Linux, macOS and Windows with Node 18, 20, 22 and 24; `claude plugin validate --strict` in CI.
+- 890+ tests on synthetic fixtures; CI on Linux, macOS and Windows with Node 18, 20, 22 and 24; `claude plugin validate --strict` in CI.
 - `choices --import <FILE|->` validates a choices file (artifact answer, hand-written or chat-built) and writes `choices.json`; `apply --param-file <recipe>.<name>=<path>` takes a multi-line parameter value from a file; `apply --add FILE` and `recommend --add FILE` handle extra recipes (the path is remembered, so `custom.*` recipes drafted by the analyst can be applied).
 
 ### Fixed
@@ -27,3 +27,8 @@ First public release.
 - Drafted rules and skill text are applied through `--param-file` (multi-line `--param` values were rejected); `custom.*` recipes no longer get silently skipped by `apply`.
 - Docs: recipe count (31 in 12 categories), `verify` and `settings.hook.remove` in `docs/architecture.md`, skills and agents directories in the SECURITY.md write list, `verify` wording (settings files it writes; `--project` for project scope; `~/.claude.json` is checked by `kaizen-verifier`), `history.jsonl` removed from `docs/prior-art.md`.
 - CI matrix: Node 18 on every OS and Node 24 added.
+- `permissions.allowlist-readonly` suggests only strictly read-only commands; runners, interpreters and commands that can write or delete are never put into `permissions.allow`.
+- Apply and undo: list parameters are no longer flattened to strings (`hooks.disable-failing` lost commands), `mcp.disable` handles local-scope servers and reports names it could not find, the first backup of a file in a batch is kept, CLAUDE.md blocks are LF-normalised and hash-checked on undo, a partly undone batch stays in the journal (`undo <id> --force` finishes it), recipes that wrote nothing are not recorded as applied, scopes other than `user`/`project` are rejected, boolean flags no longer swallow the next argument, choices files are validated.
+- Console: the local server checks `Host`/`Origin`; secret parameters are never pre-filled, are disabled in artifact mode and are not kept in `localStorage`.
+- Hooks: `protect-secrets` covers PowerShell; `guard-destructive` inspects heredocs that feed a shell or SQL client (and only those), collapses `..` in paths and understands `bash -o …` options.
+- Scanner: `!` shell turns are not prompts, sidechain edits are not counted against the main session, interrupted tools are not tool errors, each hook run is counted once, test-failure detection covers pytest/mocha/node:test/dotnet/go without matching linters, redaction covers prefixed `*_PASSWORD=`/`*_SECRET=`, AWS keys, quoted JSON keys and `Authorization` headers, and unused MCP/skills are reported only with enough sessions.
