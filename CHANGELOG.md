@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [0.1.1] — 2026-11-01
+
+### Added
+- Hooks killed by their timeout are reported on their own (digest section, `friction.hookTimeouts`, the `advice.slow-hooks` recipe); cancelled runs no longer distort hook duration averages.
+- The UI language chosen in `measure`/`recommend` is remembered by every later command (console, apply, undo, verify, status).
+- `npx github:KROU4/claude-kaizen#<tag> <command>` documented as a zero-install way to run the CLI.
+
+### Fixed
+- Hook keys and failing-hook commands shown in the digest are secret-scrubbed; short status-message labels are kept whole instead of their first word.
+- `guard-destructive`: SQL `DROP`/`TRUNCATE` in a heredoc is blocked when it feeds an interpreter or a framework DB shell (`python -`, `node`, `manage.py dbshell`, `rails dbconsole`), but not when it is only written to a file; SQL clients are matched by command name, not by paths such as `prisma/migrations/…`.
+- `apply`: unknown recipe ids no longer create an empty batch, `--param`/`--param-file` typos are errors listing the valid names, user errors print one localized line instead of a stack trace (`KAIZEN_DEBUG=1` shows it), apply/undo plans are localized.
+- `verify` finds Kaizen hooks whatever the state directory is called and reports missing hook or status-line scripts.
+- `undo --force` after a partial undo always backs up the current files first (one backup folder per undo run).
+- Console: localized page title, `lang` attribute and select option labels; secret parameters are never kept in `localStorage`.
+- `deny-secrets` evidence no longer contradicts itself when deny rules already exist.
+
 ## [0.1.0] — 2026-10-31
 
 First public release.
