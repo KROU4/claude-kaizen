@@ -7,6 +7,7 @@
 // Operators: gte gt lte lt eq neq in includes truthy falsy exists
 // Metric paths are dotted paths into the measure object; a trailing `.length`
 // works on arrays, strings and plain objects (key count).
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { exists, expandHome, kitRoot, readJsonSafe } from './paths.mjs';
@@ -39,6 +40,15 @@ export function readExtraRecipes(file) {
 export function addExtraRecipes(catalog, extra) {
   if (extra && Array.isArray(extra.recipes)) catalog.recipes.push(...extra.recipes);
   return catalog;
+}
+
+/**
+ * A short fingerprint of what a recipe would write (its actions and parameter defaults), independent of key order.
+ * `apply` records it for custom.* recipes, so a redrafted recipe is offered again only when its content changed.
+ */
+export function recipeDigest(recipe) {
+  const stable = (v) => (Array.isArray(v) ? v.map(stable) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, stable(v[k])])) : v);
+  return crypto.createHash('sha256').update(JSON.stringify(stable({ actions: recipe.actions || [], params: recipe.params || [] }))).digest('hex').slice(0, 16);
 }
 
 /**

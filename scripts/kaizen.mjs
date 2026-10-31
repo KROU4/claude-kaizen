@@ -21,7 +21,7 @@ import { buildMeasure, METRIC_DOCS } from './lib/metrics.mjs';
 import { renderDigest } from './lib/digest.mjs';
 import { translator, SUPPORTED, UserError } from './lib/i18n.mjs';
 import { claudeVersion, platformSummary } from './lib/platform.mjs';
-import { addExtraRecipes, loadCatalog, readExtraRecipes, recommend, rememberedExtraFile, resolveExtraFile, validateCatalog } from './lib/recipes.mjs';
+import { addExtraRecipes, loadCatalog, readExtraRecipes, recipeDigest, recommend, rememberedExtraFile, resolveExtraFile, validateCatalog } from './lib/recipes.mjs';
 
 const VERSION = JSON.parse(fs.readFileSync(path.join(kitRoot(), 'package.json'), 'utf8')).version;
 
@@ -127,17 +127,23 @@ function appliedIds(extraFile = null) {
   if (extraFile) {
     try {
       const extra = readExtraRecipes(extraFile);
-      if (extra && Array.isArray(extra.recipes)) redrafted = { ids: new Set(extra.recipes.map((r) => r && r.id)), at: fs.statSync(extraFile).mtimeMs };
+      // only custom.* drafts can be redrafted; a built-in id wins a lookup, so its entry in the file changes nothing
+      if (extra && Array.isArray(extra.recipes)) redrafted = { digests: new Map(extra.recipes.filter((r) => r && typeof r.id === 'string' && r.id.startsWith('custom.')).map((r) => [r.id, recipeDigest(r)])), at: fs.statSync(extraFile).mtimeMs };
     } catch {
       /* an unreadable file means no custom recipes to compare */
     }
   }
+  // A batch still covers a redrafted custom recipe when it applied the same content (journals before 0.1.4 have no digest:
+  // there the batch must be newer than the file).
+  const outdated = (man, r) => {
+    if (!redrafted || !redrafted.digests.has(r.id)) return false;
+    return r.digest ? r.digest !== redrafted.digests.get(r.id) : Date.parse(man.at) < redrafted.at;
+  };
   for (const d of fs.readdirSync(journalDir)) {
     const man = readJsonSafe(path.join(journalDir, d, 'manifest.json'));
-    const stale = redrafted && man && Date.parse(man.at) < redrafted.at;
     // A recipe whose every action was skipped (text parameter left empty, settings file unreadable, servers not found)
     // wrote nothing, so it must stay open for a re-apply. Advice recipes have no actions by design and count as handled.
-    if (man && !man.undone) for (const r of man.recipes || []) if (!(stale && redrafted.ids.has(r.id)) && (r.advice || (Array.isArray(r.actions) && r.actions.length))) ids.add(r.id);
+    if (man && !man.undone) for (const r of man.recipes || []) if (!outdated(man, r) && (r.advice || (Array.isArray(r.actions) && r.actions.length))) ids.add(r.id);
   }
   return ids;
 }

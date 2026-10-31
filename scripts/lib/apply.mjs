@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { configDir, ensureDir, exists, expandHome, globalConfigPath, kitRoot, projectConfigKey, readJsonSafe, settingsFiles, stateDir, toPosix, writeJsonAtomic } from './paths.mjs';
 import { nodeCommand } from './platform.mjs';
-import { actionApplies, addExtraRecipes, closeMatches, loadCatalog, readExtraRecipes, rememberedExtraFile, resolveExtraFile, resolvePath } from './recipes.mjs';
+import { actionApplies, addExtraRecipes, closeMatches, loadCatalog, readExtraRecipes, recipeDigest, rememberedExtraFile, resolveExtraFile, resolvePath } from './recipes.mjs';
 import { UserError, translator } from './i18n.mjs';
 import { validateChoices } from './console.mjs';
 
@@ -755,7 +755,7 @@ export async function cmdApply(args, { loadMeasure, pickLang }) {
     if (entries.length) entries.push(...claims);
     for (const d of io.described) lines.push(`  ${dry ? '→' : '✓'} ${d}`);
     for (const n of io.notes) lines.push(`  · ${recipe.id}: ${n}`);
-    manifest.recipes.push({ id: recipe.id, scope, params, actions: entries, advice: !(recipe.actions && recipe.actions.length) });
+    manifest.recipes.push({ id: recipe.id, scope, params, actions: entries, advice: !(recipe.actions && recipe.actions.length), ...(recipe.id.startsWith('custom.') ? { digest: recipeDigest(recipe) } : {}) });
   }
   if (!dry && manifest.recipes.length) {
     ensureDir(batchDir);
@@ -817,7 +817,7 @@ function undoFile(e, io) {
     let before = recordedContent(prev);
     if (before === null && e.existedBefore && io.applyDir) {
       // journals from before the contents/ folder: the batch backup holds the version this entry overwrote
-      const saved = path.join(io.applyDir, 'backups', e.file.replace(/[:\/]/g, '_'));
+      const saved = path.join(io.applyDir, 'backups', e.file.replace(/[:\\/]/g, '_'));
       const old = exists(saved) ? fs.readFileSync(saved, 'utf8') : null;
       if (old !== null && sha(old) === prev.entry.hash) before = old;
     }

@@ -104,6 +104,33 @@ describe('a custom recipe the analyst drafted again', () => {
     assert.ok(ids(done.alreadyApplied).includes('custom.corrections-rules'));
   });
 
+  it('stays applied when the analyst rewrites the file with the same draft (content, not file time, decides)', async () => {
+    const home = measured();
+    const extra = path.join(home.root, 'extra-recipes.json');
+    writeJson(extra, { recipes: [recipe('rule ONE')] });
+    assert.equal(cli(home, ['apply', '--recipe', 'custom.corrections-rules', '--add', extra]).status, 0);
+    await sleep(50);
+    // same rules, keys in another order, file written later than the batch
+    const r = recipe('rule ONE');
+    writeJson(extra, { recipes: [Object.fromEntries(Object.entries(r).reverse())] });
+    const again = json(cli(home, ['recommend', '--json', '--add', extra]));
+    assert.ok(!ids(again.recommendations).includes('custom.corrections-rules'));
+    assert.ok(ids(again.alreadyApplied).includes('custom.corrections-rules'));
+  });
+
+  it('a catalog id listed in the extra file stays applied (the built-in recipe wins)', async () => {
+    const home = measured();
+    const extra = path.join(home.root, 'extra-recipes.json');
+    const first = json(cli(home, ['recommend', '--json']));
+    const id = first.recommendations.find((r) => r.kind === 'recipe' && r.params.length === 0).id;
+    assert.equal(cli(home, ['apply', '--recipe', id]).status, 0);
+    await sleep(50);
+    writeJson(extra, { recipes: [{ ...recipe('x'), id }] });
+    const again = json(cli(home, ['recommend', '--json', '--add', extra]));
+    assert.ok(ids(again.alreadyApplied).includes(id));
+    assert.ok(!ids(again.recommendations).includes(id));
+  });
+
   it('does not touch catalog recipes: an applied catalog id stays applied when the extra file is rewritten', async () => {
     const home = measured();
     const extra = path.join(home.root, 'extra-recipes.json');
