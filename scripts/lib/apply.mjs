@@ -213,7 +213,7 @@ const handlers = {
     if (re.test(existing)) {
       had = true;
       if (existing.match(re)[0] === block) return { skipped: true, reason: 'block unchanged', file: target, id };
-      next = existing.replace(re, block);
+      next = existing.replace(re, () => block); // function form: the text may contain $&, $', $` or $$
     } else {
       next = existing.replace(/\s*$/, '') + (existing.trim() ? '\n\n' : '') + block + '\n';
     }
@@ -223,7 +223,8 @@ const handlers = {
       ensureDir(path.dirname(target));
       fs.writeFileSync(target, next, 'utf8');
     }
-    return { type: 'claude-md.block', file: target, id, existedBefore: exists(target) && existing.length > 0, previousBlock: had ? existing.match(re)[0] : null };
+    // tail: the whitespace an append trimmed from the end of the file, so that undo can give it back exactly
+    return { type: 'claude-md.block', file: target, id, existedBefore: exists(target) && existing.length > 0, previousBlock: had ? existing.match(re)[0] : null, tail: had ? null : existing.match(/\s*$/)[0] };
   },
 
   'mcp.disable'(a, ctx, io) {
@@ -431,7 +432,11 @@ export async function cmdApply(args, { loadMeasure, pickLang }) {
     process.stdout.write(t('cli.apply_nothing') + '\n');
     return { applied: 0 };
   }
-  const batchId = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  // One journal directory per apply. The id has a resolution of one second, so a second apply in the same second
+  // gets a numeric suffix instead of overwriting (and losing) the first batch's manifest and backups.
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  let batchId = stamp;
+  for (let n = 2; exists(path.join(journalDir(), batchId)); n++) batchId = `${stamp}-${String(n).padStart(2, '0')}`;
   const batchDir = path.join(journalDir(), batchId);
   const manifest = { id: batchId, at: new Date().toISOString(), kitVersion: catalog.version, lang, projectDir, dry, recipes: [], notes: choices.notes || '', discuss: choices.discuss || [] };
   const lines = [];
@@ -541,13 +546,19 @@ function undoEntry(e, io) {
       const text = fs.readFileSync(e.file, 'utf8');
       const start = `<!-- kaizen:start ${e.id} -->`;
       const end = `<!-- kaizen:end ${e.id} -->`;
-      const re = new RegExp(`\\n?\\n?${escapeRe(start)}[\\s\\S]*?${escapeRe(end)}\\n?`);
-      if (!re.test(text)) return 'block already gone';
-      const next = e.previousBlock ? text.replace(re, `\n\n${e.previousBlock}\n`) : text.replace(re, '\n');
+      const m = new RegExp(`(\\n?\\n?)${escapeRe(start)}[\\s\\S]*?${escapeRe(end)}(\\n?)`).exec(text);
+      if (!m) return 'block already gone';
+      const before = text.slice(0, m.index);
+      const after = text.slice(m.index + m[0].length);
+      // Exact inverse of apply, with no blank-line clean-up elsewhere in the file:
+      // an in-place update gets its previous text back between the same newlines; an append gives back the
+      // whitespace that was trimmed from the end of the file (older journals without it assume one newline).
+      const next = e.previousBlock ? before + m[1] + e.previousBlock + m[2] + after : before + (typeof e.tail === 'string' ? e.tail : before ? '\n' : '') + after;
       io.describe(`${e.file}: remove rules block "${e.id}"`);
       if (!io.dry) {
         io.backup(e.file);
-        fs.writeFileSync(e.file, next.replace(/\n{3,}/g, '\n\n'), 'utf8');
+        if (!e.existedBefore && !next.trim()) fs.unlinkSync(e.file); // the file was created by apply and nothing else is in it
+        else fs.writeFileSync(e.file, next, 'utf8');
       }
       return 'ok';
     }
@@ -601,10 +612,13 @@ export async function cmdUndo(args, { pickLang }) {
   const dry = !!flags['dry-run'];
   const t = translator(pickLang(flags, null));
   const manifests = listManifests().filter((m) => !m.manifest.undone && !m.manifest.dry);
+  // A batch in which every action was skipped (an apply that found everything already in place) recorded nothing to
+  // revert. It must not shadow the batch that did the work, so "undo" and "undo --all" pass over it.
+  const recorded = manifests.filter((m) => (m.manifest.recipes || []).some((r) => (r.actions || []).length || r.advice));
   let targets;
-  if (flags.all) targets = manifests.slice().reverse();
+  if (flags.all) targets = recorded.slice().reverse();
   else if (args._[1]) targets = manifests.filter((m) => m.id === args._[1]);
-  else targets = manifests.slice(-1);
+  else targets = recorded.slice(-1);
   if (!targets.length) {
     process.stdout.write(t('cli.undo_nothing') + '\n');
     return { undone: 0 };

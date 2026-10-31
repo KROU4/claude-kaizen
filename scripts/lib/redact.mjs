@@ -2,9 +2,11 @@
 // digest an LLM (or a bug report) may read. Conservative by design: false
 // positives cost a few characters, false negatives leak credentials.
 
+// The `sk-` prefixes must not be glued to a preceding letter or digit, otherwise kebab-case words
+// such as "task-management-system-configuration" or "risk-assessment-report" would be mangled.
 const PATTERNS = [
-  ['anthropic-key', /sk-ant-[A-Za-z0-9_-]{16,}/g],
-  ['openai-key', /sk-(?:proj-)?[A-Za-z0-9_-]{20,}/g],
+  ['anthropic-key', /(?<![A-Za-z0-9])sk-ant-[A-Za-z0-9_-]{16,}/g],
+  ['openai-key', /(?<![A-Za-z0-9])sk-(?:proj-)?[A-Za-z0-9_-]{20,}/g],
   ['github-token', /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b/g],
   ['github-pat', /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g],
   ['gitlab-token', /\bglpat-[A-Za-z0-9_-]{16,}\b/g],

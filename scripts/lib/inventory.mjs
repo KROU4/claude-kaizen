@@ -148,16 +148,19 @@ function readSettings(file) {
   };
 }
 
-/** Which topics a CLAUDE.md already covers, so recipes do not add duplicate rules. */
+/**
+ * Which topics a CLAUDE.md already covers, so recipes do not add duplicate rules.
+ * JS `\w` and `\b` only know ASCII letters, so the Russian alternatives use \p{L} and a Unicode-aware lookahead (flag u).
+ */
 export function claudeMdHints(text) {
   const t = String(text || '');
   return {
-    language: /(respond|answer|reply|write)\s+(?:always\s+)?in\s+[a-z]+|отвеча\w+\s+(?:всегда\s+)?(?:на|по-)\s*русск|по-русски|на русском|язык ответ|language:/i.test(t),
-    tests: /\b(run|execute)\s+(the\s+)?tests?\b|\btests?\s+(before|after|must)|запус\w+\s+тест|прогон\w+\s+тест|перед коммитом.*тест/i.test(t),
-    commits: /\bcommit(s)?\b.*\b(message|style|convention|format)|коммит\w*\s.*(сообщен|стил|формат)|co-authored-by/i.test(t),
-    autonomy: /don'?t ask|without asking|autonomous|не спрашива|без подтвержден|автономн/i.test(t),
-    readBeforeEdit: /read\b.*\bbefore\b.*\bedit|re-?read\b|перед (правкой|редактированием).*(прочит|чита)|перечит/i.test(t),
-    verification: /verify\b|verification|before (saying|claiming|calling it) done|проверь\b|перед словом «?готово|ship-check/i.test(t),
+    language: /(respond|answer|reply|write)\s+(?:always\s+)?in\s+[a-z]+|отвеча\p{L}+\s+(?:всегда\s+)?(?:на|по-)\s*русск|по-русски|на русском|язык ответ|language:/iu.test(t),
+    tests: /\b(run|execute)\s+(the\s+)?tests?\b|\btests?\s+(before|after|must)|запус\p{L}+\s+тест|прогон\p{L}+\s+тест|перед коммитом.*тест/iu.test(t),
+    commits: /\bcommit(s)?\b.*\b(message|style|convention|format)|коммит\p{L}*\s.*(сообщен|стил|формат)|co-authored-by/iu.test(t),
+    autonomy: /don'?t ask|without asking|autonomous|не спрашива|без подтвержден|автономн/iu.test(t),
+    readBeforeEdit: /read\b.*\bbefore\b.*\bedit|re-?read\b|перед (правкой|редактированием).*(прочит|чита)|перечит/iu.test(t),
+    verification: /verify\b|verification|before (saying|claiming|calling it) done|проверь(?![\p{L}\p{N}_])|перед словом «?готово|ship-check/iu.test(t),
   };
 }
 

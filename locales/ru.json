@@ -231,6 +231,12 @@
     "filter_all": "Все",
     "search_placeholder": "Фильтр рекомендаций…",
     "show_details": "Подробности",
-    "hide_details": "Скрыть подробности"
+    "hide_details": "Скрыть подробности",
+    "stat_sessions": "Сессий",
+    "stat_days": "Дней",
+    "stat_prompts": "Запросов",
+    "stat_recommendations": "Рекомендаций",
+    "source": "Источник",
+    "discuss": "Обсудить с Claude"
   }
 }

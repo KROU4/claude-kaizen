@@ -47,7 +47,12 @@ export function which(bin) {
 
 export function claudeVersion() {
   try {
-    const r = spawnSync('claude', ['--version'], { encoding: 'utf8', shell: process.platform === 'win32', timeout: 10000 });
+    // Windows needs a shell to find claude.cmd. Node 24 prints DEP0190 on stderr when args are passed together with
+    // `shell: true`, so there the whole command line goes in as one fixed string instead.
+    const r =
+      process.platform === 'win32'
+        ? spawnSync('claude --version', { encoding: 'utf8', shell: true, timeout: 10000 })
+        : spawnSync('claude', ['--version'], { encoding: 'utf8', timeout: 10000 });
     if (r.status === 0) return r.stdout.trim().split(/\r?\n/)[0];
   } catch {
     /* not installed or not on PATH */

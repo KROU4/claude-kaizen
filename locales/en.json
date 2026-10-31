@@ -231,6 +231,12 @@
     "filter_all": "All",
     "search_placeholder": "Filter recommendations…",
     "show_details": "Details",
-    "hide_details": "Hide details"
+    "hide_details": "Hide details",
+    "stat_sessions": "Sessions",
+    "stat_days": "Days",
+    "stat_prompts": "Prompts",
+    "stat_recommendations": "Recommendations",
+    "source": "Source",
+    "discuss": "Discuss with Claude"
   }
 }

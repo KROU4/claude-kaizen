@@ -1,0 +1,1352 @@
+// scripts/lib/apply.mjs: every action handler, its undo, and the cmdApply / cmdUndo flows with the journal.
+//
+// Isolation: every test gets a fresh throw-away home (settings.json, CLAUDE.md, skills, agents, plugins and a
+// ~/.claude.json copied from tests/fixtures) and its own KAIZEN_STATE_DIR. The environment variables are set before
+// the module is imported and before every test; apply.mjs reads them at call time.
+import { after, afterEach, before, beforeEach, describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { loadCatalog, recommend } from '../scripts/lib/recipes.mjs';
+import { KIT_ROOT, buildFixtureMeasure, captureOutput, cleanupTempDirs, makeTempDir, materializeHome, readJson, setEnv, snapshotDir, toPosix, writeJson, writeText } from './helpers.mjs';
+
+let apply;
+let fixtureMeasure;
+let ctx; // the home of the running test
+let restoreEnv;
+let originalCwd;
+
+before(async () => {
+  originalCwd = process.cwd();
+  const boot = materializeHome();
+  const restore = setEnv({ ...boot.env, CLAUDE_PROJECT_DIR: undefined });
+  try {
+    apply = await import('../scripts/lib/apply.mjs');
+  } finally {
+    restore();
+  }
+  ({ measure: fixtureMeasure } = await buildFixtureMeasure());
+});
+
+beforeEach(() => {
+  ctx = materializeHome();
+  restoreEnv = setEnv({ ...ctx.env, CLAUDE_PROJECT_DIR: undefined });
+  // cmdApply falls back to the working directory as "the project": keep it away from the real repository
+  process.chdir(ctx.root);
+});
+
+afterEach(() => {
+  process.chdir(originalCwd);
+  restoreEnv();
+});
+after(() => cleanupTempDirs());
+
+// ------------------------------------------------------------------ helpers
+
+const handlers = () => apply.__test.handlers;
+const appliedDir = () => path.join(ctx.stateDir, 'applied');
+const samePath = (a, b) => toPosix(path.resolve(a)) === toPosix(path.resolve(b));
+const readSettings = () => readJson(ctx.settingsFile);
+const writeSettings = (data) => writeJson(ctx.settingsFile, data);
+const read = (file) => fs.readFileSync(file, 'utf8');
+
+function newCtx({ scope = 'user', projectDir = null, params = {} } = {}) {
+  return apply.buildContext({ scope, projectDir, params });
+}
+
+function newIo(opts = {}) {
+  return apply.__test.makeIo({ dry: false, force: false, measure: fixtureMeasure, batchDir: path.join(ctx.stateDir, 'applied', 'unit'), recipeId: 'unit.recipe', ...opts });
+}
+
+/** Run one handler the way cmdApply does and return {entry, io, ctx}. */
+function run(type, action, { scope, projectDir, params, io } = {}) {
+  const c = newCtx({ scope, projectDir, params });
+  const i = io || newIo();
+  return { entry: handlers()[type](action, c, i), io: i, ctx: c };
+}
+
+/** Undo one journal entry the way cmdUndo does. */
+function undoEntry(entry, opts = {}) {
+  const io = newIo({ force: true, measure: null, recipeId: null, ...opts });
+  return { result: apply.__test.undoEntry(entry, io), io };
+}
+
+function seedState(measure = fixtureMeasure) {
+  writeJson(path.join(ctx.stateDir, 'measure.json'), measure);
+  const res = recommend(loadCatalog(), measure, { includeAll: true });
+  writeJson(path.join(ctx.stateDir, 'recommendations.json'), { generatedAt: '2026-10-30T10:00:00.000Z', lang: 'en', recommendations: res.recommended, alreadyApplied: [], notApplicable: 0 });
+}
+
+async function runApply(flags, { measure = fixtureMeasure, lang = 'en', positional = [] } = {}) {
+  const out = await captureOutput(() => apply.cmdApply({ _: ['apply', ...positional], flags }, { loadMeasure: () => measure, pickLang: () => lang }));
+  return { manifest: out.result, stdout: out.stdout };
+}
+
+async function runUndo(flags = {}, positional = []) {
+  const out = await captureOutput(() => apply.cmdUndo({ _: ['undo', ...positional], flags }, { pickLang: () => 'en' }));
+  return { result: out.result, stdout: out.stdout };
+}
+
+const manifestIds = () => (fs.existsSync(appliedDir()) ? fs.readdirSync(appliedDir()).sort() : []);
+const readManifest = (id) => readJson(path.join(appliedDir(), id, 'manifest.json'));
+
+/** Freeze `new Date()` / Date.now() while fn runs (two applies in the same second are a real-world case). */
+async function withFrozenDate(iso, fn) {
+  const RealDate = Date;
+  const fixed = RealDate.parse(iso);
+  globalThis.Date = class extends RealDate {
+    constructor(...args) {
+      if (args.length === 0) super(fixed);
+      else super(...args);
+    }
+    static now() {
+      return fixed;
+    }
+  };
+  try {
+    return await fn();
+  } finally {
+    globalThis.Date = RealDate;
+  }
+}
+
+/** Every file below `root` as rel path -> parsed JSON (for *.json) or text. */
+function readTree(root) {
+  const out = {};
+  const walk = (dir, rel) => {
+    if (!fs.existsSync(dir)) return;
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, e.name);
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) {
+        out[`${r}/`] = null;
+        walk(full, r);
+      } else if (e.name.endsWith('.json')) out[r] = JSON.parse(fs.readFileSync(full, 'utf8'));
+      else out[r] = fs.readFileSync(full, 'utf8');
+    }
+  };
+  walk(root, '');
+  return out;
+}
+
+// ------------------------------------------------------------------ small pure helpers
+
+describe('path helpers', () => {
+  const T = () => apply.__test;
+
+  it('getPath reads nested values and returns undefined for anything missing', () => {
+    assert.equal(T().getPath({ a: { b: { c: 1 } } }, 'a.b.c'), 1);
+    assert.equal(T().getPath({ a: 1 }, 'a.b'), undefined);
+    assert.equal(T().getPath({}, 'x.y.z'), undefined);
+    assert.equal(T().getPath({ a: null }, 'a.b'), undefined);
+  });
+
+  it('setPath creates missing objects and overwrites scalars on the way', () => {
+    const o = {};
+    T().setPath(o, 'a.b.c', 5);
+    assert.deepEqual(o, { a: { b: { c: 5 } } });
+    T().setPath(o, 'a.b.d', 6);
+    assert.deepEqual(o, { a: { b: { c: 5, d: 6 } } });
+    const scalar = { a: 1 };
+    T().setPath(scalar, 'a.b', 2);
+    assert.deepEqual(scalar, { a: { b: 2 } });
+  });
+
+  it('deletePath removes only the leaf and tolerates missing parents', () => {
+    const o = { a: { b: 1, c: 2 } };
+    T().deletePath(o, 'a.b');
+    assert.deepEqual(o, { a: { c: 2 } });
+    assert.doesNotThrow(() => T().deletePath(o, 'x.y.z'));
+  });
+
+  it('hookIdentity combines the hook type and its command or prompt', () => {
+    assert.equal(T().hookIdentity({ command: 'node x.mjs' }), 'command|node x.mjs');
+    assert.equal(T().hookIdentity({ type: 'prompt', prompt: 'Check it' }), 'prompt|Check it');
+    assert.equal(T().hookIdentity({}), 'command|');
+  });
+
+  it('sha is a stable 16-character hex digest', () => {
+    assert.match(T().sha('abc'), /^[0-9a-f]{16}$/);
+    assert.equal(T().sha('abc'), T().sha('abc'));
+    assert.notEqual(T().sha('abc'), T().sha('abd'));
+  });
+});
+
+describe('buildContext, fill and renderTemplate', () => {
+  it('resolves the user-scope locations from CLAUDE_CONFIG_DIR and KAIZEN_STATE_DIR', () => {
+    const c = newCtx();
+    assert.equal(c.scope, 'user');
+    assert.equal(c.kaizenHome, toPosix(ctx.stateDir));
+    assert.equal(c.configDir, toPosix(ctx.configDir));
+    assert.equal(c.skillsDir, toPosix(path.join(ctx.configDir, 'skills')));
+    assert.equal(c.agentsDir, toPosix(path.join(ctx.configDir, 'agents')));
+    assert.equal(c.claudeMd, toPosix(path.join(ctx.configDir, 'CLAUDE.md')));
+    assert.ok(samePath(c.settingsFile, path.join(ctx.configDir, 'settings.json')));
+    assert.ok(samePath(c.globalConfig, ctx.claudeJson));
+    assert.equal(c.projectDir, '');
+  });
+
+  it('resolves the project-scope locations under the project directory', () => {
+    const project = makeTempDir('kaizen-proj-');
+    const c = newCtx({ scope: 'project', projectDir: project });
+    assert.equal(c.projectDir, toPosix(path.resolve(project)));
+    assert.ok(samePath(c.settingsFile, path.join(project, '.claude', 'settings.json')));
+    assert.equal(c.claudeMd, toPosix(path.join(path.resolve(project), 'CLAUDE.md')));
+    assert.equal(c.skillsDir, toPosix(path.join(path.resolve(project), '.claude', 'skills')));
+  });
+
+  it('refuses project scope without a project directory', () => {
+    assert.throws(() => newCtx({ scope: 'project' }), /project scope requested but no project directory/);
+  });
+
+  it('quotes the Node path only when it contains spaces, and always uses forward slashes', () => {
+    const c = newCtx();
+    assert.ok(!c.node.includes('\\'));
+    assert.equal(/\s/.test(process.execPath), c.node.startsWith('"'));
+  });
+
+  it('fill replaces known placeholders and {params.x}, leaving unknown ones alone', () => {
+    const c = newCtx({ params: { name: 'demo', list: ['a', 'b'], empty: null } });
+    assert.equal(apply.fill('{kaizenHome}/x/{params.name}', c), `${c.kaizenHome}/x/demo`);
+    assert.equal(apply.fill('{params.list}', c), 'a,b');
+    assert.equal(apply.fill('[{params.empty}][{params.missing}]', c), '[][]');
+    assert.equal(apply.fill('{unknown} {params}', c), '{unknown} {params}');
+    assert.equal(apply.fill(42, c), 42);
+  });
+
+  it('renderTemplate fills {{param}} placeholders, joins arrays and keeps unfilled ones', () => {
+    assert.equal(apply.renderTemplate('{{a}} {{b}} {{c}} {{d}}', { a: 'x', b: ['1', '2'], c: undefined, d: null }), 'x 1,2 {{c}} {{d}}');
+    assert.equal(apply.renderTemplate('no placeholders', {}), 'no placeholders');
+  });
+});
+
+// ------------------------------------------------------------------ settings.hook
+
+describe('settings.hook', () => {
+  const action = (over = {}) => ({ type: 'settings.hook', event: 'PreToolUse', matcher: 'Bash', command: '{node} "{kaizenHome}/hooks/x.mjs"', timeout: 10, ...over });
+
+  it('adds a hook group with the placeholders filled in and keeps the existing hooks', () => {
+    const before = readSettings();
+    const { entry, ctx: c } = run('settings.hook', action());
+    const after = readSettings();
+    assert.deepEqual(after.hooks.PreToolUse, [{ matcher: 'Bash', hooks: [{ type: 'command', command: `${c.node} "${c.kaizenHome}/hooks/x.mjs"`, timeout: 10 }] }]);
+    assert.deepEqual(after.hooks.PostToolUse, before.hooks.PostToolUse);
+    assert.deepEqual(after.hooks.Stop, before.hooks.Stop);
+    assert.deepEqual(after.permissions, before.permissions);
+    assert.equal(entry.type, 'settings.hook');
+    assert.equal(entry.event, 'PreToolUse');
+    assert.equal(entry.matcher, 'Bash');
+    assert.ok(samePath(entry.file, ctx.settingsFile));
+  });
+
+  it('is idempotent: the second apply skips and leaves the file untouched', () => {
+    run('settings.hook', action());
+    const bytes = read(ctx.settingsFile);
+    const { entry } = run('settings.hook', action());
+    assert.equal(entry.skipped, true);
+    assert.equal(entry.reason, 'hook already present');
+    assert.equal(read(ctx.settingsFile), bytes);
+    assert.equal(readSettings().hooks.PreToolUse.length, 1);
+  });
+
+  it('treats the same command under another matcher as already present', () => {
+    run('settings.hook', action());
+    const { entry } = run('settings.hook', action({ matcher: 'Edit' }));
+    assert.equal(entry.skipped, true);
+  });
+
+  it('writes matcher-less groups, async and if options when given', () => {
+    run('settings.hook', action({ matcher: undefined, async: true, if: 'Bash(git push *)', event: 'Stop', command: 'echo done' }));
+    const group = readSettings().hooks.Stop.at(-1);
+    assert.equal(group.matcher, undefined);
+    assert.deepEqual(group.hooks, [{ type: 'command', command: 'echo done', timeout: 10, async: true, if: 'Bash(git push *)' }]);
+  });
+
+  it('creates settings.json when it does not exist', () => {
+    fs.rmSync(ctx.settingsFile);
+    run('settings.hook', action());
+    assert.deepEqual(Object.keys(readSettings()), ['hooks']);
+  });
+
+  it('writes nothing in dry-run mode but still describes the change', () => {
+    const bytes = read(ctx.settingsFile);
+    const io = newIo({ dry: true });
+    const { entry } = run('settings.hook', action(), { io });
+    assert.equal(entry.type, 'settings.hook');
+    assert.equal(read(ctx.settingsFile), bytes);
+    assert.equal(io.described.length, 1);
+    assert.match(io.described[0], /add PreToolUse hook \[Bash\]/);
+  });
+
+  it('fails loudly on a corrupt settings.json and does not touch it', () => {
+    writeText(ctx.settingsFile, '{ "hooks": ');
+    assert.throws(() => run('settings.hook', action()), SyntaxError);
+    assert.equal(read(ctx.settingsFile), '{ "hooks": ');
+  });
+
+  it('backs up the previous settings.json into the batch directory', () => {
+    const bytes = read(ctx.settingsFile);
+    run('settings.hook', action());
+    const backups = path.join(ctx.stateDir, 'applied', 'unit', 'backups');
+    const files = fs.readdirSync(backups);
+    assert.equal(files.length, 1);
+    assert.equal(read(path.join(backups, files[0])), bytes);
+  });
+
+  describe('undo', () => {
+    it('removes exactly that hook and keeps the others', () => {
+      const { entry } = run('settings.hook', action());
+      const { result } = undoEntry(entry);
+      assert.equal(result, 'ok');
+      const s = readSettings();
+      assert.equal(s.hooks.PreToolUse, undefined);
+      assert.equal(s.hooks.PostToolUse[0].hooks[0].command, 'npx prettier --write');
+      assert.equal(s.hooks.Stop.length, 1);
+    });
+
+    it('removes the hooks object when it was the only hook', () => {
+      writeSettings({ permissions: { allow: [] } });
+      const { entry } = run('settings.hook', action());
+      undoEntry(entry);
+      assert.deepEqual(readSettings(), { permissions: { allow: [] } });
+    });
+
+    it('leaves sibling hooks of the same event in place', () => {
+      const first = run('settings.hook', action({ command: 'first' }));
+      run('settings.hook', action({ command: 'second', matcher: 'Edit' }));
+      undoEntry(first.entry);
+      assert.deepEqual(readSettings().hooks.PreToolUse.map((g) => g.hooks[0].command), ['second']);
+    });
+
+    it('reports when the hook list or the hook is already gone', () => {
+      const { entry } = run('settings.hook', action());
+      undoEntry(entry);
+      assert.equal(undoEntry(entry).result, 'hook list missing');
+      writeSettings({ hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: 'other' }] }] } });
+      assert.equal(undoEntry(entry).result, 'hook was already gone');
+    });
+  });
+});
+
+// ------------------------------------------------------------------ settings.set
+
+describe('settings.set', () => {
+  const action = (over = {}) => ({ type: 'settings.set', path: 'cleanupPeriodDays', value: 90, ...over });
+
+  it('sets a key that did not exist and remembers that it did not', () => {
+    const { entry } = run('settings.set', action());
+    assert.equal(readSettings().cleanupPeriodDays, 90);
+    assert.equal(entry.hadPrevious, false);
+    assert.equal(entry.previous, null);
+    assert.equal(entry.value, 90);
+  });
+
+  it('journals the previous value of a key that existed', () => {
+    writeSettings({ ...readSettings(), cleanupPeriodDays: 30 });
+    const { entry } = run('settings.set', action());
+    assert.equal(readSettings().cleanupPeriodDays, 90);
+    assert.equal(entry.hadPrevious, true);
+    assert.equal(entry.previous, 30);
+  });
+
+  it('undo restores the previous value', () => {
+    writeSettings({ ...readSettings(), cleanupPeriodDays: 30 });
+    const { entry } = run('settings.set', action());
+    assert.equal(undoEntry(entry).result, 'ok');
+    assert.equal(readSettings().cleanupPeriodDays, 30);
+  });
+
+  it('undo deletes a key that did not exist before (it does not leave null behind)', () => {
+    const { entry } = run('settings.set', action());
+    assert.equal(undoEntry(entry).result, 'ok');
+    assert.ok(!('cleanupPeriodDays' in readSettings()));
+  });
+
+  it('undo keeps a value the user changed after the apply', () => {
+    const { entry } = run('settings.set', action());
+    writeSettings({ ...readSettings(), cleanupPeriodDays: 14 });
+    assert.equal(undoEntry(entry).result, 'kept: cleanupPeriodDays changed since apply');
+    assert.equal(readSettings().cleanupPeriodDays, 14);
+  });
+
+  it('skips when the value is already what it should be', () => {
+    run('settings.set', action());
+    const bytes = read(ctx.settingsFile);
+    const { entry } = run('settings.set', action());
+    assert.equal(entry.skipped, true);
+    assert.equal(entry.reason, 'already set');
+    assert.equal(read(ctx.settingsFile), bytes);
+  });
+
+  it('creates nested objects for a dotted path', () => {
+    run('settings.set', action({ path: 'a.b.c', value: true }));
+    assert.deepEqual(readSettings().a, { b: { c: true } });
+  });
+
+  it('fills placeholders inside object values', () => {
+    const { entry } = run('settings.set', action({ path: 'statusLine', value: { type: 'command', command: 'node "{kaizenHome}/statusline.mjs"', padding: 0 } }));
+    assert.equal(readSettings().statusLine.command, `node "${toPosix(ctx.stateDir)}/statusline.mjs"`);
+    assert.equal(entry.value.padding, 0);
+  });
+
+  it('writes nothing in dry-run mode', () => {
+    const bytes = read(ctx.settingsFile);
+    const io = newIo({ dry: true });
+    run('settings.set', action(), { io });
+    assert.equal(read(ctx.settingsFile), bytes);
+    assert.match(io.described[0], /set cleanupPeriodDays = 90/);
+  });
+
+  it('writes to the project settings file for project scope', () => {
+    const project = makeTempDir('kaizen-proj-');
+    run('settings.set', action(), { scope: 'project', projectDir: project });
+    assert.equal(readJson(path.join(project, '.claude', 'settings.json')).cleanupPeriodDays, 90);
+    assert.ok(!('cleanupPeriodDays' in readSettings()));
+  });
+});
+
+// ------------------------------------------------------------------ settings.append
+
+describe('settings.append', () => {
+  const action = (over = {}) => ({ type: 'settings.append', path: 'permissions.deny', values: ['Read(./.env)', 'Read(~/.ssh/**)'], ...over });
+
+  it('appends the values to an existing list', () => {
+    const { entry } = run('settings.append', action());
+    assert.deepEqual(readSettings().permissions.deny, ['Read(./.env)', 'Read(~/.ssh/**)']);
+    assert.deepEqual(entry.added, ['Read(./.env)', 'Read(~/.ssh/**)']);
+  });
+
+  it('adds only the values that are not already in the list', () => {
+    const { entry } = run('settings.append', action({ path: 'permissions.allow', values: ['Bash(git diff:*)', 'Bash(git status:*)'] }));
+    assert.deepEqual(readSettings().permissions.allow, ['Bash(git diff:*)', 'Read(./docs/**)', 'Bash(git status:*)']);
+    assert.deepEqual(entry.added, ['Bash(git status:*)']);
+  });
+
+  it('undo removes exactly the added items and keeps a pre-existing duplicate', () => {
+    const { entry } = run('settings.append', action({ path: 'permissions.allow', values: ['Bash(git diff:*)', 'Bash(git status:*)'] }));
+    assert.equal(undoEntry(entry).result, 'ok');
+    assert.deepEqual(readSettings().permissions.allow, ['Bash(git diff:*)', 'Read(./docs/**)']);
+  });
+
+  it('undo keeps items the user added in the meantime', () => {
+    const { entry } = run('settings.append', action());
+    const s = readSettings();
+    s.permissions.deny.push('Read(./secrets/**)');
+    writeSettings(s);
+    undoEntry(entry);
+    assert.deepEqual(readSettings().permissions.deny, ['Read(./secrets/**)']);
+  });
+
+  it('skips when everything is already there', () => {
+    run('settings.append', action());
+    const { entry } = run('settings.append', action());
+    assert.equal(entry.skipped, true);
+    assert.equal(entry.reason, 'nothing new to add');
+  });
+
+  it('creates the list when it does not exist', () => {
+    run('settings.append', action({ path: 'permissions.ask', values: ['Bash(rm *)'] }));
+    assert.deepEqual(readSettings().permissions.ask, ['Bash(rm *)']);
+  });
+
+  it('replaces a non-array value with a new list', () => {
+    writeSettings({ permissions: { deny: 'oops' } });
+    run('settings.append', action());
+    assert.deepEqual(readSettings().permissions.deny, ['Read(./.env)', 'Read(~/.ssh/**)']);
+  });
+
+  it('fills placeholders in the values', () => {
+    run('settings.append', action({ values: ['Read({configDir}/secrets/**)'] }));
+    assert.deepEqual(readSettings().permissions.deny, [`Read(${toPosix(ctx.configDir)}/secrets/**)`]);
+  });
+
+  describe('valuesFrom', () => {
+    const measure = { tools: { suggestedAllowRules: [{ rule: 'Bash(git status:*)', count: 5 }, { rule: 'Bash(git diff:*)', count: 4 }, { rule: 'Bash(ls:*)', count: 3 }, { rule: 42 }, null] } };
+    const from = (over = {}) => ({ type: 'settings.append', path: 'permissions.allow', valuesFrom: 'tools.suggestedAllowRules', field: 'rule', ...over });
+
+    it('takes the named field of each item and ignores items that are not strings', () => {
+      const { entry } = run('settings.append', from(), { io: newIo({ measure }) });
+      assert.deepEqual(entry.added, ['Bash(git status:*)', 'Bash(ls:*)']);
+      assert.deepEqual(readSettings().permissions.allow, ['Bash(git diff:*)', 'Read(./docs/**)', 'Bash(git status:*)', 'Bash(ls:*)']);
+    });
+
+    it('honours limit', () => {
+      writeSettings({});
+      const { entry } = run('settings.append', from({ limit: 2 }), { io: newIo({ measure }) });
+      assert.deepEqual(entry.added, ['Bash(git status:*)', 'Bash(git diff:*)']);
+    });
+
+    it('accepts plain strings when no field is named, combined with literal values', () => {
+      const m = { list: ['x', 'y'] };
+      const { entry } = run('settings.append', { type: 'settings.append', path: 'tags', values: ['z'], valuesFrom: 'list' }, { io: newIo({ measure: m }) });
+      assert.deepEqual(entry.added, ['z', 'x', 'y']);
+    });
+
+    it('skips when the measurement path does not exist', () => {
+      const { entry } = run('settings.append', from({ valuesFrom: 'no.such.path' }), { io: newIo({ measure }) });
+      assert.equal(entry.skipped, true);
+    });
+  });
+});
+
+// ------------------------------------------------------------------ claude-md.block
+
+describe('claude-md.block', () => {
+  const action = (over = {}) => ({ type: 'claude-md.block', id: 'read-before-edit', template: 'claude-md/read-before-edit.md', ...over });
+  const claudeMd = () => path.join(ctx.configDir, 'CLAUDE.md');
+  const START = '<!-- kaizen:start read-before-edit -->';
+  const END = '<!-- kaizen:end read-before-edit -->';
+
+  it('appends a marked block to the existing file after one blank line', () => {
+    const original = read(claudeMd());
+    const { entry } = run('claude-md.block', action());
+    const text = read(claudeMd());
+    assert.ok(text.startsWith(original.replace(/\s*$/, '')));
+    const body = read(path.join(KIT_ROOT, 'recipes', 'templates', 'claude-md', 'read-before-edit.md')).trim();
+    assert.ok(text.endsWith(`\n\n${START}\n${body}\n${END}\n`));
+    assert.equal(entry.type, 'claude-md.block');
+    assert.equal(entry.id, 'read-before-edit');
+    assert.equal(entry.previousBlock, null);
+    assert.equal(entry.existedBefore, true);
+  });
+
+  it('creates the file when it does not exist, without a leading blank line', () => {
+    fs.rmSync(claudeMd());
+    const { entry } = run('claude-md.block', action({ template: undefined, content: 'Rule one.' }));
+    assert.equal(read(claudeMd()), `${START}\nRule one.\n${END}\n`);
+    assert.equal(entry.existedBefore, false);
+  });
+
+  it('skips when the block is already there unchanged', () => {
+    run('claude-md.block', action());
+    const bytes = read(claudeMd());
+    const { entry } = run('claude-md.block', action());
+    assert.equal(entry.skipped, true);
+    assert.equal(entry.reason, 'block unchanged');
+    assert.equal(read(claudeMd()), bytes);
+  });
+
+  it('updates the block in place when its content changed (never a second block)', () => {
+    run('claude-md.block', action({ template: undefined, content: 'Version one.' }));
+    const { entry } = run('claude-md.block', action({ template: undefined, content: 'Version two.' }));
+    const text = read(claudeMd());
+    assert.equal(text.split(START).length - 1, 1);
+    assert.ok(text.includes('Version two.'));
+    assert.ok(!text.includes('Version one.'));
+    assert.equal(entry.previousBlock, `${START}\nVersion one.\n${END}`);
+  });
+
+  it('keeps text with $-patterns ($&, $\', $`, $$) literal when it updates a block in place', () => {
+    writeText(claudeMd(), 'Top.\n');
+    run('claude-md.block', action({ template: undefined, content: 'Version one.' }));
+    const tricky = "Use `$&`, `$'`, `$``, `$$` and $1 literally.";
+    run('claude-md.block', action({ template: undefined, content: tricky }));
+    assert.equal(read(claudeMd()), `Top.\n\n${START}\n${tricky}\n${END}\n`);
+  });
+
+  it('undo removes the block and leaves the rest of the file byte-identical', () => {
+    const original = read(claudeMd());
+    const { entry } = run('claude-md.block', action());
+    assert.equal(undoEntry(entry).result, 'ok');
+    assert.equal(read(claudeMd()), original);
+  });
+
+  it('undo does not reformat blank-line runs elsewhere in the file', () => {
+    const original = '# Notes\n\nFirst section.\n\n\n\nSecond section after a wide gap.\n\n\nThird.\n';
+    writeText(claudeMd(), original);
+    const { entry } = run('claude-md.block', action());
+    undoEntry(entry);
+    assert.equal(read(claudeMd()), original);
+  });
+
+  it('undo restores the exact ending of the file: no trailing newline, extra blank lines, CRLF', () => {
+    for (const original of ['# Notes\n\nNo newline at the end', '# Notes\n\n\n\n', '# Notes\r\n\r\nWindows endings\r\n', '\n\n']) {
+      writeText(claudeMd(), original);
+      const { entry } = run('claude-md.block', action({ template: undefined, content: 'Rule.' }));
+      undoEntry(entry);
+      assert.equal(read(claudeMd()), original, JSON.stringify(original));
+    }
+  });
+
+  it('undo deletes a CLAUDE.md that the apply itself created instead of leaving a blank file', () => {
+    fs.rmSync(claudeMd());
+    const { entry } = run('claude-md.block', action({ template: undefined, content: 'Rule one.' }));
+    assert.equal(undoEntry(entry).result, 'ok');
+    assert.ok(!fs.existsSync(claudeMd()));
+  });
+
+  it('undo keeps a CLAUDE.md that the user filled after the apply created it', () => {
+    fs.rmSync(claudeMd());
+    const { entry } = run('claude-md.block', action({ template: undefined, content: 'Rule one.' }));
+    fs.appendFileSync(claudeMd(), '\nMy own notes.\n');
+    undoEntry(entry);
+    assert.equal(read(claudeMd()), '\nMy own notes.\n');
+  });
+
+  it('undo removes the block from the middle of a file the user kept editing', () => {
+    writeText(claudeMd(), 'Top.\n');
+    const { entry } = run('claude-md.block', action({ template: undefined, content: 'Rule.' }));
+    fs.writeFileSync(claudeMd(), `${read(claudeMd())}\nAdded later by the user.\n`);
+    undoEntry(entry);
+    assert.equal(read(claudeMd()), 'Top.\n\nAdded later by the user.\n');
+  });
+
+  it('undo of an in-place update restores the previous version of the block', () => {
+    writeText(claudeMd(), 'Top.\n');
+    const first = run('claude-md.block', action({ template: undefined, content: 'Version one.' }));
+    const second = run('claude-md.block', action({ template: undefined, content: 'Version two.' }));
+    undoEntry(second.entry);
+    assert.equal(read(claudeMd()), `Top.\n\n${START}\nVersion one.\n${END}\n`);
+    undoEntry(first.entry);
+    assert.equal(read(claudeMd()), 'Top.\n');
+  });
+
+  it('undo reports a missing file and a missing block', () => {
+    const { entry } = run('claude-md.block', action());
+    writeText(claudeMd(), 'The user replaced everything.\n');
+    assert.equal(undoEntry(entry).result, 'block already gone');
+    assert.equal(read(claudeMd()), 'The user replaced everything.\n');
+    fs.rmSync(claudeMd());
+    assert.equal(undoEntry(entry).result, 'file missing');
+  });
+
+  it('uses the recipe id as block id when the action has none', () => {
+    const io = newIo({ recipeId: 'claude-md.diet' });
+    run('claude-md.block', { type: 'claude-md.block', content: 'Short.' }, { io });
+    assert.ok(read(claudeMd()).includes('<!-- kaizen:start claude-md.diet -->'));
+  });
+
+  it('fills {{param}} placeholders of the template and {params.x} of inline content', () => {
+    run('claude-md.block', action({ id: 'inline', template: undefined, content: 'Rules:\n{params.rules}' }), { params: { rules: '- be brief' } });
+    assert.ok(read(claudeMd()).includes('Rules:\n- be brief'));
+  });
+
+  it('refuses an empty block', () => {
+    assert.throws(() => run('claude-md.block', action({ template: undefined, content: '   ' })), /empty content/);
+  });
+
+  it('skips inline content whose text parameter was not filled in', () => {
+    const original = read(claudeMd());
+    const { entry } = run('claude-md.block', action({ id: 'corr', template: undefined, content: '{params.rules}' }), { params: { rules: '  ' } });
+    assert.equal(entry.skipped, true);
+    assert.match(entry.reason, /text parameter not filled in/);
+    assert.equal(read(claudeMd()), original);
+  });
+
+  it('writes to the project CLAUDE.md for project scope', () => {
+    const project = makeTempDir('kaizen-proj-');
+    run('claude-md.block', action({ template: undefined, content: 'Project rule.' }), { scope: 'project', projectDir: project });
+    assert.ok(read(path.join(project, 'CLAUDE.md')).includes('Project rule.'));
+  });
+
+  it('writes nothing in dry-run mode', () => {
+    const original = read(claudeMd());
+    const io = newIo({ dry: true });
+    run('claude-md.block', action(), { io });
+    assert.equal(read(claudeMd()), original);
+    assert.match(io.described[0], /add rules block "read-before-edit"/);
+  });
+});
+
+// ------------------------------------------------------------------ file, skill, agent
+
+describe('file action', () => {
+  const action = (over = {}) => ({ type: 'file', template: 'hooks/guard-destructive.mjs', target: '{kaizenHome}/hooks/guard-destructive.mjs', ...over });
+  const target = () => path.join(ctx.stateDir, 'hooks', 'guard-destructive.mjs');
+
+  it('writes the template under the state directory with the {{params}} filled in', () => {
+    const { entry } = run('file', action(), { params: { mode: 'ask', protectedBranches: ['main', 'release'] } });
+    const text = read(target());
+    assert.ok(text.includes("const MODE_RAW = 'ask';"));
+    assert.ok(text.includes("const BRANCHES_RAW = 'main,release';"));
+    assert.ok(!/\{\{[a-zA-Z]+\}\}/.test(text), 'no placeholder may remain');
+    assert.equal(entry.type, 'file');
+    assert.ok(samePath(entry.file, target()));
+    assert.equal(entry.existedBefore, false);
+    assert.equal(entry.hash, apply.__test.sha(text));
+  });
+
+  it('leaves placeholders without a value in place so the script can fall back to its defaults', () => {
+    run('file', action());
+    assert.ok(read(target()).includes("const MODE_RAW = '{{mode}}';"));
+  });
+
+  it('skips when an identical file is already there', () => {
+    run('file', action(), { params: { mode: 'deny' } });
+    const { entry } = run('file', action(), { params: { mode: 'deny' } });
+    assert.equal(entry.skipped, true);
+    assert.equal(entry.reason, 'identical file exists');
+  });
+
+  it('overwrites its own earlier output under the state directory and backs the old version up', () => {
+    run('file', action(), { params: { mode: 'deny' } });
+    const { entry } = run('file', action(), { params: { mode: 'ask' } });
+    assert.equal(entry.existedBefore, true);
+    assert.ok(read(target()).includes("'ask'"));
+    const backups = path.join(ctx.stateDir, 'applied', 'unit', 'backups');
+    assert.equal(fs.readdirSync(backups).length, 1);
+  });
+
+  it('refuses to overwrite a file it did not create outside its own directory, unless forced', () => {
+    const mine = path.join(ctx.configDir, 'agents', 'helper.md');
+    const original = read(mine);
+    const a = { type: 'file', target: mine, content: 'replacement' };
+    const refused = run('file', a);
+    assert.equal(refused.entry.skipped, true);
+    assert.match(refused.entry.reason, /was not created by Kaizen/);
+    assert.equal(read(mine), original);
+    const forced = run('file', a, { io: newIo({ force: true }) });
+    assert.equal(forced.entry.type, 'file');
+    assert.equal(read(mine), 'replacement');
+  });
+
+  it('does overwrite a file outside the state directory when an earlier batch created it', () => {
+    const mine = path.join(ctx.configDir, 'agents', 'kaizen-demo.md');
+    const first = run('file', { type: 'file', target: mine, content: 'v1' });
+    writeJson(path.join(appliedDir(), '2026-10-30T10-00-00', 'manifest.json'), { id: '2026-10-30T10-00-00', recipes: [{ id: 'demo', actions: [first.entry] }] });
+    const second = run('file', { type: 'file', target: mine, content: 'v2' });
+    assert.equal(second.entry.type, 'file');
+    assert.equal(read(mine), 'v2');
+  });
+
+  it('does not treat a file as owned once its batch was undone', () => {
+    const mine = path.join(ctx.configDir, 'agents', 'kaizen-demo.md');
+    const first = run('file', { type: 'file', target: mine, content: 'v1' });
+    writeJson(path.join(appliedDir(), '2026-10-30T10-00-00', 'manifest.json'), { id: '2026-10-30T10-00-00', undone: true, recipes: [{ id: 'demo', actions: [first.entry] }] });
+    assert.equal(run('file', { type: 'file', target: mine, content: 'v2' }).entry.skipped, true);
+  });
+
+  it('creates missing parent directories', () => {
+    const deep = path.join(ctx.stateDir, 'a', 'b', 'c.txt');
+    run('file', { type: 'file', target: deep, content: 'x' });
+    assert.equal(read(deep), 'x');
+  });
+
+  it('writes nothing in dry-run mode', () => {
+    const io = newIo({ dry: true });
+    run('file', action(), { io });
+    assert.ok(!fs.existsSync(target()));
+    assert.match(io.described[0], /create \(\d+ chars\)/);
+  });
+
+  describe('undo', () => {
+    it('deletes the file when it is unchanged', () => {
+      const { entry } = run('file', action());
+      assert.equal(undoEntry(entry).result, 'ok');
+      assert.ok(!fs.existsSync(target()));
+    });
+
+    it('keeps the file, and says so, when it was modified after the apply', () => {
+      const { entry } = run('file', action());
+      fs.appendFileSync(target(), '\n// my own change\n');
+      const { result } = undoEntry(entry);
+      assert.match(result, /^kept: .*modified since apply$/);
+      assert.ok(read(target()).includes('my own change'));
+    });
+
+    it('reports a file that is already gone', () => {
+      const { entry } = run('file', action());
+      fs.rmSync(target());
+      assert.equal(undoEntry(entry).result, 'file already removed');
+    });
+  });
+});
+
+describe('skill action', () => {
+  const skillFile = (name) => path.join(ctx.configDir, 'skills', name, 'SKILL.md');
+
+  it('normalizes the name and adds frontmatter when the content has none', () => {
+    run('skill', { type: 'skill', name: '{params.name}', content: '{params.content}' }, { params: { name: ' My Routine! ', content: 'Step one.\nStep two.' } });
+    assert.equal(read(skillFile('my-routine')), '---\nname: my-routine\ndescription: my routine\n---\n\nStep one.\nStep two.');
+  });
+
+  it('keeps frontmatter the content already has', () => {
+    const content = '---\nname: deploy\ndescription: Deploys it\n---\n\nBody';
+    run('skill', { type: 'skill', name: 'deploy', content });
+    assert.equal(read(skillFile('deploy')), content);
+  });
+
+  it('refuses an empty name or empty content', () => {
+    assert.throws(() => run('skill', { type: 'skill', name: '!!!', content: 'x' }), /empty name/);
+    assert.throws(() => run('skill', { type: 'skill', name: 'ok', content: '   ' }), /empty content/);
+  });
+
+  it('skips when the content parameter was not filled in', () => {
+    const { entry } = run('skill', { type: 'skill', name: 'x', content: '{params.content}' }, { params: { content: '' } });
+    assert.equal(entry.skipped, true);
+    assert.ok(!fs.existsSync(skillFile('x')));
+  });
+
+  it('undo deletes the file and the directory it created, but keeps a directory that has other files', () => {
+    const a = run('skill', { type: 'skill', name: 'alone', content: 'Body' });
+    assert.equal(undoEntry(a.entry).result, 'ok');
+    assert.ok(!fs.existsSync(path.dirname(skillFile('alone'))));
+
+    const b = run('skill', { type: 'skill', name: 'shared', content: 'Body' });
+    writeText(path.join(path.dirname(skillFile('shared')), 'notes.md'), 'mine');
+    assert.equal(undoEntry(b.entry).result, 'ok');
+    assert.ok(!fs.existsSync(skillFile('shared')));
+    assert.ok(fs.existsSync(path.join(path.dirname(skillFile('shared')), 'notes.md')));
+  });
+
+  it('does not overwrite an existing skill of the user', () => {
+    const { entry } = run('skill', { type: 'skill', name: 'demo-skill', content: 'Replacement' });
+    assert.equal(entry.skipped, true);
+    assert.ok(read(skillFile('demo-skill')).includes('Synthetic skill'));
+  });
+});
+
+describe('agent action', () => {
+  it('writes the template as <agentsDir>/<name>.md and undo removes it', () => {
+    const { entry } = run('agent', { type: 'agent', name: 'code-reviewer', template: 'agents/code-reviewer.md' });
+    const file = path.join(ctx.configDir, 'agents', 'code-reviewer.md');
+    assert.equal(read(file), read(path.join(KIT_ROOT, 'recipes', 'templates', 'agents', 'code-reviewer.md')));
+    assert.equal(undoEntry(entry).result, 'ok');
+    assert.ok(!fs.existsSync(file));
+    assert.ok(fs.existsSync(path.join(ctx.configDir, 'agents', 'helper.md')));
+  });
+
+  it('does not overwrite an agent the user already has', () => {
+    const { entry } = run('agent', { type: 'agent', name: 'helper', content: 'x' });
+    assert.equal(entry.skipped, true);
+  });
+
+  it('writes project agents under .claude/agents', () => {
+    const project = makeTempDir('kaizen-proj-');
+    run('agent', { type: 'agent', name: 'test-runner', template: 'agents/test-runner.md' }, { scope: 'project', projectDir: project });
+    assert.ok(fs.existsSync(path.join(project, '.claude', 'agents', 'test-runner.md')));
+  });
+});
+
+// ------------------------------------------------------------------ mcp.disable, plugins.disable, settings.hook.remove
+
+describe('mcp.disable', () => {
+  const action = (servers) => ({ type: 'mcp.disable', servers });
+  const globalConfig = () => readJson(ctx.claudeJson);
+
+  it('moves a server out of ~/.claude.json, journals its definition and keeps the other keys', () => {
+    const original = globalConfig();
+    const { entry } = run('mcp.disable', action(['dead-srv']));
+    const after = globalConfig();
+    assert.deepEqual(Object.keys(after.mcpServers), ['used-srv']);
+    assert.equal(after.numStartups, original.numStartups);
+    assert.equal(after.theme, original.theme);
+    assert.deepEqual(entry.removed, [{ name: 'dead-srv', config: original.mcpServers['dead-srv'] }]);
+  });
+
+  it('backs up ~/.claude.json before changing it', () => {
+    const original = read(ctx.claudeJson);
+    run('mcp.disable', action(['dead-srv']));
+    const backups = path.join(ctx.stateDir, 'applied', 'unit', 'backups');
+    assert.equal(fs.readdirSync(backups).length, 1);
+    assert.equal(read(path.join(backups, fs.readdirSync(backups)[0])), original);
+  });
+
+  it('undo puts the server back with its exact definition', () => {
+    const original = globalConfig();
+    const { entry } = run('mcp.disable', action(['dead-srv']));
+    assert.equal(undoEntry(entry).result, 'ok');
+    assert.deepEqual(globalConfig(), original);
+  });
+
+  it('accepts a comma-separated string, ignores unknown names and skips when none match', () => {
+    const { entry } = run('mcp.disable', action('{params.servers}'), { params: { servers: ['dead-srv', 'ghost'] } });
+    assert.deepEqual(entry.removed.map((r) => r.name), ['dead-srv']);
+    const none = run('mcp.disable', action(['ghost']));
+    assert.equal(none.entry.skipped, true);
+    assert.match(none.entry.reason, /servers not found/);
+  });
+
+  it('skips when no server is selected', () => {
+    assert.equal(run('mcp.disable', action('{params.servers}'), { params: { servers: [] } }).entry.skipped, true);
+    assert.equal(run('mcp.disable', action([])).entry.reason, 'no servers selected');
+  });
+
+  it('skips when ~/.claude.json does not exist', () => {
+    fs.rmSync(ctx.claudeJson);
+    assert.equal(run('mcp.disable', action(['dead-srv'])).entry.skipped, true);
+    assert.ok(!fs.existsSync(ctx.claudeJson));
+  });
+
+  it('undo does not overwrite a server the user has configured again', () => {
+    const { entry } = run('mcp.disable', action(['dead-srv']));
+    const cfg = globalConfig();
+    cfg.mcpServers['dead-srv'] = { type: 'stdio', command: 'other' };
+    writeJson(ctx.claudeJson, cfg);
+    assert.equal(undoEntry(entry).result, 'servers already present');
+    assert.equal(globalConfig().mcpServers['dead-srv'].command, 'other');
+  });
+
+  it('writes nothing in dry-run mode', () => {
+    const original = read(ctx.claudeJson);
+    const io = newIo({ dry: true });
+    const { entry } = run('mcp.disable', action(['dead-srv']), { io });
+    assert.equal(entry.type, 'mcp.disable');
+    assert.equal(read(ctx.claudeJson), original);
+  });
+});
+
+describe('plugins.disable', () => {
+  const action = (plugins) => ({ type: 'plugins.disable', plugins });
+
+  it('turns plugins off in enabledPlugins and remembers what each one was', () => {
+    const { entry } = run('plugins.disable', action(['idle@fixture-market', 'retired@fixture-market', 'new@market']));
+    assert.deepEqual(readSettings().enabledPlugins, { 'demo@fixture-market': true, 'idle@fixture-market': false, 'retired@fixture-market': false, 'new@market': false });
+    assert.deepEqual(entry.changed, [{ plugin: 'idle@fixture-market', previous: true }, { plugin: 'new@market', previous: null }]);
+  });
+
+  it('undo re-enables what was enabled, removes what had no entry, and leaves what was already off', () => {
+    const { entry } = run('plugins.disable', action(['idle@fixture-market', 'retired@fixture-market', 'new@market']));
+    assert.equal(undoEntry(entry).result, 'ok');
+    assert.deepEqual(readSettings().enabledPlugins, { 'demo@fixture-market': true, 'idle@fixture-market': true, 'retired@fixture-market': false });
+  });
+
+  it('skips when everything is already disabled or nothing is selected', () => {
+    assert.equal(run('plugins.disable', action(['retired@fixture-market'])).entry.reason, 'already disabled');
+    assert.equal(run('plugins.disable', action([])).entry.reason, 'no plugins selected');
+  });
+
+  it('accepts the comma-separated {params.plugins} form', () => {
+    const { entry } = run('plugins.disable', action('{params.plugins}'), { params: { plugins: ['idle@fixture-market', 'demo@fixture-market'] } });
+    assert.equal(entry.changed.length, 2);
+  });
+
+  it('writes nothing in dry-run mode', () => {
+    const bytes = read(ctx.settingsFile);
+    run('plugins.disable', action(['idle@fixture-market']), { io: newIo({ dry: true }) });
+    assert.equal(read(ctx.settingsFile), bytes);
+  });
+});
+
+describe('settings.hook.remove', () => {
+  const action = (commands) => ({ type: 'settings.hook.remove', commands });
+
+  it('removes the hook entries whose command matches, ignoring whitespace differences', () => {
+    const { entry } = run('settings.hook.remove', action(['npx   prettier --write']));
+    const s = readSettings();
+    assert.equal(s.hooks.PostToolUse, undefined);
+    assert.equal(s.hooks.Stop.length, 1);
+    assert.equal(entry.removed.length, 1);
+    assert.equal(entry.removed[0].event, 'PostToolUse');
+    assert.equal(entry.removed[0].matcher, 'Edit|Write');
+    assert.equal(entry.removed[0].hook.timeout, 30);
+  });
+
+  it('undo restores the hook with its matcher and options', () => {
+    const before = readSettings();
+    const { entry } = run('settings.hook.remove', action(['npx prettier --write']));
+    assert.equal(undoEntry(entry).result, 'ok');
+    assert.deepEqual(readSettings().hooks.PostToolUse, before.hooks.PostToolUse);
+  });
+
+  it('accepts a newline-separated string and an array', () => {
+    const { entry } = run('settings.hook.remove', action('{params.hooks}'), { params: { hooks: ['npx prettier --write', 'node "C:/Program Files/nodejs/node.exe" x.mjs'] } });
+    assert.equal(entry.removed.length, 2);
+    assert.deepEqual(readSettings().hooks ?? {}, {}, 'no hook event is left');
+  });
+
+  it('skips when no hook matches or nothing is selected', () => {
+    assert.match(run('settings.hook.remove', action(['no such command'])).entry.reason, /not found in settings files/);
+    assert.equal(run('settings.hook.remove', action([])).entry.reason, 'no hooks selected');
+  });
+
+  it('undo does not duplicate a hook that is already back', () => {
+    const { entry } = run('settings.hook.remove', action(['npx prettier --write']));
+    undoEntry(entry);
+    assert.equal(undoEntry(entry).result, 'hooks already present');
+    assert.equal(readSettings().hooks.PostToolUse.length, 1);
+  });
+});
+
+// ------------------------------------------------------------------ cmdApply
+
+describe('cmdApply', () => {
+  it('applies the recipes listed in choices.json and prints one line per change', async () => {
+    seedState();
+    writeJson(path.join(ctx.stateDir, 'choices.json'), { version: 1, selected: [{ id: 'permissions.deny-secrets', scope: 'user', params: {} }, { id: 'settings.cleanup-period', scope: 'user', params: {} }], discuss: [], notes: '' });
+    const { manifest, stdout } = await runApply({});
+    const s = readSettings();
+    assert.equal(s.cleanupPeriodDays, 90);
+    assert.ok(s.permissions.deny.includes('Read(./.env)'));
+    assert.match(stdout, /✓ .*settings\.json: append to permissions\.deny/);
+    assert.match(stdout, /✓ .*set cleanupPeriodDays = 90/);
+    assert.match(stdout, /Applied 2 recipe\(s\)\. Journal: .*manifest\.json/);
+    assert.deepEqual(manifest.recipes.map((r) => r.id), ['permissions.deny-secrets', 'settings.cleanup-period']);
+  });
+
+  it('writes a journal manifest with the documented structure', async () => {
+    seedState();
+    await runApply({ recipe: 'settings.cleanup-period' });
+    const ids = manifestIds();
+    assert.equal(ids.length, 1);
+    const m = readManifest(ids[0]);
+    assert.equal(m.id, ids[0]);
+    assert.ok(Number.isFinite(Date.parse(m.at)));
+    assert.equal(m.kitVersion, loadCatalog().version);
+    assert.equal(m.lang, 'en');
+    assert.equal(m.dry, false);
+    assert.equal(m.notes, '');
+    assert.deepEqual(m.discuss, []);
+    assert.equal(m.recipes.length, 1);
+    const r = m.recipes[0];
+    assert.equal(r.id, 'settings.cleanup-period');
+    assert.equal(r.scope, 'user');
+    assert.equal(r.advice, false);
+    assert.deepEqual(r.params, {});
+    assert.equal(r.actions.length, 1);
+    assert.equal(r.actions[0].type, 'settings.set');
+    assert.equal(r.actions[0].path, 'cleanupPeriodDays');
+    assert.equal(r.actions[0].value, 90);
+    assert.equal(r.actions[0].hadPrevious, false);
+    const last = readJson(path.join(ctx.stateDir, 'last-apply.json'));
+    assert.deepEqual(last, { id: ids[0], at: m.at, recipes: ['settings.cleanup-period'] });
+  });
+
+  it('keeps backups of every file it changed inside the batch directory', async () => {
+    seedState();
+    const before = read(ctx.settingsFile);
+    await runApply({ recipe: 'settings.cleanup-period' });
+    const [id] = manifestIds();
+    const backups = path.join(appliedDir(), id, 'backups');
+    const files = fs.readdirSync(backups);
+    assert.equal(files.length, 1);
+    assert.equal(read(path.join(backups, files[0])), before);
+  });
+
+  it('--recipe takes comma-separated ids and the default parameters from recommendations.json', async () => {
+    seedState();
+    const { manifest } = await runApply({ recipe: 'context.mcp-unused,settings.cleanup-period' });
+    assert.deepEqual(manifest.recipes.map((r) => r.id), ['context.mcp-unused', 'settings.cleanup-period']);
+    assert.deepEqual(manifest.recipes[0].params.servers, ['dead-srv']);
+    assert.deepEqual(Object.keys(readJson(ctx.claudeJson).mcpServers), ['used-srv']);
+  });
+
+  it('--param recipe.id.name=value overrides a parameter, and a comma makes a list', async () => {
+    seedState();
+    const { manifest } = await runApply({ recipe: 'hooks.guard-destructive', param: 'hooks.guard-destructive.protectedBranches=main,release' });
+    assert.deepEqual(manifest.recipes[0].params.protectedBranches, ['main', 'release']);
+    const hook = path.join(ctx.stateDir, 'hooks', 'guard-destructive.mjs');
+    assert.ok(read(hook).includes("const BRANCHES_RAW = 'main,release';"));
+    assert.ok(read(hook).includes("const MODE_RAW = 'deny';"));
+  });
+
+  it('--param can set a scalar parameter of a hook template', async () => {
+    seedState();
+    await runApply({ recipe: 'hooks.guard-destructive', param: 'hooks.guard-destructive.mode=ask' });
+    assert.ok(read(path.join(ctx.stateDir, 'hooks', 'guard-destructive.mjs')).includes("const MODE_RAW = 'ask';"));
+  });
+
+  it('--param for a recipe that is not selected is ignored; a malformed --param is an error', async () => {
+    seedState();
+    await runApply({ recipe: 'settings.cleanup-period', param: 'hooks.guard-destructive.mode=ask' });
+    assert.ok(!fs.existsSync(path.join(ctx.stateDir, 'hooks', 'guard-destructive.mjs')));
+    await assert.rejects(() => runApply({ recipe: 'settings.cleanup-period', param: 'garbage' }), /--param expects recipe\.id\.param=value/);
+  });
+
+  it('installs a hook script and registers it in settings.json', async () => {
+    seedState();
+    const { manifest } = await runApply({ recipe: 'hooks.guard-destructive' });
+    const file = path.join(ctx.stateDir, 'hooks', 'guard-destructive.mjs');
+    assert.ok(fs.existsSync(file));
+    const hooks = readSettings().hooks.PreToolUse;
+    const group = hooks.find((g) => g.hooks.some((h) => h.command.includes('guard-destructive.mjs')));
+    assert.ok(group, 'PreToolUse hook must be registered');
+    assert.ok(group.matcher.includes('Bash'));
+    assert.equal(typeof group.hooks[0].timeout, 'number');
+    assert.ok(group.hooks[0].command.includes(toPosix(ctx.stateDir)), 'the hook points at the installed script by absolute path');
+    assert.deepEqual(manifest.recipes[0].actions.map((a) => a.type), ['file', 'settings.hook']);
+  });
+
+  it('applies to the project when --scope project and --project are given', async () => {
+    seedState();
+    const project = makeTempDir('kaizen-proj-');
+    await runApply({ recipe: 'claude-md.read-before-edit', scope: 'project', project });
+    assert.ok(read(path.join(project, 'CLAUDE.md')).includes('kaizen:start read-before-edit'));
+    assert.ok(!read(path.join(ctx.configDir, 'CLAUDE.md')).includes('kaizen:start'));
+    assert.equal(readManifest(manifestIds()[0]).recipes[0].scope, 'project');
+  });
+
+  it('writes nothing in dry-run mode, prints the plan and does not create a journal', async () => {
+    seedState();
+    const before = snapshotDir(ctx.root);
+    const { manifest, stdout } = await runApply({ recipe: 'hooks.guard-destructive,permissions.deny-secrets,context.mcp-unused', 'dry-run': true });
+    assert.deepEqual(snapshotDir(ctx.root), before);
+    assert.ok(!fs.existsSync(appliedDir()));
+    assert.match(stdout, /→ .*add PreToolUse hook/);
+    assert.match(stdout, /Dry run: nothing written\. \d+ action\(s\) would be applied\./);
+    assert.equal(manifest.dry, true);
+  });
+
+  it('skips actions that are already in place and says why', async () => {
+    seedState();
+    await runApply({ recipe: 'settings.cleanup-period' });
+    const { stdout, manifest } = await runApply({ recipe: 'settings.cleanup-period' });
+    assert.match(stdout, /· settings\.cleanup-period: already set/);
+    assert.deepEqual(manifest.recipes[0].actions, []);
+  });
+
+  it('skips an action whose own condition is not met', async () => {
+    seedState();
+    const m = structuredClone(fixtureMeasure);
+    m.locale = { lang: 'ru', cyrillicShare: 0.9 };
+    m.context.settingsLanguage = 'russian';
+    m.context.claudeMdHints.language = false;
+    const { stdout, manifest } = await runApply({ recipe: 'claude-md.language' }, { measure: m });
+    assert.match(stdout, /· claude-md\.language: settings\.set skipped \(condition not met\)/);
+    assert.deepEqual(manifest.recipes[0].actions.map((a) => a.type), ['claude-md.block']);
+    assert.ok(!('language' in readSettings()));
+  });
+
+  it('reports an unknown recipe and carries on with the others', async () => {
+    seedState();
+    const { manifest, stdout } = await runApply({ recipe: 'no.such-recipe,settings.cleanup-period' });
+    assert.match(stdout, /! unknown recipe no\.such-recipe \(skipped\)/);
+    assert.deepEqual(manifest.recipes.map((r) => r.id), ['settings.cleanup-period']);
+  });
+
+  it('reports a failing action as an error line, keeps going and leaves the broken file alone', async () => {
+    seedState();
+    writeText(ctx.settingsFile, '{ broken');
+    const { stdout, manifest } = await runApply({ recipe: 'settings.cleanup-period,claude-md.read-before-edit' });
+    assert.match(stdout, /! settings\.cleanup-period: /);
+    assert.equal(read(ctx.settingsFile), '{ broken');
+    assert.ok(read(path.join(ctx.configDir, 'CLAUDE.md')).includes('kaizen:start read-before-edit'));
+    assert.deepEqual(manifest.recipes.map((r) => [r.id, r.actions.length]), [['settings.cleanup-period', 0], ['claude-md.read-before-edit', 1]]);
+  });
+
+  it('records advice-only recipes in the journal without touching any file', async () => {
+    seedState();
+    const before = snapshotDir(ctx.configDir);
+    const { manifest } = await runApply({ recipe: 'claude-md.diet' });
+    assert.equal(manifest.recipes[0].advice, true);
+    assert.deepEqual(manifest.recipes[0].actions, []);
+    assert.deepEqual(snapshotDir(ctx.configDir), before);
+    assert.equal(manifestIds().length, 1);
+  });
+
+  it('prints nothing to apply for an empty selection and writes no journal', async () => {
+    writeJson(path.join(ctx.stateDir, 'choices.json'), { version: 1, selected: [], discuss: [], notes: '' });
+    const { manifest, stdout } = await runApply({});
+    assert.deepEqual(manifest, { applied: 0 });
+    assert.match(stdout, /Nothing selected to apply\./);
+    assert.ok(!fs.existsSync(appliedDir()));
+  });
+
+  it('stores the notes and the discuss list of the choices in the journal', async () => {
+    seedState();
+    writeJson(path.join(ctx.stateDir, 'choices.json'), { version: 1, selected: [{ id: 'settings.cleanup-period' }], discuss: ['claude-md.diet'], notes: 'tests are `make check`' });
+    await runApply({});
+    const m = readManifest(manifestIds()[0]);
+    assert.equal(m.notes, 'tests are `make check`');
+    assert.deepEqual(m.discuss, ['claude-md.diet']);
+  });
+
+  it('fails with a helpful message when there is no choices file and no --recipe', async () => {
+    await assert.rejects(() => runApply({}), /No choices file at .*choices\.json/);
+  });
+
+  it('reads the choices from a file given as the first argument', async () => {
+    seedState();
+    const file = path.join(ctx.root, 'my-choices.json');
+    writeJson(file, { version: 1, selected: [{ id: 'settings.cleanup-period' }], discuss: [], notes: '' });
+    const { manifest } = await runApply({}, { positional: [file] });
+    assert.deepEqual(manifest.recipes.map((r) => r.id), ['settings.cleanup-period']);
+  });
+
+  it('prints in the requested language', async () => {
+    seedState();
+    const { stdout, manifest } = await runApply({ recipe: 'settings.cleanup-period' }, { lang: 'ru' });
+    assert.ok(stdout.includes('Применено рецептов: 1. Журнал: '), stdout);
+    assert.equal(manifest.lang, 'ru');
+  });
+
+  it('does not lose the first journal when two batches are applied within the same second', async () => {
+    seedState();
+    await withFrozenDate('2026-10-30T12:00:00.500Z', async () => {
+      await runApply({ recipe: 'settings.cleanup-period' });
+      await runApply({ recipe: 'permissions.deny-secrets' });
+    });
+    assert.equal(manifestIds().length, 2, 'each apply needs its own journal directory');
+    const recipes = manifestIds().flatMap((id) => readManifest(id).recipes.map((r) => r.id)).sort();
+    assert.deepEqual(recipes, ['permissions.deny-secrets', 'settings.cleanup-period']);
+    const { result } = await runUndo({ all: true });
+    assert.equal(result.undone, 2);
+    assert.ok(!('cleanupPeriodDays' in readSettings()));
+    assert.deepEqual(readSettings().permissions.deny, []);
+  });
+});
+
+describe('loadChoices', () => {
+  it('builds the selection from --recipe, taking scope and parameter values from recommendations.json', () => {
+    seedState();
+    const choices = apply.loadChoices({ _: ['apply'], flags: { recipe: 'context.mcp-unused, settings.cleanup-period' } });
+    assert.equal(choices.source, 'cli');
+    assert.deepEqual(choices.selected.map((s) => s.id), ['context.mcp-unused', 'settings.cleanup-period']);
+    assert.deepEqual(choices.selected[0].params, { servers: ['dead-srv'] });
+    assert.equal(choices.selected[0].scope, 'user');
+  });
+
+  it('uses --scope over the recommended scope, and "user" when the recipe is unknown', () => {
+    seedState();
+    const choices = apply.loadChoices({ _: ['apply'], flags: { recipe: 'permissions.deny-secrets,made.up', scope: 'project' } });
+    assert.deepEqual(choices.selected.map((s) => s.scope), ['project', 'project']);
+    const plain = apply.loadChoices({ _: ['apply'], flags: { recipe: 'made.up' } });
+    assert.equal(plain.selected[0].scope, 'user');
+    assert.deepEqual(plain.selected[0].params, {});
+  });
+
+  it('works without recommendations.json', () => {
+    const choices = apply.loadChoices({ _: ['apply'], flags: { recipe: 'settings.cleanup-period' } });
+    assert.deepEqual(choices.selected, [{ id: 'settings.cleanup-period', scope: 'user', params: {} }]);
+  });
+});
+
+// ------------------------------------------------------------------ cmdUndo
+
+describe('cmdUndo', () => {
+  async function applyThree() {
+    seedState();
+    await withFrozenDate('2026-10-30T12:00:01.000Z', () => runApply({ recipe: 'settings.cleanup-period' }));
+    await withFrozenDate('2026-10-30T12:00:02.000Z', () => runApply({ recipe: 'permissions.deny-secrets' }));
+    await withFrozenDate('2026-10-30T12:00:03.000Z', () => runApply({ recipe: 'claude-md.read-before-edit' }));
+    return manifestIds();
+  }
+
+  it('reverts the latest batch and marks it undone with its results', async () => {
+    const ids = await applyThree();
+    const { result, stdout } = await runUndo();
+    assert.equal(result.undone, 1);
+    assert.ok(!read(path.join(ctx.configDir, 'CLAUDE.md')).includes('kaizen:start'));
+    assert.equal(readSettings().cleanupPeriodDays, 90, 'earlier batches stay applied');
+    assert.match(stdout, /Reverted 1 change\(s\) from /);
+    const m = readManifest(ids[2]);
+    assert.equal(m.undone, true);
+    assert.ok(Number.isFinite(Date.parse(m.undoneAt)));
+    assert.deepEqual(m.undoResults.map((r) => [r.recipe, r.type, r.result]), [['claude-md.read-before-edit', 'claude-md.block', 'ok']]);
+  });
+
+  it('walks back batch by batch with repeated undo', async () => {
+    await applyThree();
+    await runUndo();
+    await runUndo();
+    assert.deepEqual(readSettings().permissions.deny, []);
+    assert.equal(readSettings().cleanupPeriodDays, 90);
+    await runUndo();
+    assert.ok(!('cleanupPeriodDays' in readSettings()));
+    const { stdout } = await runUndo();
+    assert.match(stdout, /Nothing to undo\./);
+  });
+
+  it('reverts a specific batch by id', async () => {
+    const ids = await applyThree();
+    await runUndo({}, [ids[0]]);
+    assert.ok(!('cleanupPeriodDays' in readSettings()));
+    assert.ok(readSettings().permissions.deny.includes('Read(./.env)'));
+    assert.ok(read(path.join(ctx.configDir, 'CLAUDE.md')).includes('kaizen:start read-before-edit'));
+  });
+
+  it('--all reverts every batch, newest first', async () => {
+    const ids = await applyThree();
+    const { result, stdout } = await runUndo({ all: true });
+    assert.equal(result.undone, 3);
+    const order = [...stdout.matchAll(/Reverted 1 change\(s\) from (\S+)\./g)].map((m) => m[1]);
+    assert.deepEqual(order, [...ids].reverse());
+    assert.ok(!('cleanupPeriodDays' in readSettings()));
+  });
+
+  it('--dry-run describes the reverts without changing anything or marking batches undone', async () => {
+    const ids = await applyThree();
+    const before = snapshotDir(ctx.root);
+    const { stdout } = await runUndo({ 'dry-run': true });
+    assert.deepEqual(snapshotDir(ctx.root), before);
+    assert.match(stdout, /→ .*remove rules block "read-before-edit"/);
+    assert.equal(readManifest(ids[2]).undone, undefined);
+  });
+
+  it('does nothing when there is nothing to undo, and ignores an unknown id', async () => {
+    const empty = await runUndo();
+    assert.match(empty.stdout, /Nothing to undo\./);
+    assert.equal(empty.result.undone, 0);
+    await applyThree();
+    const unknown = await runUndo({}, ['1999-01-01T00-00-00']);
+    assert.match(unknown.stdout, /Nothing to undo\./);
+  });
+
+  it('never reverts a batch twice', async () => {
+    const ids = await applyThree();
+    await runUndo({}, [ids[2]]);
+    const again = await runUndo({}, [ids[2]]);
+    assert.match(again.stdout, /Nothing to undo\./);
+  });
+
+  it('reports what it kept: a script the user edited stays, and the line says so', async () => {
+    seedState();
+    await runApply({ recipe: 'hooks.guard-destructive' });
+    const hook = path.join(ctx.stateDir, 'hooks', 'guard-destructive.mjs');
+    fs.appendFileSync(hook, '\n// tuned by hand\n');
+    const { result, stdout } = await runUndo();
+    assert.ok(fs.existsSync(hook), 'a modified script must survive undo');
+    assert.match(stdout, /· hooks\.guard-destructive file: kept: .*modified since apply/);
+    assert.equal(result.undone, 1, 'only the settings.hook entry was reverted');
+    assert.ok(!JSON.stringify(readSettings().hooks.PreToolUse || []).includes('guard-destructive'));
+    const m = readManifest(manifestIds()[0]);
+    assert.ok(m.undoResults.some((r) => r.type === 'file' && /^kept:/.test(r.result)));
+  });
+
+  it('still reverts the original change after the same recipe was applied again (a no-op re-apply)', async () => {
+    seedState();
+    await withFrozenDate('2026-10-30T12:00:01.000Z', () => runApply({ recipe: 'settings.cleanup-period' }));
+    await withFrozenDate('2026-10-30T12:00:05.000Z', () => runApply({ recipe: 'settings.cleanup-period' }));
+    await runUndo();
+    assert.ok(!('cleanupPeriodDays' in readSettings()), 'undo after a no-op re-apply must revert the real change');
+  });
+});
+
+// ------------------------------------------------------------------ catalog <-> apply consistency
+
+describe('the recipe catalog against the apply engine', () => {
+  const types = [...new Set(loadCatalog().recipes.flatMap((r) => (r.actions || []).map((a) => a.type)))].sort();
+
+  it('has a handler for every action type used in the catalog', () => {
+    const missing = types.filter((t) => typeof apply.__test.handlers[t] !== 'function');
+    assert.deepEqual(missing, []);
+  });
+
+  it('applies and then fully undoes every recipe of the catalog: the configuration returns to its original state', async () => {
+    seedState();
+    const catalog = loadCatalog();
+    const ids = catalog.recipes.filter((r) => (r.actions || []).length).map((r) => r.id);
+    const before = { config: readTree(ctx.configDir), global: readJson(ctx.claudeJson) };
+    const { manifest } = await runApply({ recipe: ids.join(',') });
+    const changed = manifest.recipes.filter((r) => r.actions.length).map((r) => r.id);
+    assert.ok(changed.length >= 10, `expected many recipes to apply, got: ${changed.join(', ')}`);
+    assert.notDeepEqual(readTree(ctx.configDir), before.config, 'applying must change something');
+    const { result } = await runUndo({ all: true });
+    assert.ok(result.undone > 0);
+    assert.deepEqual(readTree(ctx.configDir), before.config);
+    assert.deepEqual(readJson(ctx.claudeJson), before.global);
+  });
+
+  it('round-trips each recipe on its own as well', async () => {
+    seedState();
+    const catalog = loadCatalog();
+    const failures = [];
+    for (const recipe of catalog.recipes.filter((r) => (r.actions || []).length)) {
+      const before = { config: readTree(ctx.configDir), global: readJson(ctx.claudeJson) };
+      await runApply({ recipe: recipe.id });
+      await runUndo({ all: true });
+      try {
+        assert.deepEqual(readTree(ctx.configDir), before.config);
+        assert.deepEqual(readJson(ctx.claudeJson), before.global);
+      } catch (err) {
+        failures.push(`${recipe.id}: ${String(err.message).split('\n')[0]}`);
+        // restore a pristine home for the next recipe
+        restoreEnv();
+        ctx = materializeHome();
+        restoreEnv = setEnv({ ...ctx.env, CLAUDE_PROJECT_DIR: undefined });
+        seedState();
+      }
+    }
+    assert.deepEqual(failures, []);
+  });
+});

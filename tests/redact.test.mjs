@@ -31,6 +31,12 @@ describe('redact: token families', () => {
     });
   }
 
+  it('still redacts a key that follows punctuation, a quote, an equals sign or an underscore', () => {
+    const key = `sk-${rep('x9', 12)}`;
+    for (const before of ['"', "'", '=', ':', ' ', '(', '_', '\n']) assert.equal(redact(`k${before}${key}`), `k${before}[REDACTED:openai-key]`, JSON.stringify(before));
+    assert.equal(redact(key), '[REDACTED:openai-key]');
+  });
+
   it('redacts a PEM private key block across lines', () => {
     const key = `-----BEGIN RSA PRIVATE KEY-----\n${rep('MIIBOgIBAAJB', 5)}\n${rep('AKj34GkxFhD9', 3)}\n-----END RSA PRIVATE KEY-----`;
     assert.equal(redact(`key:\n${key}\ndone`), 'key:\n[REDACTED:private-key]\ndone');
@@ -95,6 +101,10 @@ describe('redact: text that must stay untouched', () => {
     'C:\\Users\\dev\\project\\src\\app.ts',
     'ssh-keygen -t ed25519 -C "dev laptop"',
     'npm run build -- --mode=production',
+    'task-management-system-configuration-file',
+    'open .claude/tasks/risk-assessment-for-the-quarterly-report.md',
+    'docker build -t disk-usage-reporter-service-image .',
+    'the task-notification-handler-service-layer crashed',
   ];
   for (const text of untouched) {
     it(`does not change: ${text.slice(0, 50)}`, () => {

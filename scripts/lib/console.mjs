@@ -45,8 +45,8 @@ export function buildConsoleData({ recommendations, lang, mode, submitUrl, measu
 export function renderConsole(data) {
   const template = fs.readFileSync(path.join(kitRoot(), 'console', 'index.html'), 'utf8');
   if (!template.includes(PLACEHOLDER)) throw new Error('console/index.html: data placeholder missing');
-  // </script> inside JSON strings would end the script block early
-  const json = JSON.stringify(data).replace(/<\//g, '<\\/');
+  // "</script>" or "<!--" inside JSON strings would end or confuse the script block; < is valid JSON and JS
+  const json = JSON.stringify(data).replace(/</g, '\\u003c');
   // function form: a plain string replacement would interpret $&, $', $1 … inside the data
   return template.replace(PLACEHOLDER, () => json);
 }

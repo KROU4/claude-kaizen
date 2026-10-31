@@ -11,6 +11,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { configDir, ensureDir, exists, kitRoot, projectsDir, readJsonSafe, settingsFiles, stateDir, usageDataDir, writeJsonAtomic } from './lib/paths.mjs';
 import { scanTranscripts } from './lib/transcripts.mjs';
 import { inventory } from './lib/inventory.mjs';
@@ -548,8 +549,21 @@ export async function main(argv = process.argv.slice(2)) {
   }
 }
 
-const isMain = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'));
-if (isMain) {
+/**
+ * True when this file is the process entry point. The module URL is compared as a file path (not as the percent-encoded
+ * `pathname` of the URL, which breaks for spaces and non-ASCII characters) and both sides are resolved through the
+ * file system, so an npm bin symlink matches too.
+ */
+function isEntryPoint() {
+  if (!process.argv[1]) return false;
+  try {
+    return fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryPoint()) {
   main().catch((e) => {
     err(`kaizen: ${e && e.stack ? e.stack : e}`);
     process.exitCode = 1;

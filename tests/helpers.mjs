@@ -73,14 +73,14 @@ export function copyTree(src, dst, { textReplace = null } = {}) {
  * Build a throw-away "user home" from the fixtures:
  *   <root>/home/.claude.json          global config with the two MCP servers
  *   <root>/home/.claude/              CLAUDE_CONFIG_DIR (settings, CLAUDE.md, skills, agents, plugins, [projects], [usage-data])
- *   <root>/state                      KAIZEN_STATE_DIR
- * `env` holds the four variables a process needs to see this home instead of the real one.
+ *   <root>/state                      KAIZEN_STATE_DIR (or, with defaultState, the default <config dir>/kaizen)
+ * `env` holds the variables a process needs to see this home instead of the real one.
  */
-export function materializeHome({ projects = false, usageData = false } = {}) {
+export function materializeHome({ projects = false, usageData = false, defaultState = false } = {}) {
   const root = makeTempDir('kaizen-home-');
   const home = path.join(root, 'home');
   const configDir = path.join(home, '.claude');
-  const stateDir = path.join(root, 'state');
+  const stateDir = defaultState ? path.join(configDir, 'kaizen') : path.join(root, 'state');
   copyTree(path.join(FIXTURES, 'claude-home'), configDir, { textReplace: { '{{FIXTURES}}': toPosix(FIXTURES) } });
   fs.copyFileSync(path.join(FIXTURES, 'claude.json'), path.join(home, '.claude.json'));
   if (projects) copyTree(PROJECTS_FIXTURE, path.join(configDir, 'projects'));
@@ -93,7 +93,7 @@ export function materializeHome({ projects = false, usageData = false } = {}) {
     stateDir,
     claudeJson: path.join(home, '.claude.json'),
     settingsFile: path.join(configDir, 'settings.json'),
-    env: { HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: configDir, KAIZEN_STATE_DIR: stateDir },
+    env: { HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: configDir, KAIZEN_STATE_DIR: defaultState ? undefined : stateDir },
   };
 }
 

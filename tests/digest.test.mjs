@@ -127,12 +127,22 @@ describe('compareMeasures', () => {
 
   it('does not judge changes under 5 percent, or metrics without a direction', () => {
     const prev = base();
+    prev.friction.permissionPrompts = 100;
     const cur = at(prev);
-    cur.friction.permissionPrompts = 21;
-    cur.totals.sessions = 30;
+    cur.friction.permissionPrompts = 104; // +4 percent
+    cur.totals.sessions = 30; // tripled, but sessions has no better/worse direction
     const rows = Object.fromEntries(compareMeasures(prev, cur, t).map((r) => [r.path, r]));
     assert.equal(rows['friction.permissionPrompts'].better, null);
     assert.equal(rows['totals.sessions'].better, null);
+  });
+
+  it('judges a change of exactly 5 percent', () => {
+    const prev = base();
+    prev.friction.permissionPrompts = 100;
+    const cur = at(prev);
+    cur.friction.permissionPrompts = 105;
+    const row = compareMeasures(prev, cur, t).find((r) => r.path === 'friction.permissionPrompts');
+    assert.equal(row.better, false);
   });
 
   it('treats growth from zero as a full change', () => {
@@ -173,7 +183,9 @@ describe('renderDigest with a previous measurement', () => {
     const md = renderDigest(measure, 'en', earlier());
     assert.ok(md.includes(`## ${d.delta}`));
     assert.ok(md.includes('2026-10-01'));
-    assert.ok(md.includes('| Permission prompts | 20 | 5 | -15 ✓ |') || /Permission prompts[^\n]*\| 20 \| 5 \| -15 ✓/.test(md), md.slice(md.indexOf(`## ${d.delta}`)));
+    assert.ok(md.includes(`| ${loadLocale('en').f.permission_prompts} | 20 | 5 | -15 ✓ |`), md.slice(md.indexOf(`## ${d.delta}`)));
+    assert.ok(md.includes('(14-day window)'));
+    assert.ok(md.includes('(30-day window)'));
   });
 
   it('adds nothing without a previous measurement', () => {
