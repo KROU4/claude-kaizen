@@ -65,7 +65,7 @@
     "claude_md_fail": "{file}: несбалансированные маркеры Kaizen (start {start}, end {end})",
     "journal": "последний пакет: {id} ({recipes}){undone}",
     "nothing": "Kaizen пока ничего не устанавливал.",
-    "summary_ok": "проверка: все {n} проверок пройдены",
+    "summary_ok": "проверка: все проверки пройдены ({n})",
     "summary_fail": "проверка: не пройдено {failed} из {n}"
   },
   "m": {
