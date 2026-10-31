@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [0.1.4] — 2026-11-01
+
+### Fixed
+- Undo of shared hook scripts (`session-context` / `precompact-handoff`, or one recipe applied several times with different parameters):
+  - each batch now keeps the content it wrote (`applied/<batch>/contents/`), so undoing the newest writer puts back the previous writer's version in any undo order, with no `--force`;
+  - the script and its SessionStart hook are removed only when no live batch uses them;
+  - a user edit is detected against the hash Kaizen itself wrote, so it is never deleted silently;
+  - a user's own hook in a shared matcher group is kept while the Kaizen hook is removed;
+  - `undo --all --dry-run` reports exactly what the real run does.
+- `long-command-nudge`: the bodies of here-strings and heredocs (commit messages, file content) and the blocks of `Start-Job` and of `Start-Process` without `-Wait` are not read as commands. `Start-Process … -Wait`, `Wait-Job` and `Receive-Job -Wait` on a long job now get the nudge. `npx.cmd` and `pnpm.cmd exec` are recognised.
+- A user-scope MCP server switched off with `/mcp` in one project is still offered for removal when it is unused everywhere; the result no longer depends on the folder `measure` ran in.
+- `recommend --top N --add FILE` warns about `paramDefaults` of recipes cut off by `--top`.
+- A custom recipe drafted again by `kaizen-analyst` is offered again only when its content changed (a digest is stored with the batch), and an applied catalog recipe stays applied even if the extra file lists its id.
+- `kaizen-verifier` matches created skills and agents on Windows paths too. The apply and start skills always pass `--add ~/.claude/kaizen/extra-recipes.json` when custom recipes are in play.
+
 ## [0.1.3] — 2026-11-01
 
 ### Fixed
