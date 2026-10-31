@@ -229,7 +229,18 @@ function analyze(cmd, ps, ctx, depth = 0, bodies = []) {
       }
     }
   }
-  if (SQL_RE.test(cmd) && (SQL_CLIENT.test(cmd) || names.some((n) => !TEXT_ONLY.has(n)))) return 'SQL DROP/TRUNCATE cannot be undone';
+  // SQL on the command line itself; inside a heredoc only when that heredoc feeds a SQL client (psql <<EOF, cat <<EOF | mysql),
+  // so `cat <<EOF > migration.sql` with a DROP in it stays allowed
+  const outer = stripHeredocs(cmd.replace(/\r\n?/g, '\n'), []);
+  if (SQL_RE.test(outer) && (SQL_CLIENT.test(outer) || names.some((n) => !TEXT_ONLY.has(n)))) return 'SQL DROP/TRUNCATE cannot be undone';
+  for (let k = 0; k < info.length; k++) {
+    const owned = [...info[k].raw.join(' ').matchAll(MARK)].map((m) => bodies[+m[1]] || '');
+    if (!owned.some((b) => SQL_RE.test(b))) continue;
+    for (let j = k; j < info.length; j++) {
+      if (SQL_CLIENT.test(info[j].raw.join(' '))) return 'SQL DROP/TRUNCATE cannot be undone';
+      if (!info[j].raw.pipe) break;
+    }
+  }
   return null;
 }
 
@@ -261,6 +272,7 @@ function selftest() {
     'rm -rf "$ROOT/.."', 'rm -rf "${BUILD_DIR}/../.."', 'rm -rf "$(pwd)/.."', 'rm -rf "%ROOT%/.."', 'rm -rf "$ROOT/../"*',
     "bash -euo pipefail <<'EOF'\nrm -rf /\nEOF", 'bash -o pipefail <<EOF\nrm -rf /\nEOF', 'bash -O extglob <<EOF\nrm -rf /\nEOF', 'bash<<EOF\nrm -rf /\nEOF',
     'cat <<EOF > a.md\nhi\nEOF\nbash <<X\nrm -rf /\nX', 'cat <<EOF | tr a b | bash\nrm -rf /\nEOF',
+    "psql mydb <<'SQL'\nDROP TABLE users;\nSQL", 'cat <<EOF | mysql app\nTRUNCATE TABLE logs;\nEOF', 'ssh db psql <<EOF\nDROP DATABASE x;\nEOF',
   ];
   const good = [
     'ls -la', 'rm -rf node_modules', 'rm -rf dist/', 'rm -rf ./tmp/foo', 'rm file.txt', 'rm -rf build/*', 'git push --force-with-lease origin feature/x', 'git push origin main',
@@ -271,6 +283,7 @@ function selftest() {
     'rm -rf "$ROOT/../site"', 'rm -rf "${BUILD_DIR}/../tmp-artifacts"', 'rm -rf "$(pwd)/../x"', 'rm -rf "$repo/../$name"', 'rm -rf "%ROOT%/../x"', 'rm -rf "$SCRIPT_DIR/../release-tmp"',
     'cat <<EOF > a.md\nrm -rf /\nEOF\nbash <<X\necho hi\nX', 'cat <<EOF > deploy.md\nrm -rf ~/old\nEOF\ngit add deploy.md && eval "$(ssh-agent -s)"',
     'cat <<EOF > notes.md\nrm -rf ~\nEOF\nsource venv/bin/activate && bash -l', "bash -euo pipefail <<'EOF'\necho hi\nEOF",
+    'cat <<EOF > migrations/001.sql\nDROP TABLE old_users;\nEOF\nnode scripts/check.js', "cat > down.sql <<'SQL'\nTRUNCATE TABLE cache;\nSQL",
   ];
   let failed = 0;
   const run = (tool, command, branch = () => null) => evaluate({ tool_name: tool, tool_input: { command } }, { branch });
