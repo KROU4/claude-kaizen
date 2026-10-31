@@ -279,7 +279,8 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
       .sort((a, b) => b[1].count - a[1].count)
       .slice(0, 15)
       .map(([verb, v]) => ({ verb, count: v.count, maxSec: Math.round(v.maxMs / 1000), avgSec: Math.round(v.totalMs / v.count / 1000) })),
-    slowCommandsTotal: sum(Object.values(slowByVerb), (v) => v.count),
+    // per-session lists are capped; the per-session count keeps the true total
+    slowCommandsTotal: sum(S, (s) => (typeof s.slowCommandCount === 'number' ? s.slowCommandCount : (s.slowCommands || []).length)),
     suggestedAllowRules: suggestAllowRules(bashVerbs),
   };
 
@@ -538,8 +539,9 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
     testsPerCommit: git.commit ? round(sum(S, (s) => s.testCommands) / git.commit, 2) : null,
     sessionsWithCommits: S.filter((s) => (s.git && s.git.commit) > 0).length,
     sessionsWithTests: S.filter((s) => s.testCommands > 0).length,
-    sessionsWithEditsNoTests: S.filter((s) => s.filesEdited > 0 && s.testCommands === 0).length,
-    sessionsWithEdits: S.filter((s) => s.filesEdited > 0).length,
+    // code edits only (docs and images excluded); summaries from before the split fall back to all edits
+    sessionsWithEditsNoTests: S.filter((s) => (s.codeFilesEdited ?? s.filesEdited) > 0 && s.testCommands === 0).length,
+    sessionsWithEdits: S.filter((s) => (s.codeFilesEdited ?? s.filesEdited) > 0).length,
     gitVerbs: git,
   };
   quality.editsWithoutTestsShare = quality.sessionsWithEdits ? round(quality.sessionsWithEditsNoTests / quality.sessionsWithEdits, 3) : 0;

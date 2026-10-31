@@ -12,7 +12,7 @@ import { readJsonl } from './jsonl.mjs';
 import { redact, snippet } from './redact.mjs';
 import { ensureDir, readJsonSafe, writeJsonAtomic } from './paths.mjs';
 
-export const SUMMARY_VERSION = 18;
+export const SUMMARY_VERSION = 19;
 
 const INTERRUPT_RE = /\[Request interrupted by user/;
 const COMPACT_RE = /^This session is being continued from a previous conversation/;
@@ -44,6 +44,8 @@ const LEFTOVER_TAG_RE = /<\/?[a-z][a-z0-9_-]*(?:\s[^>]*)?>/g;
 
 // Per session; the list only has to be long enough that the per-window total is not clipped by a busy session.
 const MAX_SLOW_COMMANDS = 200;
+// Documentation and notes: edits to these alone do not call for a test run.
+const DOC_EXTS = new Set(['.md', '.mdx', '.markdown', '.txt', '.rst', '.adoc', '.org', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp']);
 
 const TEST_CMD_RE =
   /\b(pytest|py\.test|npm (?:run )?test|yarn (?:run )?test|pnpm (?:run )?test|bun test|vitest|jest|mocha|go test|cargo test|dotnet test|mvn (?:-[^\s]+ )*test|gradle(?:w)? test|phpunit|rspec|mix test|make test|ctest|tox|nox|node --test)\b/;
@@ -213,6 +215,7 @@ export function newSessionSummary(file) {
     webSearches: 0,
     webFetches: 0,
     filesEdited: new Set(),
+    codeFilesEdited: new Set(),
     extensions: {},
     models: {}, // model -> {messages, input, output, cacheRead, cacheCreate}
     peakContextTokens: 0,
@@ -240,6 +243,7 @@ export function newSessionSummary(file) {
 
 function finalize(s) {
   s.filesEdited = s.filesEdited instanceof Set ? s.filesEdited.size : s.filesEdited;
+  s.codeFilesEdited = s.codeFilesEdited instanceof Set ? s.codeFilesEdited.size : s.codeFilesEdited;
   // keep only the most frequent commands/stems to bound cache size
   s.bashCommands = topN(s.bashCommands, 60);
   s.promptStems = topN(s.promptStems, 80);
@@ -442,6 +446,8 @@ export async function summarizeTranscript(file) {
           const fp = input.file_path || input.notebook_path;
           s.filesEdited.add(fp);
           const ext = path.extname(fp).toLowerCase() || '(none)';
+          // prose and notes are not code: editing only them should not count as "edited without running tests"
+          if (!DOC_EXTS.has(ext)) s.codeFilesEdited.add(fp);
           inc(s.extensions, ext);
         }
         if (b.id) pendingTools.set(b.id, { name, ts, verb, isBash, sidechain });

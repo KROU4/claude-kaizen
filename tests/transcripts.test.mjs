@@ -574,6 +574,18 @@ describe('summarizeTranscript: edge cases on inline transcripts', () => {
   const toolUse = (id, name, input) => ({ type: 'tool_use', id, name, input });
   const toolResult = (id, content, isError = true) => ({ type: 'tool_result', tool_use_id: id, is_error: isError, content });
 
+  it('tells code edits from documentation-only edits', async () => {
+    const s = await summarizeLines([
+      asst('e1', [toolUse('t1', 'Edit', { file_path: 'README.md', old_string: 'a', new_string: 'b' })]),
+      asst('e2', [toolUse('t2', 'Write', { file_path: 'docs/notes.txt', content: 'x' })]),
+      asst('e3', [toolUse('t3', 'Edit', { file_path: 'src/app.ts', old_string: 'a', new_string: 'b' })]),
+    ]);
+    assert.equal(s.filesEdited, 3);
+    assert.equal(s.codeFilesEdited, 1);
+    const docsOnly = await summarizeLines([asst('d1', [toolUse('t1', 'Edit', { file_path: 'CHANGELOG.md', old_string: 'a', new_string: 'b' })])]);
+    assert.equal(docsOnly.codeFilesEdited, 0);
+  });
+
   it('does not count `!` shell turns (bash-input / bash-stdout / bash-stderr) as prompts, stems or samples', async () => {
     const s = await summarizeLines([
       userLine('<bash-input>git status</bash-input>', { uuid: 'u1' }),
