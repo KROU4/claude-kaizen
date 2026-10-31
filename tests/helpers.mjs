@@ -233,3 +233,31 @@ export function dedupeByUuid(lines) {
 }
 
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * The measurement of the synthetic fixtures: real scanTranscripts + real inventory() of a throw-away home
+ * + readInsights of tests/fixtures/usage-data. Environment variables are restored before returning.
+ */
+export async function buildFixtureMeasure({ windowDays = 30 } = {}) {
+  const home = materializeHome();
+  const restore = setEnv({ ...home.env, CLAUDE_PROJECT_DIR: undefined });
+  try {
+    const { scanTranscripts } = await import('../scripts/lib/transcripts.mjs');
+    const { inventory } = await import('../scripts/lib/inventory.mjs');
+    const { readInsights } = await import('../scripts/lib/insights.mjs');
+    const { buildMeasure } = await import('../scripts/lib/metrics.mjs');
+    const scan = await scanTranscripts({ projectsDir: PROJECTS_FIXTURE });
+    const inv = inventory({ projectDir: null });
+    const insights = readInsights(USAGE_DATA_FIXTURE);
+    const measure = buildMeasure({
+      sessions: scan.sessions,
+      inventory: inv,
+      insights,
+      env: { windowDays, since: '2026-10-01T00:00:00.000Z', configDir: home.configDir, projectDir: null, platform: { platform: 'test', node: process.version }, claudeVersion: null, kitVersion: '0.0.0-test' },
+      scan,
+    });
+    return { measure, sessions: scan.sessions, scan, inventory: inv, insights, home };
+  } finally {
+    restore();
+  }
+}
