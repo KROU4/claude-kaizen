@@ -556,6 +556,15 @@ describe('kaizen console (mode B): an old choices.json is never taken for this r
     assert.deepEqual(readJson(path.join(home.stateDir, 'choices.previous.json')), old, 'and kept under another name');
   });
 
+  it('the timeout line on stderr is localized (--lang ru), not hard-coded English', () => {
+    const home = setup();
+    const ru = runCli(['console', '--no-open', '--timeout', '0.02', '--lang', 'ru'], { env: home.env });
+    assert.equal(ru.status, 3, ru.stderr);
+    assert.match(ru.stderr, /время ожидания выбора истекло/);
+    const en = runCli(['console', '--no-open', '--timeout', '0.02', '--lang', 'en'], { env: home.env });
+    assert.match(en.stderr, /timed out waiting for choices/);
+  });
+
   it('`apply` after that timeout has nothing to apply instead of last week\'s selection', () => {
     const home = setup();
     const m = runCli(['measure', '--all', '--quiet'], { env: { ...home.env, CLAUDE_CONFIG_DIR: home.configDir } });

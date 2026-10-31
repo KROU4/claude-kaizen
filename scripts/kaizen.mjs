@@ -11,6 +11,7 @@
 //   kaizen undo      [ID|--last|--all] [--dry-run] [--force]
 //   kaizen status | doctor | selfcheck | docs | nudge | help | --version
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -339,11 +340,11 @@ async function cmdChoices(args) {
  * JSON object. Skills and agents take every file location from here instead of assuming ~/.claude/kaizen.
  */
 function cmdPaths() {
-  const state = stateDir();
+  const state = path.resolve(stateDir()); // KAIZEN_STATE_DIR / CLAUDE_CONFIG_DIR may be relative: callers run from other folders
   const at = (...p) => path.join(state, ...p);
   const report = {
     stateDir: state,
-    configDir: configDir(),
+    configDir: path.resolve(configDir()),
     measureMd: at('measure.md'),
     measureJson: at('measure.json'),
     measurePreviousMd: at('measure.previous.md'),
@@ -366,19 +367,23 @@ function cmdPaths() {
  * `apply --from-batch ID [--recipe a,b]`: re-apply recipes of a journaled batch with the scope and parameters that batch
  * used (drafted rules, skill bodies, chosen modes), e.g. after undoing the batch to drop one recipe. The manifest of the
  * batch is turned into a choices document; `apply` then runs on it like on any choices file, so the dry run, the journal
- * and `undo` behave as usual. Returns the args `apply` should run with.
+ * and `undo` behave as usual. The project directory is the one the batch was applied in (unless --project is given),
+ * so project-scope settings go back to the same project wherever the command is run from. The choices document lives in
+ * a temp folder outside the state dir (nothing is written to the state on a dry run); the caller removes that folder with
+ * `dropFromBatchChoices`. Returns the args `apply` should run with.
  */
 function applyArgsFromBatch(args) {
+  const t = translator(pickLang(args.flags, null));
   const id = args.flags['from-batch'];
-  if (!id || id === true) throw new UserError('--from-batch needs a batch id (see "status")');
-  if (args._[1]) throw new UserError('--from-batch cannot be combined with a choices FILE');
+  if (!id || id === true) throw new UserError(t('err.from_batch_no_id'));
+  if (args._[1]) throw new UserError(t('err.from_batch_with_file'));
   const manifestFile = path.join(stateDir(), 'applied', String(id), 'manifest.json');
   const manifest = readJsonSafe(manifestFile);
-  if (!manifest || !Array.isArray(manifest.recipes)) throw new UserError(`--from-batch: no manifest at ${manifestFile}`);
+  if (!manifest || !Array.isArray(manifest.recipes)) throw new UserError(t('err.from_batch_no_manifest', { file: manifestFile }));
   const want = args.flags.recipe && args.flags.recipe !== true ? String(args.flags.recipe).split(',').map((x) => x.trim()).filter(Boolean) : null;
   if (want) {
     const missing = want.filter((r) => !manifest.recipes.some((x) => x.id === r));
-    if (missing.length) throw new UserError(`--from-batch: batch ${id} has no recipe ${missing.join(', ')} (it has: ${manifest.recipes.map((x) => x.id).join(', ')})`);
+    if (missing.length) throw new UserError(t('err.from_batch_no_recipe', { id, missing: missing.join(', '), have: manifest.recipes.map((x) => x.id).join(', ') }));
   }
   const picked = manifest.recipes.filter((r) => (want ? want.includes(r.id) : r.advice || (Array.isArray(r.actions) && r.actions.length)));
   const choices = {
@@ -390,12 +395,22 @@ function applyArgsFromBatch(args) {
     discuss: [],
     notes: '',
   };
-  const file = path.join(ensureDir(stateDir()), 'choices.from-batch.json');
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'kaizen-from-batch-')), 'choices.json');
   writeJsonAtomic(file, choices);
   const flags = { ...args.flags };
   delete flags['from-batch'];
   delete flags.recipe;
+  if (!flags.project && typeof manifest.projectDir === 'string' && manifest.projectDir) flags.project = manifest.projectDir;
   return { _: [args._[0], file], flags };
+}
+
+/** Removes the temp folder `applyArgsFromBatch` made for the choices document. */
+function dropFromBatchChoices(applyArgs) {
+  try {
+    fs.rmSync(path.dirname(applyArgs._[1]), { recursive: true, force: true });
+  } catch {
+    /* a temp folder left behind is harmless */
+  }
 }
 
 // ---------------------------------------------------------------- status / doctor
@@ -757,7 +772,13 @@ export async function main(argv = process.argv.slice(2)) {
       return cmdChoices(args);
     case 'apply': {
       const { cmdApply } = await import('./lib/apply.mjs');
-      return cmdApply(args.flags['from-batch'] !== undefined ? applyArgsFromBatch(args) : args, { loadMeasure, pickLang });
+      if (args.flags['from-batch'] === undefined) return cmdApply(args, { loadMeasure, pickLang });
+      const fromBatch = applyArgsFromBatch(args);
+      try {
+        return await cmdApply(fromBatch, { loadMeasure, pickLang });
+      } finally {
+        dropFromBatchChoices(fromBatch);
+      }
     }
     case 'undo': {
       const { cmdUndo } = await import('./lib/apply.mjs');

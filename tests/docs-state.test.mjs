@@ -145,3 +145,20 @@ describe('docs: deleting the state folder', () => {
     assert.ok(!JSON.stringify(readJson(home.settingsFile)).includes('guard-destructive.mjs'));
   });
 });
+
+describe('architecture doc: transcript scanner wording matches the scanner', () => {
+  const arch = read('docs', 'architecture.md');
+  const row = arch.split('\n').find((l) => l.startsWith('| `scripts/lib/transcripts.mjs`')) || '';
+
+  it('says subagent transcripts are read and every uuid is counted once across files (forks), not per file', () => {
+    assert.match(row, /subagents\/\*\.jsonl/);
+    assert.match(row, /`uuid` once across all files/);
+    assert.match(row, /fork/);
+    assert.ok(!/repeated lines by `uuid`/.test(row), 'the old per-file wording is gone');
+  });
+
+  it('documents that apply --from-batch keeps the batch project directory and paths prints absolute paths', () => {
+    assert.match(arch, /--from-batch ID \[--recipe ids\]` to re-apply a journaled batch with its own scope, parameters and project directory/);
+    assert.match(arch, /absolute-path JSON/);
+  });
+});

@@ -36,6 +36,18 @@ describe('kaizen paths', () => {
     assert.equal(path.resolve(p.choicesImport), path.join(home.stateDir, 'choices.import.json'));
   });
 
+  it('prints absolute paths even when KAIZEN_STATE_DIR and CLAUDE_CONFIG_DIR are relative', () => {
+    const home = materializeHome();
+    const env = { ...home.env, KAIZEN_STATE_DIR: 'rel-state', CLAUDE_CONFIG_DIR: 'rel-config' };
+    const p = json(cli(home, ['paths'], { env, cwd: home.root }));
+    const real = fs.realpathSync(home.root);
+    for (const [key, value] of Object.entries(p)) assert.ok(path.isAbsolute(value), `${key} is not absolute: ${value}`);
+    assert.equal(fs.realpathSync(path.dirname(p.stateDir)), real);
+    assert.equal(path.basename(p.stateDir), 'rel-state');
+    assert.equal(path.basename(p.configDir), 'rel-config');
+    assert.equal(path.dirname(p.measureMd), p.stateDir);
+  });
+
   it('follows CLAUDE_CONFIG_DIR alone: <config dir>/kaizen, not a fixed ~/.claude/kaizen', () => {
     const home = materializeHome({ defaultState: true });
     const p = json(cli(home, ['paths']));
@@ -127,6 +139,70 @@ describe('apply --from-batch', () => {
     cli(home, ['undo', id]);
     assert.equal(cli(home, ['apply', '--from-batch', id, '--recipe', 'settings.cleanup-period']).status, 0);
     assert.equal(readJson(path.join(home.stateDir, 'choices.json')).notes, 'kept');
+  });
+
+  it('re-applies project-scope recipes into the project the batch was applied in, wherever it is run from', () => {
+    const home = measured();
+    const projA = path.join(home.root, 'projA');
+    const projB = path.join(home.root, 'projB');
+    fs.mkdirSync(projA, { recursive: true });
+    fs.mkdirSync(projB, { recursive: true });
+    const first = cli(home, ['apply', '--recipe', 'permissions.accept-edits,settings.cleanup-period', '--scope', 'project', '--project', projA]);
+    assert.equal(first.status, 0, first.stderr + first.stdout);
+    const [id] = batchIds(home);
+    const fileA = path.join(projA, '.claude', 'settings.json');
+    assert.ok(fs.existsSync(fileA), 'the first batch wrote project A');
+    assert.equal(cli(home, ['undo', id]).status, 0);
+    const before = fs.existsSync(fileA) ? fs.readFileSync(fileA, 'utf8') : null;
+
+    const again = cli(home, ['apply', '--from-batch', id, '--recipe', 'permissions.accept-edits'], { cwd: projB });
+    assert.equal(again.status, 0, again.stderr + again.stdout);
+    assert.notEqual(fs.existsSync(fileA) ? fs.readFileSync(fileA, 'utf8') : null, before, 'project A got the settings back');
+    assert.match(fs.readFileSync(fileA, 'utf8'), /acceptEdits/);
+    assert.ok(!fs.existsSync(path.join(projB, '.claude', 'settings.json')), 'the folder it ran from is untouched');
+    const fresh = readJson(path.join(home.stateDir, 'applied', batchIds(home)[1], 'manifest.json'));
+    assert.equal(path.resolve(fresh.projectDir), path.resolve(projA));
+  });
+
+  it('an explicit --project wins over the project of the batch', () => {
+    const home = measured();
+    const projA = path.join(home.root, 'projA');
+    const projC = path.join(home.root, 'projC');
+    fs.mkdirSync(projA, { recursive: true });
+    fs.mkdirSync(projC, { recursive: true });
+    assert.equal(cli(home, ['apply', '--recipe', 'permissions.accept-edits', '--scope', 'project', '--project', projA]).status, 0);
+    const [id] = batchIds(home);
+    assert.equal(cli(home, ['undo', id]).status, 0);
+    assert.equal(cli(home, ['apply', '--from-batch', id, '--project', projC]).status, 0);
+    assert.ok(fs.existsSync(path.join(projC, '.claude', 'settings.json')));
+    assert.ok(!/acceptEdits/.test(fs.existsSync(path.join(projA, '.claude', 'settings.json')) ? fs.readFileSync(path.join(projA, '.claude', 'settings.json'), 'utf8') : ''));
+  });
+
+  const stateFiles = (dir) => fs.readdirSync(dir, { recursive: true }).map(String).sort();
+
+  it('writes nothing into the state directory on a dry run, nor leaves choices.from-batch.json after a real one', () => {
+    const { home, id } = setup();
+    assert.equal(cli(home, ['undo', id]).status, 0);
+    const before = stateFiles(home.stateDir);
+    const dry = cli(home, ['apply', '--from-batch', id, '--dry-run']);
+    assert.equal(dry.status, 0, dry.stderr + dry.stdout);
+    assert.deepEqual(stateFiles(home.stateDir), before, 'a dry run leaves the state directory as it was');
+    assert.equal(cli(home, ['apply', '--from-batch', id]).status, 0);
+    assert.ok(!stateFiles(home.stateDir).some((f) => /choices.from-batch/.test(f)));
+  });
+
+  it('localizes its errors (--lang ru) from the locale files, with en/ru parity', () => {
+    const { home, id } = setup();
+    const noId = cli(home, ['apply', '--from-batch', '--lang', 'ru']);
+    assert.equal(noId.status, 1);
+    assert.match(noId.stderr, /требует id пакета/);
+    assert.match(cli(home, ['apply', '--from-batch', 'nope', '--lang', 'ru']).stderr, /нет манифеста/);
+    assert.match(cli(home, ['apply', '--from-batch', id, '--recipe', 'hooks.protect-secrets', '--lang', 'ru']).stderr, /нет рецепта hooks.protect-secrets/);
+    assert.match(cli(home, ['apply', 'choices.json', '--from-batch', id, '--lang', 'ru']).stderr, /нельзя сочетать/);
+    for (const lang of ['en', 'ru']) {
+      const err = readJson(path.join(KIT_ROOT, 'locales', `${lang}.json`)).err;
+      for (const k of ['from_batch_no_id', 'from_batch_with_file', 'from_batch_no_manifest', 'from_batch_no_recipe']) assert.ok(typeof err[k] === 'string' && err[k], `${lang}.err.${k}`);
+    }
   });
 
   it('fails clearly for an unknown batch, a recipe the batch does not have, a missing id and a FILE', () => {
