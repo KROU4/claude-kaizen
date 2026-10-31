@@ -114,15 +114,30 @@ function loadMeasure() {
   return m;
 }
 
-function appliedIds() {
+/**
+ * Ids of the recipes the journal holds as applied. `extraFile` is the extra-recipes file in use: kaizen-analyst rewrites
+ * it on every run and keeps the `custom.*` ids stable, so a custom recipe whose batch is older than the last write of
+ * that file was applied with the previous draft and is offered again (re-applying replaces its block or skill).
+ */
+function appliedIds(extraFile = null) {
   const journalDir = path.join(stateDir(), 'applied');
   const ids = new Set();
   if (!exists(journalDir)) return ids;
+  let redrafted = null;
+  if (extraFile) {
+    try {
+      const extra = readExtraRecipes(extraFile);
+      if (extra && Array.isArray(extra.recipes)) redrafted = { ids: new Set(extra.recipes.map((r) => r && r.id)), at: fs.statSync(extraFile).mtimeMs };
+    } catch {
+      /* an unreadable file means no custom recipes to compare */
+    }
+  }
   for (const d of fs.readdirSync(journalDir)) {
     const man = readJsonSafe(path.join(journalDir, d, 'manifest.json'));
+    const stale = redrafted && man && Date.parse(man.at) < redrafted.at;
     // A recipe whose every action was skipped (text parameter left empty, settings file unreadable, servers not found)
     // wrote nothing, so it must stay open for a re-apply. Advice recipes have no actions by design and count as handled.
-    if (man && !man.undone) for (const r of man.recipes || []) if (r.advice || (Array.isArray(r.actions) && r.actions.length)) ids.add(r.id);
+    if (man && !man.undone) for (const r of man.recipes || []) if (!(stale && redrafted.ids.has(r.id)) && (r.advice || (Array.isArray(r.actions) && r.actions.length))) ids.add(r.id);
   }
   return ids;
 }
@@ -214,20 +229,21 @@ function cmdRecommend(flags) {
   const extra = extraFile ? readExtraRecipes(extraFile) : null;
   if (flags.add && !extra) throw new UserError(translator(lang)('err.add_unreadable', { file: flags.add }));
   addExtraRecipes(catalog, extra);
-  const res = recommend(catalog, measure, { lang, applied: appliedIds(), includeAll: !!flags.all });
+  const res = recommend(catalog, measure, { lang, applied: appliedIds(extraFile), includeAll: !!flags.all });
+  // what is written (and shown) below is the --top slice, so the paramDefaults check must look at that slice, not the full list
+  const top = flags.top ? Number(flags.top) : 0;
+  const list = top ? res.recommended.slice(0, top) : res.recommended;
   if (extra && extra.paramDefaults && typeof extra.paramDefaults === 'object') {
     for (const r of res.recommended) {
       const defaults = extra.paramDefaults[r.id];
       if (!defaults) continue;
       for (const p of r.params) if (defaults[p.name] !== undefined) p.value = defaults[p.name];
     }
-    const shown = new Set(res.recommended.map((r) => r.id));
+    const shown = new Set(list.map((r) => r.id));
     const dropped = Object.keys(extra.paramDefaults).filter((id) => !shown.has(id));
     if (dropped.length) err(translator(lang)('cli.param_defaults_dropped', { ids: dropped.join(', ') }));
   }
   if (extra && typeof extra.profile === 'string') writeJsonAtomic(path.join(stateDir(), 'profile.json'), { generatedAt: new Date().toISOString(), profile: extra.profile });
-  const top = flags.top ? Number(flags.top) : 0;
-  const list = top ? res.recommended.slice(0, top) : res.recommended;
   const payload = {
     generatedAt: new Date().toISOString(),
     lang,
@@ -594,7 +610,7 @@ function cmdNudge() {
     }
     if (rec && rec.generatedAt !== seen.recommendationsAt) {
       // recipes the user already applied are not "new", even though recommendations.json is only rewritten by `recommend`
-      const applied = appliedIds();
+      const applied = appliedIds(rememberedExtraFile(state));
       const high = rec.recommendations.filter((r) => r.impact === 'high' && !applied.has(r.id)).length;
       writeJsonAtomic(path.join(state, 'nudge-seen.json'), { ...seen, recommendationsAt: rec.generatedAt });
       if (high > 0) {

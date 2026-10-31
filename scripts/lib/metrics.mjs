@@ -475,13 +475,16 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
     legacyCommands: inventory.legacyCommands.length,
     installedNames: installedSkillNames.slice(0, 300),
   };
-  // servers of the shared .mcp.json that the user disabled, or never approved, and servers switched off with /mcp for
-  // this project (disabledMcpServers) are not loaded and so cost nothing
+  // servers of the shared .mcp.json that the user disabled, or never approved, are not loaded and so cost nothing. A server
+  // switched off with /mcp for this project (disabledMcpServers) is off only here: that spares a project or local server
+  // (it exists only for this project), but a user-scope server stays connected, and costs context, in every other project,
+  // and the transcript scan covers all of them. So it stays a candidate no matter which directory measure runs from.
   const inactiveProject = new Set([...(inventory.mcp.disabledProject || []), ...(inventory.mcp.pendingProject || [])]);
   const disabledHere = new Set(inventory.mcp.disabledHere || []);
-  const configured = new Set(
-    [...inventory.mcp.user, ...inventory.mcp.project.filter((n) => !inactiveProject.has(n)), ...inventory.mcp.local].filter((n) => !disabledHere.has(n)),
-  );
+  const configured = new Set([
+    ...inventory.mcp.user,
+    ...[...inventory.mcp.project.filter((n) => !inactiveProject.has(n)), ...inventory.mcp.local].filter((n) => !disabledHere.has(n)),
+  ]);
   // Claude Code builds tool names as mcp__<server with every char outside [a-zA-Z0-9_-] replaced by '_'>__<tool>, so
   // compare the normalised configured name with the transcript key exactly; the configured name stays as written.
   const usedServers = new Set(Object.keys(mcpUsed));

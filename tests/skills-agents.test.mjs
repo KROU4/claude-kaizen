@@ -75,8 +75,14 @@ describe('kaizen-verifier: checks match the manifest that apply writes', () => {
     const types = manifest.recipes.flatMap((r) => r.actions.map((a) => a.type));
     assert.deepEqual(types, ['file', 'file'], 'no entry of type skill or agent exists');
     assert.ok(!/`skill` or `agent` action/.test(text), 'check 4 must not look for skill/agent entries');
-    assert.match(text, /`file` entr(?:y|ies) whose path ends in `\/SKILL\.md`/);
+    assert.match(text, /`file` entr(?:y|ies) whose path ends in `SKILL\.md` inside a `skills\/<name>\/` folder/);
     assert.match(text, /ends in `\.md` inside an `agents\/` folder/);
+    // the rule must not depend on the separator: apply records these two kinds with the platform's (`\` on Windows)
+    assert.match(text, /treat `\\` and `\/` as the same separator/);
+    const toRuleShape = (file) => file.replace(/\\/g, '/');
+    const files = manifest.recipes.flatMap((r) => r.actions.map((a) => a.file));
+    assert.ok(files.some((f) => /\/skills\/one\/SKILL\.md$/.test(toRuleShape(f))), files.join('\n'));
+    assert.ok(files.some((f) => /\/agents\/kz-agent\.md$/.test(toRuleShape(f))), files.join('\n'));
   });
 
   it('settings.hook.remove is checked for absence, not presence', () => {
@@ -130,6 +136,41 @@ describe('start: analyst drafts replace the catalog recipes of the same job', ()
   });
   it('keeps smith for the case where no analyst draft exists', () => {
     assert.match(text, /no analyst draft covers them/);
+  });
+  it('checks recommendations[].id, not alreadyApplied, and says what to do with a custom id found only there', () => {
+    assert.match(text, /in `recommendations\[\]\.id` specifically/);
+    assert.match(text, /only under `alreadyApplied`/);
+    assert.match(text, /apply --recipe <id> --add ~\/\.claude\/kaizen\/extra-recipes\.json/);
+  });
+});
+
+describe('analyst: custom ids are stable and a rewritten file re-offers them', () => {
+  it('tells the analyst to keep the ids and write the file fresh', () => {
+    assert.match(read('agents', 'kaizen-analyst.md'), /Keep the same ids on every run/);
+  });
+});
+
+describe('apply skill: custom recipes always get --add with the named file', () => {
+  const text = read('skills', 'apply', 'SKILL.md');
+  it('names the extra recipes file and does not leave it to Kaizen to remember the path', () => {
+    assert.match(text, /add `--add ~\/\.claude\/kaizen\/extra-recipes\.json`/);
+    assert.ok(!/usually reloads on its own/.test(text));
+  });
+  it('keeps the file in the refresh of step 1 and the listing of step 2, which would otherwise erase the remembered path', () => {
+    const step1 = /^1\. .*$/m.exec(text)[0];
+    assert.match(step1, /recommend --json[^\n]*--add ~\/\.claude\/kaizen\/extra-recipes\.json/);
+    assert.match(/^2\. .*$/m.exec(text)[0], /recommend --all --json` \(with the same `--add`/);
+  });
+  it('the sequence the skill prescribes keeps a custom recipe applicable', () => {
+    const home = measured();
+    const extra = path.join(home.configDir, 'kaizen', 'extra-recipes.json');
+    writeJson(extra, { recipes: [{ id: 'custom.house-rules', category: 'claude-md', impact: 'high', title: { en: 'h', ru: 'h' }, why: { en: 'w', ru: 'w' }, evidence: { en: 'e', ru: 'e' }, when: true, actions: [{ type: 'claude-md.block', id: 'house-rules', content: '- one rule\n' }] }] });
+    json(cli(home, ['recommend', '--json', '--add', extra]));
+    json(cli(home, ['recommend', '--json', '--add', extra]));
+    json(cli(home, ['recommend', '--all', '--json', '--add', extra]));
+    const dry = cli(home, ['apply', '--recipe', 'custom.house-rules', '--add', extra, '--dry-run']);
+    assert.equal(dry.status, 0, dry.stderr);
+    assert.ok(!dry.stdout.includes('unknown recipe'), dry.stdout);
   });
 });
 

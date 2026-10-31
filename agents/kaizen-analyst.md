@@ -57,7 +57,7 @@ Procedure:
 }
 ```
 Rules for the recipes:
-- One `custom.corrections-rules` recipe for all drafted rules (omit it when you have none) and one `custom.skill-<name>` recipe per skill (up to 3, each with its own `name` and complete `content`). The id is `custom.` plus lowercase letters, digits and dashes.
+- One `custom.corrections-rules` recipe for all drafted rules (omit it when you have none) and one `custom.skill-<name>` recipe per skill (up to 3, each with its own `name` and complete `content`). The id is `custom.` plus lowercase letters, digits and dashes. Keep the same ids on every run: when you rewrite the output file after an earlier draft was applied, Kaizen offers a custom recipe again (its batch is older than the file) and applying it replaces the earlier block or skill, so write the file fresh each run and never suffix the ids.
 - `title`, `why` and `evidence` need both `en` and `ru`, written as plain text (no curly braces, they are placeholder syntax); `impact` is `high`, `medium` or `low`; `when` is `true`.
 - The `claude-md.block` keeps the block id `corrections`, so it replaces the catalog recipe's block instead of adding a second copy of the rules.
 - Put the rules in the user's language when it is Russian, otherwise in English. The skill frontmatter stays in English.

@@ -709,12 +709,27 @@ describe('unused MCP servers', () => {
     assert.equal(m.configuredCount, 2);
   });
 
-  it('ignores user and local servers switched off with /mcp for this project (disabledMcpServers): they cost no context', () => {
+  it('ignores local and project servers switched off with /mcp for this project (disabledMcpServers): they cost no context', () => {
     const i = structuredClone(inv);
-    i.mcp = { user: ['dead-srv', 'user-off'], project: [], local: ['local-off', 'local-live'], disabledProject: [], pendingProject: [], disabledHere: ['user-off', 'local-off'] };
+    i.mcp = { user: ['dead-srv'], project: ['proj-off', 'proj-live'], local: ['local-off', 'local-live'], disabledProject: [], pendingProject: [], disabledHere: ['proj-off', 'local-off'] };
     const m = buildMeasure({ sessions: [makeSession(), ...padding()], inventory: i, insights: null, env: ENV }).mcp;
-    assert.deepEqual(m.unused, ['dead-srv', 'local-live']);
-    assert.equal(m.configuredCount, 2);
+    assert.deepEqual(m.unused, ['dead-srv', 'proj-live', 'local-live']);
+    assert.equal(m.configuredCount, 3);
+  });
+
+  it('keeps a user-scope server switched off here in the unused candidates: it is still connected in every other project', () => {
+    const i = structuredClone(inv);
+    i.mcp = { user: ['dead-srv', 'user-off'], project: [], local: [], disabledProject: [], pendingProject: [], disabledHere: ['user-off'] };
+    const here = buildMeasure({ sessions: [makeSession(), ...padding()], inventory: i, insights: null, env: ENV }).mcp;
+    assert.deepEqual(here.unused, ['dead-srv', 'user-off']);
+    assert.equal(here.configuredCount, 2);
+    // the result must not depend on the directory measure runs from
+    i.mcp.disabledHere = [];
+    const elsewhere = buildMeasure({ sessions: [makeSession(), ...padding()], inventory: i, insights: null, env: ENV }).mcp;
+    assert.deepEqual(elsewhere.unused, here.unused);
+    // a user-scope server that some project called is not unused, whatever is switched off here
+    const used = buildMeasure({ sessions: [makeSession({ mcp: { 'user-off': { calls: 2, tools: { ping: 2 } } } }), ...padding()], inventory: { ...i, mcp: { ...i.mcp, disabledHere: ['user-off'] } }, insights: null, env: ENV }).mcp;
+    assert.ok(!used.unused.includes('user-off'));
   });
 
   it('treats an inventory without the pendingProject list like before', () => {
