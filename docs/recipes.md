@@ -1,6 +1,6 @@
 # Recipe catalog
 
-Generated from `recipes/catalog.json` (30 recipes). Do not edit by hand; run `node scripts/kaizen.mjs docs`.
+Generated from `recipes/catalog.json` (31 recipes). Do not edit by hand; run `node scripts/kaizen.mjs docs`.
 
 ## permissions
 
@@ -80,6 +80,16 @@ Generated from `recipes/catalog.json` (30 recipes). Do not edit by hand; run `no
 - Why: Dev servers, ssh, docker compose up without -d and tail -f block the tool for minutes until a timeout. The hook adds a one-line hint before such commands; it never changes or blocks them.
 - Trigger: `{"all":[{"any":[{"metric":"tools.slowCommandsTotal","gte":20},{"metric":"friction.timeouts","gte":10}]},{"not":{"metric":"context.hookCommandsText","includes":"long-command-nudge"}}]}`
 - Actions: file → {kaizenHome}/hooks/long-command-nudge.mjs; settings.hook PreToolUse
+
+### `hooks.disable-failing` — Remove hooks that fail on nearly every run
+
+*Убрать хуки, которые падают почти при каждом запуске*
+
+- Impact: **high**, risk: medium, scope: user
+- Why: A hook that exits with an error on every call adds latency and noise to every turn and is silently not doing what you installed it for. Kaizen removes the entry from settings.json (the script file stays; undo puts the entry back) so you can fix it calmly.
+- Trigger: `{"metric":"friction.failingHookCommands.length","gte":1}`
+- Actions: settings.hook.remove
+- Inspired by: yurukusa/cc-safe-setup --verify (hook failure taxonomy)
 
 ## quality
 
@@ -262,13 +272,13 @@ Generated from `recipes/catalog.json` (30 recipes). Do not edit by hand; run `no
 
 ## advice
 
-### `advice.hook-health` — A hook is failing on nearly every run — fix or remove it
+### `advice.hook-health` — Hooks are failing — find out which
 
-*Один из хуков падает почти при каждом запуске — починить или убрать*
+*Хуки падают — выяснить какие*
 
 - Impact: **high**, risk: low, scope: user
-- Why: Failing hooks add latency and error noise to every tool call and often mean the behaviour you wanted is silently not happening. Samples with the hook name and stderr are in measure.md.
-- Trigger: `{"metric":"friction.hookNonBlockingErrors","gte":20}`
+- Why: Failing hooks add latency and error noise to every tool call and often mean the behaviour you wanted is silently not happening. The failing commands are not in your current settings (plugin or project hooks, or already removed); samples with stderr are in measure.md.
+- Trigger: `{"all":[{"metric":"friction.hookNonBlockingErrors","gte":20},{"metric":"friction.failingHookCommands.length","lt":1}]}`
 - Actions: advice only (Claude discusses it with you)
 - Inspired by: yurukusa/cc-safe-setup --verify (hook failure taxonomy)
 
@@ -330,6 +340,7 @@ Generated from `recipes/catalog.json` (30 recipes). Do not edit by hand; run `no
 | `friction.userModifiedEdits` | Edits where the user had changed the file manually in between |
 | `friction.timeouts` | Timed-out tool calls plus timeout-looking errors |
 | `friction.hookNonBlockingErrors` | Hook runs that reported an error (non-blocking) |
+| `friction.failingHookCommands` | Configured hook commands that failed 20+ times in the window |
 | `friction.slowHooks` | Hooks averaging 1.5 s+ or peaking at 10 s+ |
 | `autonomy.askUserQuestions` | AskUserQuestion tool uses |
 | `delegation.share` | Share of sessions that spawned subagents |

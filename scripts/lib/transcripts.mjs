@@ -12,7 +12,7 @@ import { readJsonl } from './jsonl.mjs';
 import { redact, snippet } from './redact.mjs';
 import { ensureDir, readJsonSafe, writeJsonAtomic } from './paths.mjs';
 
-export const SUMMARY_VERSION = 11;
+export const SUMMARY_VERSION = 12;
 
 const INTERRUPT_RE = /\[Request interrupted by user/;
 const COMPACT_RE = /^This session is being continued from a previous conversation/;
@@ -200,7 +200,7 @@ export function newSessionSummary(file) {
     costUSD: null,
     linesAdded: 0,
     linesRemoved: 0,
-    hooks: { summaries: 0, hookRuns: 0, errors: 0, events: {}, durations: {}, nonBlockingErrors: 0, errorSamples: [] },
+    hooks: { summaries: 0, hookRuns: 0, errors: 0, events: {}, durations: {}, nonBlockingErrors: 0, errorSamples: [], errorsByCommand: {} },
     attachments: {},
     toolTimeouts: 0,
     toolInterrupted: 0,
@@ -223,6 +223,7 @@ function finalize(s) {
   // keep only the most frequent commands/stems to bound cache size
   s.bashCommands = topN(s.bashCommands, 60);
   s.promptStems = topN(s.promptStems, 80);
+  s.hooks.errorsByCommand = topN(s.hooks.errorsByCommand, 20);
   for (const k of Object.keys(s.promptSamples)) if (!(k in s.promptStems)) delete s.promptSamples[k];
   s.slowCommands.sort((a, b) => b.ms - a.ms);
   s.slowCommands = s.slowCommands.slice(0, 10);
@@ -294,6 +295,7 @@ export async function summarizeTranscript(file) {
       inc(s.attachments, a.type || 'unknown');
       if (a.type === 'hook_non_blocking_error' || a.type === 'hook_blocking_error' || a.type === 'hook_error') {
         s.hooks.nonBlockingErrors++;
+        if (typeof a.command === 'string') inc(s.hooks.errorsByCommand, `${a.hookEvent || a.hookName || '?'}|${a.command.slice(0, 300)}`);
         if (s.hooks.errorSamples.length < 10) {
           const sample = {};
           for (const [k, v] of Object.entries(a)) {

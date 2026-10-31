@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { configDir, ensureDir, exists, expandHome, homeDir, kitRoot, readJsonSafe, stateDir, toPosix, writeJsonAtomic } from './paths.mjs';
+import { configDir, ensureDir, exists, expandHome, homeDir, kitRoot, readJsonSafe, settingsFiles, stateDir, toPosix, writeJsonAtomic } from './paths.mjs';
 import { nodeCommand } from './platform.mjs';
 import { actionApplies, loadCatalog, resolvePath } from './recipes.mjs';
 import { translator } from './i18n.mjs';
@@ -233,6 +233,40 @@ const handlers = {
     io.describe(`${file}: remove MCP servers ${removed.map((r) => r.name).join(', ')} (definitions kept in the journal)`);
     if (!io.dry) io.save(file, cfg);
     return { type: 'mcp.disable', file, removed };
+  },
+
+  'settings.hook.remove'(a, ctx, io) {
+    const commands = (Array.isArray(a.commands) ? a.commands : String(fill(a.commands, ctx)).split(/\n|,(?=\S*(?:node|"|\/|[A-Za-z]:))/)).map((s) => s.trim()).filter(Boolean);
+    if (!commands.length) return { skipped: true, reason: 'no hooks selected' };
+    const norm = (c) => String(c).replace(/\s+/g, ' ').trim();
+    const wanted = new Set(commands.map(norm));
+    const removed = [];
+    for (const { file } of settingsFiles(ctx.projectDir || null, configDir())) {
+      if (!exists(file)) continue;
+      const settings = io.load(file);
+      let changed = false;
+      for (const [event, groups] of Object.entries(settings.hooks || {})) {
+        if (!Array.isArray(groups)) continue;
+        for (const g of groups) {
+          const keep = [];
+          for (const h of g.hooks || []) {
+            if (typeof h.command === 'string' && wanted.has(norm(h.command))) {
+              removed.push({ file, event, matcher: g.matcher || null, hook: h });
+              changed = true;
+            } else keep.push(h);
+          }
+          g.hooks = keep;
+        }
+        settings.hooks[event] = groups.filter((g) => g.hooks && g.hooks.length);
+        if (!settings.hooks[event].length) delete settings.hooks[event];
+      }
+      if (changed) {
+        io.describe(`${file}: remove ${removed.filter((r) => r.file === file).length} failing hook entr${removed.filter((r) => r.file === file).length === 1 ? 'y' : 'ies'}`);
+        if (!io.dry) io.save(file, settings);
+      }
+    }
+    if (!removed.length) return { skipped: true, reason: 'selected hook commands not found in settings files' };
+    return { type: 'settings.hook.remove', removed };
   },
 
   'plugins.disable'(a, ctx, io) {
@@ -519,6 +553,23 @@ function undoEntry(e, io) {
       io.describe(`${e.file}: restore MCP servers ${e.removed.map((r) => r.name).join(', ')}`);
       if (!io.dry) io.save(e.file, cfg);
       return restored ? 'ok' : 'servers already present';
+    }
+    case 'settings.hook.remove': {
+      let restored = 0;
+      for (const r of e.removed) {
+        const s = io.load(r.file);
+        s.hooks ||= {};
+        const list = (s.hooks[r.event] ||= []);
+        const present = list.some((g) => (g.hooks || []).some((h) => hookIdentity(h) === hookIdentity(r.hook)));
+        if (present) continue;
+        const group = { hooks: [r.hook] };
+        if (r.matcher) group.matcher = r.matcher;
+        list.push(group);
+        restored++;
+        io.describe(`${r.file}: restore ${r.event} hook ${hookIdentity(r.hook).split('|')[1]}`);
+        if (!io.dry) io.save(r.file, s);
+      }
+      return restored ? 'ok' : 'hooks already present';
     }
     case 'plugins.disable': {
       const s = io.load(e.file);

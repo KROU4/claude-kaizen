@@ -159,8 +159,10 @@ function selftest() {
     check('linux without notify-send -> null', osCommand('linux', 'x', () => null) === null, 'expected null');
     const idle = plan({ hook_event_name: 'Notification', notification_type: 'idle_prompt' }, { ...both, channel: 'os' }, 'linux', now);
     check('channel os: default text, no telegram', idle.text === 'Claude is waiting for input' && idle.tg === null, JSON.stringify(idle));
-    check('channel telegram: no OS command', plan({ message: 'x' }, { ...both, channel: 'telegram' }, 'win32', now).os === null, 'expected no os command');
-    check('telegram without token falls back to OS', plan({ message: 'x' }, { channel: 'telegram', token: '', chat: '', minTurn: 45 }, 'win32', now).os !== null, 'expected os command');
+    const note = { hook_event_name: 'Notification', message: 'x' };
+    check('channel telegram: no OS command', plan(note, { ...both, channel: 'telegram' }, 'win32', now).os === null, 'expected no os command');
+    check('telegram without token falls back to OS', plan(note, { channel: 'telegram', token: '', chat: '', minTurn: 45 }, 'win32', now).os !== null, 'expected os command');
+    check('empty or foreign input -> quiet', plan({}, both, 'win32', now) === null && plan({ hook_event_name: 'SessionStart' }, both, 'win32', now) === null, 'expected null');
     const stop = (secondsAgo) => plan({ hook_event_name: 'Stop', last_assistant_message: 'All done.\nTests pass.', transcript_path: secondsAgo === null ? undefined : transcript(secondsAgo), cwd: '/w/demo' }, both, 'win32', now);
     check('short turn -> quiet', stop(5) === null, 'expected null');
     const long = stop(120);

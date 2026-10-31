@@ -145,6 +145,7 @@ function nested(name, args) {
   const after = (re) => { const i = args.findIndex((a) => re.test(a)); return i < 0 ? null : args.slice(i + 1); };
   let r;
   if (/^(?:bash|sh|zsh|dash|ksh)$/.test(name)) return (r = after(/^-[a-z]*c$/)) && r[0] ? [r[0], false] : null;
+  if (name === 'eval') return [args.join(' '), false];
   if (/^(?:powershell|pwsh)$/.test(name)) return (r = after(/^-c(?:ommand)?$/i)) ? [r.join(' '), true] : null;
   if (name === 'cmd') return (r = after(/^\/[ck]$/i)) ? [r.join(' '), false] : null;
   return null;

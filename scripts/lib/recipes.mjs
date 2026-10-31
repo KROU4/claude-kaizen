@@ -219,6 +219,8 @@ function summarizeAction(a, lang) {
       return ru ? 'убрать выбранные MCP-серверы из ~/.claude.json (с резервной копией)' : 'remove the selected MCP servers from ~/.claude.json (backed up)';
     case 'plugins.disable':
       return ru ? 'выключить выбранные плагины в settings.json' : 'disable the selected plugins in settings.json';
+    case 'settings.hook.remove':
+      return ru ? 'убрать выбранные записи хуков из settings.json (файлы скриптов остаются)' : 'remove the selected hook entries from settings.json (script files stay)';
     default:
       return a.type;
   }

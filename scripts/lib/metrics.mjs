@@ -291,6 +291,22 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
     }
     for (const e of s.hooks.errorSamples || []) if (hookErrorSamples.length < 12) hookErrorSamples.push(e);
   }
+  // failing hooks: errors per configured hook command (only hooks still present in settings are actionable)
+  const errorsByCommand = {};
+  for (const s of S) merge(errorsByCommand, s.hooks.errorsByCommand);
+  const configuredCommands = new Set(inventory.hooks.commands.map((c) => c.command));
+  const normalizeCmd = (c) => String(c).replace(/\s+/g, ' ').trim();
+  const configuredNorm = new Map([...configuredCommands].map((c) => [normalizeCmd(c), c]));
+  const failingHooks = Object.entries(errorsByCommand)
+    .map(([key, errors]) => {
+      const idx = key.indexOf('|');
+      const event = key.slice(0, idx);
+      const command = key.slice(idx + 1);
+      const configured = configuredNorm.get(normalizeCmd(command)) || null;
+      return { event, command, errors, configured: !!configured, configuredCommand: configured };
+    })
+    .sort((a, b) => b.errors - a.errors)
+    .slice(0, 10);
   const slowHooks = Object.entries(hookDurations)
     .map(([hook, d]) => ({ hook, runs: d.n, avgMs: d.n ? Math.round(d.ms / d.n) : 0, maxMs: d.max }))
     .filter((h) => h.avgMs >= 1500 || h.maxMs >= 10000)
@@ -344,6 +360,8 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
     hookErrors,
     hookNonBlockingErrors: hookNonBlocking,
     hookErrorSamples,
+    failingHooks,
+    failingHookCommands: failingHooks.filter((h) => h.configured && h.errors >= 20).map((h) => h.configuredCommand),
     slowHooks,
     slowCommands: tools.slowCommandsTotal,
     backgroundTasks: sum(S, (s) => s.backgroundTasks),
@@ -661,6 +679,7 @@ export const METRIC_DOCS = {
   'friction.userModifiedEdits': 'Edits where the user had changed the file manually in between',
   'friction.timeouts': 'Timed-out tool calls plus timeout-looking errors',
   'friction.hookNonBlockingErrors': 'Hook runs that reported an error (non-blocking)',
+  'friction.failingHookCommands': 'Configured hook commands that failed 20+ times in the window',
   'friction.slowHooks': 'Hooks averaging 1.5 s+ or peaking at 10 s+',
   'autonomy.askUserQuestions': 'AskUserQuestion tool uses',
   'delegation.share': 'Share of sessions that spawned subagents',
