@@ -12,7 +12,7 @@ import { readJsonl } from './jsonl.mjs';
 import { redact, snippet } from './redact.mjs';
 import { ensureDir, readJsonSafe, writeJsonAtomic } from './paths.mjs';
 
-export const SUMMARY_VERSION = 13;
+export const SUMMARY_VERSION = 14;
 
 const INTERRUPT_RE = /\[Request interrupted by user/;
 const COMPACT_RE = /^This session is being continued from a previous conversation/;
@@ -68,8 +68,12 @@ const ERROR_CLASSES = [
   ['missing-dependency', /modulenotfounderror|cannot find module|importerror|no module named|could not resolve|package .* not found|not installed/i],
   ['syntax', /syntaxerror|parse error|unexpected token|invalid syntax|unexpected end of/i],
   // Runners differ in case and wording: jest "Tests: 1 failed", pytest "FAILED tests/x.py::t" / "1 failed", mocha "1 failing",
-  // node:test "✖" / "fail 1", dotnet "Failed MyTest [5 ms]" / "Failed: 1".
-  ['test-failure', /\bfailed\b.*\b(test|tests|spec|assert)|\b(test|tests)\b.*\bfailed\b|assertionerror|✕|✗|✖|\b[1-9]\d* (?:failed|failing|failures?)\b|\bfail [1-9]|\bfailed:\s*[1-9]|^\s*failed\s+\S+::|^\s*failed\s+\S+\s+\[\d+\s*m?s\]|^\s*(?:---\s*)?FAIL\b/im],
+  // node:test "✖ failing tests" / "✖ name (1ms)" / "fail 1", dotnet "Failed MyTest [5 ms]" / "Failed: 1,".
+  // Kept narrow on purpose: a bare "✖" (eslint, stylelint, listr), "N failures while ...", "Failed to read tests/x.json"
+  // and a lower-case "fail:" log level (ASP.NET) are not test failures.
+  ['test-failure', /\bfailed\b.*\b(?:test|tests|spec|assert)\b(?![/\\])|\b(?:test|tests)\b(?![/\\]).*\bfailed\b|assertionerror|✕|✗|^\s*✖\s+(?:failing tests|.*\(\d+(?:\.\d+)?m?s\))|\b[1-9]\d* (?:failed|failing)\b(?!\s+(?:to|while)\b)|\b[1-9]\d* failures?\s*(?:$|[,.)\]])|\bfail [1-9]|\bfailed:\s*[1-9]\d*\s*(?:,|$)|^\s*failed\s+\S+::|^\s*failed\s+\S+\s+\[\d+\s*m?s\]/im],
+  // Go / jest / vitest print an upper-case FAIL at the start of a line; matched case-sensitively.
+  ['test-failure', /^\s*(?:---\s*)?FAIL\b/m],
   ['type-check', /type error|typeerror|error ts\d+|mypy|incompatible types/i],
   ['lint', /eslint|ruff|flake8|pylint|prettier|stylelint|clippy|golangci/i],
   ['network', /econnrefused|enotfound|econnreset|network error|fetch failed|getaddrinfo|ssl|certificate/i],
@@ -306,8 +310,10 @@ export async function summarizeTranscript(file) {
       const a = o.attachment || {};
       inc(s.attachments, a.type || 'unknown');
       // PreToolUse / PostToolUse / SessionStart / UserPromptSubmit runs arrive as hook_* attachments with their own
-      // command and duration (Stop hooks come through the stop_hook_summary system line above).
-      if (typeof a.type === 'string' && a.type.startsWith('hook_') && typeof a.command === 'string') {
+      // command and duration. Stop / SubagentStop runs also arrive as hook_* attachments, but the stop_hook_summary
+      // system line above already counted them (same command and duration), so they are skipped here.
+      const stopEvent = a.hookEvent === 'Stop' || a.hookEvent === 'SubagentStop';
+      if (typeof a.type === 'string' && a.type.startsWith('hook_') && typeof a.command === 'string' && !stopEvent) {
         s.hooks.hookRuns++;
         const d = (s.hooks.durations[hookKey(a.command)] ||= { n: 0, ms: 0, max: 0 });
         d.n++;

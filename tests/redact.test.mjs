@@ -79,6 +79,44 @@ describe('redact: key = value assignments', () => {
     assert.equal(redact('--db-password=hunter2hunter2'), '--db-password=[REDACTED:secret]');
   });
 
+  it('redacts AWS_SECRET_ACCESS_KEY, whose key word sits in the middle of the name', () => {
+    assert.equal(redact('AWS_SECRET_ACCESS_KEY=abcd1234abcd1234'), 'AWS_SECRET_ACCESS_KEY=[REDACTED:secret]');
+    assert.equal(redact('export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY && aws s3 ls'), 'export AWS_SECRET_ACCESS_KEY=[REDACTED:secret] && aws s3 ls');
+  });
+
+  it('redacts quoted JSON / YAML keys ("password": "...", "api_key": "...")', () => {
+    assert.equal(redact('{"password": "hunter2hunter2"}'), '{"password": "[REDACTED:secret]"}');
+    assert.equal(redact('{"user":"bob","api_key":"abcd1234efgh","x":1}'), '{"user":"bob","api_key":"[REDACTED:secret]","x":1}');
+    assert.equal(redact("'client_secret': 'abcd1234efgh'"), "'client_secret': '[REDACTED:secret]'");
+  });
+
+  it('redacts Authorization headers and bare Bearer tokens', () => {
+    assert.equal(redact('curl -H "Authorization: Bearer abcdefghijklmnop" https://api.example.test'), 'curl -H "Authorization: Bearer [REDACTED:auth]" https://api.example.test');
+    assert.equal(redact('Authorization: Basic dXNlcjpwYXNzd29yZA=='), 'Authorization: Basic [REDACTED:auth]');
+    assert.equal(redact('{"Authorization": "Bearer abc.def-ghi_jkl123"}'), '{"Authorization": "Bearer [REDACTED:auth]"}');
+    assert.equal(redact('sent header Bearer a1b2c3d4e5f6g7h8 to the proxy'), 'sent header Bearer [REDACTED:auth] to the proxy');
+  });
+
+  it('does not mangle prose that mentions authorization, bearer or basic', () => {
+    for (const text of [
+      'Authorization: required for this endpoint',
+      'authorization header is missing, add one',
+      'the bearer of bad news arrived',
+      'Bearer tokens are explained in the docs',
+      'basic configuration-for-the-application is fine',
+      'Basic authentication-middleware-implementation',
+      'max_tokens=1000 and token_count: 12345678',
+    ]) assert.equal(redact(text), text, text);
+  });
+
+  it('stays linear on adversarial input for the new patterns', () => {
+    for (const long of ['A'.repeat(200000), 'authorization' + ' '.repeat(100000), 'bearer ' + 'a'.repeat(100000), '"password' + '"'.repeat(100000), 'secret_' .repeat(30000)]) {
+      const t0 = Date.now();
+      redact(long);
+      assert.ok(Date.now() - t0 < 1000);
+    }
+  });
+
   it('stays linear on long kebab-case text with no assignment', () => {
     const long = Array.from({ length: 4000 }, () => 'word').join('-');
     const t0 = Date.now();

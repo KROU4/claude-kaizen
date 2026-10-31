@@ -646,6 +646,43 @@ describe('summarizeTranscript: edge cases on inline transcripts', () => {
     assert.equal(s.testFailures, outputs.length);
   });
 
+  it('does not classify linter, listr, dotnet run and plain error output as test failures', async () => {
+    const outputs = [
+      'Exit code 1\n✖ 1 problem (1 error, 0 warnings)',
+      'Exit code 1\n✖ 3 problems (2 errors, 1 warning)',
+      'Exit code 1\nfail: Microsoft.AspNetCore.Server.Kestrel[13]\n      Connection processing ended abnormally.',
+      'Exit code 1\n✖ Failed to download template',
+      'Exit code 1\nError: Failed to read config from tests/fixtures/app.json',
+      'Exit code 1\n2 failures while copying files',
+      'Exit code 1\nStatus: failed: 1 layer could not be pulled',
+    ];
+    const lines = [];
+    outputs.forEach((out, i) => {
+      lines.push(asst(`a${i}`, [toolUse(`t${i}`, 'Bash', { command: 'npx eslint .' })]));
+      lines.push(userLine([toolResult(`t${i}`, out)], { uuid: `ru${i}` }));
+    });
+    const s = await summarizeLines(lines);
+    assert.equal(s.testFailures, 0);
+    assert.equal(s.errorClasses['test-failure'], undefined);
+    assert.equal(s.errorClasses['nonzero-exit'], outputs.length);
+  });
+
+  it('still detects node:test, rspec and dotnet failures after tightening the regex', async () => {
+    const outputs = [
+      '✖ adds numbers (1.2ms)\nℹ fail 1\nExit code 1',
+      '3 examples, 1 failure\nExit code 1',
+      'Total tests: 3\n     Passed: 2\n     Failed: 1\nExit code 1',
+      'FAIL src/add.test.js\nExit code 1',
+    ];
+    const lines = [];
+    outputs.forEach((out, i) => {
+      lines.push(asst(`a${i}`, [toolUse(`t${i}`, 'Bash', { command: 'run tests' })]));
+      lines.push(userLine([toolResult(`t${i}`, out)], { uuid: `ru${i}` }));
+    });
+    const s = await summarizeLines(lines);
+    assert.equal(s.testFailures, outputs.length);
+  });
+
   it('does not mistake unrelated failures for test failures', async () => {
     const outputs = ['fetch failed: ECONNREFUSED', 'fatal: unable to access repo\nExit code 128', 'Build failed\nExit code 1'];
     const lines = [];
@@ -677,6 +714,18 @@ describe('summarizeTranscript: edge cases on inline transcripts', () => {
     ]);
     assert.equal(s.hooks.hookRuns, 3);
     assert.deepEqual(s.hooks.durations['format.mjs'], { n: 3, ms: 6100, max: 4000 });
+  });
+
+  it('counts a Stop hook run once when it appears both as an attachment and in stop_hook_summary', async () => {
+    const cmd = 'node "/x/notify.mjs"';
+    const s = await summarizeLines([
+      { type: 'attachment', uuid: 'h1', attachment: { type: 'hook_success', hookEvent: 'Stop', command: cmd, durationMs: 2000 } },
+      { type: 'system', subtype: 'stop_hook_summary', uuid: 'h2', hookCount: 1, hookInfos: [{ command: cmd, durationMs: 2000 }], hookErrors: [] },
+      { type: 'attachment', uuid: 'h3', attachment: { type: 'hook_success', hookEvent: 'SubagentStop', command: cmd, durationMs: 500 } },
+      { type: 'attachment', uuid: 'h4', attachment: { type: 'hook_success', hookEvent: 'PostToolUse', command: cmd, durationMs: 100 } },
+    ]);
+    assert.equal(s.hooks.hookRuns, 2); // 1 from the Stop summary + 1 PostToolUse attachment
+    assert.deepEqual(s.hooks.durations['notify.mjs'], { n: 2, ms: 2100, max: 2000 });
   });
 
   it('treats a user line with a <command-args> body as one user message but not as a free-form prompt', async () => {
