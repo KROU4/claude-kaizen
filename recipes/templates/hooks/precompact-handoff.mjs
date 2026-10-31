@@ -55,11 +55,17 @@ function tailLines(file, maxBytes) {
   }
 }
 
-function isHuman(o) {
-  if (o.type !== 'user' || o.isSidechain || o.isMeta || o.isCompactSummary) return false;
+// Text Claude Code injects into user turns (background-task notices, reminders, command output, interrupts).
+const MACHINE = /^\s*(?:<(?:system-reminder|task-notification|local-command-stdout|local-command-caveat|side-sessions-event|ci-monitor-event)\b|\[SYSTEM NOTIFICATION|\[Request interrupted|This session is being continued from a previous conversation)/;
+const MACHINE_BLOCK = /<(system-reminder|task-notification|local-command-stdout|local-command-caveat|command-name|command-message|ide_[a-z_]+)\b[^>]*>[\s\S]*?<\/\1>/g;
+
+// What the human typed in a user line ('' for tool results, meta lines, summaries and machine-injected text).
+function humanText(o) {
+  if (o.type !== 'user' || o.isSidechain || o.isMeta || o.isCompactSummary) return '';
   const c = o.message && o.message.content;
-  if (typeof c === 'string') return c.trim() !== '' && !c.trimStart().startsWith('<local-command-stdout>');
-  return Array.isArray(c) && c.some((b) => b && b.type === 'text') && !c.some((b) => b && b.type === 'tool_result');
+  if (Array.isArray(c) && c.some((b) => b && b.type === 'tool_result')) return '';
+  const texts = typeof c === 'string' ? [c] : Array.isArray(c) ? c.filter((b) => b && b.type === 'text' && typeof b.text === 'string').map((b) => b.text) : [];
+  return texts.filter((t) => !MACHINE.test(t)).map((t) => t.replace(MACHINE_BLOCK, '').replace(/<\/?command-args>/g, '').trim()).filter(Boolean).join(' ');
 }
 
 function collect(lines, maxPrompts) {

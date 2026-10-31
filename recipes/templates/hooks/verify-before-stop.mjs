@@ -44,12 +44,16 @@ function tailLines(file, maxBytes) {
   }
 }
 
-// A real human prompt: string content, or blocks with text and no tool_result; never meta/summary/sidechain.
+// Text Claude Code injects into user turns (background-task notices, reminders, command output, interrupts).
+const MACHINE = /^\s*(?:<(?:system-reminder|task-notification|local-command-stdout|local-command-caveat|side-sessions-event|ci-monitor-event)\b|\[SYSTEM NOTIFICATION|\[Request interrupted|This session is being continued from a previous conversation)/;
+
+// A real human prompt: a user line with at least one non-machine text and no tool_result; never meta/summary/sidechain.
 function isHuman(o) {
   if (o.type !== 'user' || o.isSidechain || o.isMeta || o.isCompactSummary) return false;
   const c = o.message && o.message.content;
-  if (typeof c === 'string') return c.trim() !== '' && !c.trimStart().startsWith('<local-command-stdout>');
-  return Array.isArray(c) && c.some((b) => b && b.type === 'text') && !c.some((b) => b && b.type === 'tool_result');
+  if (Array.isArray(c) && c.some((b) => b && b.type === 'tool_result')) return false;
+  const texts = typeof c === 'string' ? [c] : Array.isArray(c) ? c.filter((b) => b && b.type === 'text' && typeof b.text === 'string').map((b) => b.text) : [];
+  return texts.some((t) => t.trim() !== '' && !MACHINE.test(t));
 }
 
 // Walk the transcript once, resetting at every human prompt, so only the current turn is counted.
