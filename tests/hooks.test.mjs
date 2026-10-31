@@ -181,3 +181,57 @@ test('guard-destructive: bash options with an argument and a glued heredoc still
     assert.equal(run(scripts.guard, shell('Bash', c)), null, JSON.stringify(c));
   }
 });
+
+test('guard-destructive: SQL in a heredoc is blocked unless the heredoc only feeds a text-only sink', () => {
+  const bad = [
+    "psql mydb <<'SQL'\nDROP TABLE users;\nSQL",
+    'cat <<EOF | mysql app\nTRUNCATE TABLE logs;\nEOF',
+    'python3 - <<EOF\nimport sqlite3\nsqlite3.connect("a.db").execute("DROP TABLE t")\nEOF',
+    'node --input-type=module <<EOF\nawait db.query("DROP TABLE users")\nEOF',
+    'python manage.py dbshell <<EOF\nDROP TABLE x;\nEOF',
+    'rails dbconsole <<EOF\nDROP TABLE x;\nEOF',
+    'cat <<EOF | python3 -\nTRUNCATE TABLE a\nEOF',
+    'cat <<EOF | tr a b | mysql\nDROP TABLE x;\nEOF',
+    'ssh db psql <<EOF\nDROP DATABASE x;\nEOF',
+    'docker exec -i db psql -U app <<EOF\nDROP TABLE x;\nEOF',
+    'sudo -u postgres psql <<EOF\nTRUNCATE TABLE x;\nEOF',
+    'ruby <<EOF\nDB.run "DROP TABLE x"\nEOF',
+    'cat <<EOF > a.sql\nhi\nEOF\npsql -c "DROP TABLE x"',
+    'cat <<EOF > a.sql\nhi\nEOF\npython3 - <<X\nDROP TABLE y\nX',
+  ];
+  for (const c of bad) {
+    const out = run(scripts.guard, shell('Bash', c));
+    assert.equal(out && out.permissionDecision, 'deny', JSON.stringify(c));
+  }
+  assert.equal(run(scripts.guardAsk, shell('Bash', bad[2])).permissionDecision, 'ask');
+});
+
+test('guard-destructive: SQL written to a file through a text-only heredoc stays allowed', () => {
+  const good = [
+    'cat <<EOF > migrations/001.sql\nDROP TABLE old_users;\nEOF\nnode scripts/check.js',
+    "cat > down.sql <<'SQL'\nTRUNCATE TABLE cache;\nSQL",
+    'cat <<EOF | tee down.sql\nDROP TABLE x;\nEOF',
+    'cat <<EOF >> migrations/002.sql\nDROP TABLE x;\nEOF\ngit add migrations',
+    'git commit -F - <<EOF\ndocs: why we DROP TABLE legacy\nEOF',
+    'cat <<EOF > prisma/migrations/20261101_x/migration.sql\nDROP TABLE old_users;\nEOF',
+    'cat <<EOF > db/mysql/down.sql\nDROP TABLE cache;\nEOF',
+    'cat <<EOF | tee db/psql/down.sql\nDROP TABLE x;\nEOF',
+  ];
+  for (const c of good) assert.equal(run(scripts.guard, shell('Bash', c)), null, JSON.stringify(c));
+});
+
+test('guard-destructive: SQL clients are matched by command name, not by a path or message text', () => {
+  const good = [
+    'git commit -m "docs: explain drop table in prisma migrations"',
+    'git show HEAD:prisma/migrations/1/migration.sql | grep -i "drop table"',
+    'grep -rn "DROP TABLE" db/mysql/ prisma/',
+    'echo "DROP TABLE x" > ./mysql/notes.sql',
+    'git log -S"TRUNCATE TABLE" -- prisma/migrations',
+  ];
+  for (const c of good) assert.equal(run(scripts.guard, shell('Bash', c)), null, JSON.stringify(c));
+  const bad = ['psql -c "DROP TABLE users"', 'sudo -u postgres psql -c "DROP TABLE x"', 'echo "TRUNCATE TABLE a;" | mysql', 'docker exec db psql -c "TRUNCATE TABLE logs"', 'python manage.py dbshell -c "DROP TABLE x"', '/usr/bin/psql -c "DROP TABLE x"', 'rails dbconsole -e "DROP TABLE x"'];
+  for (const c of bad) {
+    const out = run(scripts.guard, shell('Bash', c));
+    assert.equal(out && out.permissionDecision, 'deny', c);
+  }
+});

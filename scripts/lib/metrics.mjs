@@ -3,6 +3,7 @@
 // documented in docs/metrics.md (generated from METRIC_DOCS below).
 import { detectLang } from './i18n.mjs';
 import { topN } from './transcripts.mjs';
+import { redact } from './redact.mjs';
 
 export const MEASURE_VERSION = 1;
 /** Fewer sessions than this cannot show that a skill or MCP server is unused, so those metrics stay empty. */
@@ -319,7 +320,8 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
       const event = key.slice(0, idx);
       const command = key.slice(idx + 1);
       const configured = configuredNorm.get(normalizeCmd(command)) || null;
-      return { event, command, errors, configured: !!configured, configuredCommand: configured };
+      // `command` is the display copy (redacted); `configuredCommand` stays exactly as written in settings.json for matching
+      return { event, command: redact(command), errors, configured: !!configured, configuredCommand: configured };
     })
     .sort((a, b) => b.errors - a.errors)
     .slice(0, 10);

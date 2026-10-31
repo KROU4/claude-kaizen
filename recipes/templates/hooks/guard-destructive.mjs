@@ -22,7 +22,9 @@ const isProtected = (name) => PROTECTED_RE.some((re) => re.test(name));
 const WELL_KNOWN = new Set(['node_modules', 'dist', 'build', 'out', 'target', 'coverage', 'tmp', 'temp', '.tmp', '.cache', '.next', '.nuxt', '.output', '.svelte-kit', '.turbo', '.parcel-cache', '.angular', '.gradle', '.terraform', '.nyc_output', '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache', '.tox', '.venv', 'venv', 'obj', '.vite', '.docusaurus', '.serverless', '.dart_tool', 'deriveddata', 'storybook-static', 'htmlcov', '.hypothesis', '.eggs', '.pnpm-store']);
 const SYSTEM_DIR = /^(?:bin|boot|dev|etc|lib|lib32|lib64|proc|root|sbin|sys|usr|var|windows|program files|program files \(x86\)|programdata|system|library|applications)$/i;
 const SQL_RE = /\b(?:drop\s+(?:table|database|schema)|truncate\s+table)\b/i;
-const SQL_CLIENT = /\b(?:psql|mysql|mariadb|sqlite3?|sqlcmd|sqlplus|mongosh?|duckdb|clickhouse-client|cockroach|snowsql|invoke-sqlcmd|prisma|alembic|knex|sequelize)\b/i;
+// SQL clients are recognised by command name only (never by a path or message text); framework DB shells by their subcommand.
+const SQL_CLIENT = /^(?:psql|pgcli|mysql|mycli|mariadb|sqlite3?|litecli|sqlcmd|sqlplus|usql|mongosh?|duckdb|clickhouse-client|cockroach|snowsql|invoke-sqlcmd|prisma|alembic|knex|sequelize|dbshell|dbconsole)$/;
+const DB_SHELL_ARG = /^(?:dbshell|dbconsole|db:console)$/;
 const TEXT_ONLY = new Set(['git', 'gh', 'echo', 'printf', 'grep', 'egrep', 'rg', 'cat', 'less', 'more', 'head', 'tail', 'type', 'sed', 'awk', 'ls', 'find', 'diff', 'wc', 'sort', 'tee', 'touch', 'mkdir', 'cp', 'mv', 'jq', 'man', 'which', 'where']);
 const WRAPPERS = new Set(['sudo', 'doas', 'command', 'builtin', 'exec', 'nohup', 'time', 'env', 'nice', 'xargs', 'setsid', 'stdbuf']);
 const DEVICE = /\/dev\/(?:sd[a-z]|hd[a-z]|vd[a-z]|xvd[a-z]|nvme\d|mmcblk\d|disk\d)/;
@@ -201,7 +203,7 @@ function analyze(cmd, ps, ctx, depth = 0, bodies = []) {
     const name = toks[0].split(/[\\/]/).pop().toLowerCase().replace(/\.(?:exe|com|cmd|bat)$/, '');
     names.push(name);
     const f = stdinScript(name, toks.slice(1));
-    info.push({ raw, name, f });
+    info.push({ raw, name, f, args: toks.slice(1) });
     const toDevice = raw.some((t, i) => (/^\d*>>?$/.test(t) && DEVICE.test(raw[i + 1] || '')) || (/^\d*>>?\/dev\//.test(t) && DEVICE.test(t)));
     const hit = checkCommand(name, toks.slice(1), ctx) || (toDevice ? 'redirecting output onto a raw disk device destroys its data' : null);
     if (hit) return hit;
@@ -229,15 +231,16 @@ function analyze(cmd, ps, ctx, depth = 0, bodies = []) {
       }
     }
   }
-  // SQL on the command line itself; inside a heredoc only when that heredoc feeds a SQL client (psql <<EOF, cat <<EOF | mysql),
-  // so `cat <<EOF > migration.sql` with a DROP in it stays allowed
-  const outer = stripHeredocs(cmd.replace(/\r\n?/g, '\n'), []);
-  if (SQL_RE.test(outer) && (SQL_CLIENT.test(outer) || names.some((n) => !TEXT_ONLY.has(n)))) return 'SQL DROP/TRUNCATE cannot be undone';
+  // SQL on the command line itself: blocked unless every command is text-only. A heredoc body counts the same way, judged by
+  // the command that owns it and whatever it is piped into (python - <<EOF, rails dbconsole <<EOF, cat <<EOF | mysql), so
+  // `cat <<EOF > migration.sql` with a DROP in it stays allowed while an interpreter or DB shell reading it is blocked.
+  const risky = (i) => SQL_CLIENT.test(i.name) || i.args.some((a) => DB_SHELL_ARG.test(a)) || !TEXT_ONLY.has(i.name);
+  if (SQL_RE.test(stripHeredocs(cmd.replace(/\r\n?/g, '\n'), [])) && info.some(risky)) return 'SQL DROP/TRUNCATE cannot be undone';
   for (let k = 0; k < info.length; k++) {
     const owned = [...info[k].raw.join(' ').matchAll(MARK)].map((m) => bodies[+m[1]] || '');
     if (!owned.some((b) => SQL_RE.test(b))) continue;
     for (let j = k; j < info.length; j++) {
-      if (SQL_CLIENT.test(info[j].raw.join(' '))) return 'SQL DROP/TRUNCATE cannot be undone';
+      if (risky(info[j])) return 'SQL DROP/TRUNCATE cannot be undone';
       if (!info[j].raw.pipe) break;
     }
   }
@@ -273,6 +276,9 @@ function selftest() {
     "bash -euo pipefail <<'EOF'\nrm -rf /\nEOF", 'bash -o pipefail <<EOF\nrm -rf /\nEOF', 'bash -O extglob <<EOF\nrm -rf /\nEOF', 'bash<<EOF\nrm -rf /\nEOF',
     'cat <<EOF > a.md\nhi\nEOF\nbash <<X\nrm -rf /\nX', 'cat <<EOF | tr a b | bash\nrm -rf /\nEOF',
     "psql mydb <<'SQL'\nDROP TABLE users;\nSQL", 'cat <<EOF | mysql app\nTRUNCATE TABLE logs;\nEOF', 'ssh db psql <<EOF\nDROP DATABASE x;\nEOF',
+    'python3 - <<EOF\nimport sqlite3\nsqlite3.connect("a.db").execute("DROP TABLE t")\nEOF', 'node --input-type=module <<EOF\nawait db.query("DROP TABLE users")\nEOF',
+    'python manage.py dbshell <<EOF\nDROP TABLE x;\nEOF', 'rails dbconsole <<EOF\nDROP TABLE x;\nEOF', 'cat <<EOF | python3 -\nTRUNCATE TABLE a\nEOF',
+    'cat <<EOF | tr a b | mysql\nDROP TABLE x;\nEOF', 'sudo -u postgres psql -c "DROP TABLE x"', 'docker exec db psql -c "TRUNCATE TABLE logs"',
   ];
   const good = [
     'ls -la', 'rm -rf node_modules', 'rm -rf dist/', 'rm -rf ./tmp/foo', 'rm file.txt', 'rm -rf build/*', 'git push --force-with-lease origin feature/x', 'git push origin main',
@@ -284,6 +290,9 @@ function selftest() {
     'cat <<EOF > a.md\nrm -rf /\nEOF\nbash <<X\necho hi\nX', 'cat <<EOF > deploy.md\nrm -rf ~/old\nEOF\ngit add deploy.md && eval "$(ssh-agent -s)"',
     'cat <<EOF > notes.md\nrm -rf ~\nEOF\nsource venv/bin/activate && bash -l', "bash -euo pipefail <<'EOF'\necho hi\nEOF",
     'cat <<EOF > migrations/001.sql\nDROP TABLE old_users;\nEOF\nnode scripts/check.js', "cat > down.sql <<'SQL'\nTRUNCATE TABLE cache;\nSQL",
+    'cat <<EOF > prisma/migrations/20261101_x/migration.sql\nDROP TABLE old_users;\nEOF', 'cat <<EOF > db/mysql/down.sql\nDROP TABLE cache;\nEOF',
+    'git commit -m "docs: explain drop table in prisma migrations"', 'git show HEAD:prisma/migrations/1/migration.sql | grep -i "drop table"',
+    'cat <<EOF | tee db/psql/down.sql\nDROP TABLE x;\nEOF',
   ];
   let failed = 0;
   const run = (tool, command, branch = () => null) => evaluate({ tool_name: tool, tool_input: { command } }, { branch });

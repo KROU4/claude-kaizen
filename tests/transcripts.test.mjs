@@ -889,6 +889,26 @@ describe('hookKey', () => {
     assert.equal(hookKey('Long prose about many different things here'), '(prompt hook)');
   });
 
+  it('keys a command with arguments as the command, never as a label carrying its arguments', () => {
+    assert.equal(hookKey('Get-Date -Format o'), 'Get-Date');
+    assert.equal(hookKey('Get-ChildItem --recurse x'), 'Get-ChildItem');
+    assert.equal(hookKey('MyTool --api-key sk-abcdef1234567890abcdefgh run'), 'MyTool');
+    assert.equal(hookKey('Notify-Telegram 1234567890:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsawZ'), 'Notify-Telegram');
+    assert.equal(hookKey('Notify 1234567890:short'), 'Notify');
+    assert.equal(hookKey('Deploy abcdefghijklmnopqrstuvwxyz0123'), 'Deploy');
+  });
+
+  it('never lets a secret reach the key, whichever branch produces it', () => {
+    const secrets = ['sk-abcdef1234567890abcdefgh', '1234567890:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsawZ', 'ghp_abcdefghijklmnopqrstuvwxyz0123456789'];
+    for (const s of secrets) {
+      for (const cmd of [`Notify ${s}`, `${s}`, `node hook.mjs ${s}`, `bash -c "curl -H 'Authorization: Bearer ${s}' x"`, `MyTool --key ${s}`, `API_TOKEN=${s} node a.mjs`, `Notify --api-key=${s}`]) {
+        const key = hookKey(cmd);
+        assert.ok(!key.includes(s) && !key.includes(s.slice(0, 20)), `${cmd} -> ${key}`);
+      }
+    }
+    assert.match(hookKey('sk-abcdef1234567890abcdefgh'), /^\[REDACTED:/);
+  });
+
   it('uses the script basename after a quoted node path with spaces', () => {
     assert.equal(hookKey('node "C:/Program Files/nodejs/node.exe" "C:/x/y/keyword.mjs"'), 'keyword.mjs');
   });

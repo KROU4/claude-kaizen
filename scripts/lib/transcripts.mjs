@@ -12,7 +12,7 @@ import { readJsonl } from './jsonl.mjs';
 import { redact, snippet } from './redact.mjs';
 import { ensureDir, readJsonSafe, writeJsonAtomic } from './paths.mjs';
 
-export const SUMMARY_VERSION = 16;
+export const SUMMARY_VERSION = 17;
 
 const INTERRUPT_RE = /\[Request interrupted by user/;
 const COMPACT_RE = /^This session is being continued from a previous conversation/;
@@ -541,6 +541,10 @@ export async function summarizeTranscript(file) {
 
 /** Shorten a hook command to a stable identity: drop quotes, node path and arguments after the script. */
 export function hookKey(command) {
+  return redact(hookKeyRaw(redact(String(command))));
+}
+
+function hookKeyRaw(command) {
   let c = String(command).replace(/\s+/g, ' ').trim();
   // "[ -f x ] || cmd" / "test -f x && cmd" wrappers: look at the command that actually runs
   const guarded = c.match(/(?:\|\||&&)\s*(.+)$/);
@@ -560,7 +564,10 @@ export function hookKey(command) {
   if (!/[.\-_/\\]/.test(base) && tokens.length > 4 && !interp.test(tokens[0])) return '(prompt hook)';
   // A short capitalised label with no path or file name in it ("Design deep pass", "Preparing build session") is the
   // hook's status message, not a command: keep the whole label so different hooks do not collapse into one word.
-  const label = tokens.length >= 2 && /^\p{Lu}/u.test(tokens[0]) && !interp.test(tokens[0]) && !tokens.some((x) => /[\\/=$|<>]|\.\w{1,5}$/.test(x));
+  // Option flags (`-x`, `--x`), redacted values and secret-looking tokens (long id-like strings, `123456:AAH...`) mean it is
+  // a command with arguments, so it keys as the command ("Get-Date -Format o" -> "Get-Date").
+  const label = tokens.length >= 2 && /^\p{Lu}/u.test(tokens[0]) && !interp.test(tokens[0])
+    && !tokens.some((x) => /[\\/=$|<>[\]]|^--?\w|\.\w{1,5}$|^\d+:|[A-Za-z0-9_:-]{20,}/.test(x));
   if (label) return c.slice(0, 60);
   return base.slice(0, 60) || c.slice(0, 60);
 }

@@ -309,6 +309,19 @@ describe('friction', () => {
     assert.equal(byEvent.PreToolUse.configured, false);
     assert.deepEqual(measure.friction.failingHookCommands, []);
   });
+
+  it('redacts the displayed failing-hook command but still matches the raw one against settings.json', () => {
+    const raw = 'Notify-Telegram 1234567890:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsawZ';
+    const withHook = { ...inv, hooks: { ...inv.hooks, commands: [...inv.hooks.commands, { event: 'Stop', matcher: '', command: raw, file: 'settings.json' }] } };
+    const bad = makeSession({ hooks: { ...newSessionSummary('/p/s.jsonl').hooks, errorsByCommand: { [`Stop|${raw}`]: 25 } } });
+    const m = buildMeasure({ sessions: [bad, ...padding()], inventory: withHook, insights: null, env: ENV });
+    const h = m.friction.failingHooks.find((x) => x.event === 'Stop');
+    assert.equal(h.configured, true);
+    assert.equal(h.configuredCommand, raw); // exact text from settings, so hooks.disable-failing can remove it
+    assert.deepEqual(m.friction.failingHookCommands, [raw]);
+    assert.ok(!h.command.includes('AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsawZ'), h.command);
+    assert.match(h.command, /REDACTED/);
+  });
 });
 
 describe('autonomy and delegation', () => {
