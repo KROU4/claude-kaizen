@@ -1392,6 +1392,181 @@ describe('cmdUndo', () => {
   });
 });
 
+// ------------------------------------------------------------------ recipes that share one hook script
+
+// hooks.session-context and hooks.precompact-handoff both write {kaizenHome}/hooks/session-context.mjs and both wire it
+// to SessionStart (startup|resume|clear|compact|fork and compact|resume|fork). They are applied in separate batches in
+// real use, and either one can be undone first.
+describe('two recipes sharing session-context.mjs across separate batches', () => {
+  const SC = 'hooks.session-context';
+  const PH = 'hooks.precompact-handoff';
+  const ALL_EVENTS = ['clear', 'compact', 'fork', 'resume', 'startup'];
+  const scriptFile = () => path.join(ctx.stateDir, 'hooks', 'session-context.mjs');
+  const handoffFile = () => path.join(ctx.stateDir, 'hooks', 'precompact-handoff.mjs');
+  const stateHooks = () => (fs.existsSync(path.join(ctx.stateDir, 'hooks')) ? fs.readdirSync(path.join(ctx.stateDir, 'hooks')) : []);
+  const sessionStart = () => ((readSettings().hooks || {}).SessionStart || []).filter((g) => g.hooks.some((h) => h.command.includes('session-context.mjs')));
+  const covered = () => [...new Set(sessionStart().flatMap((g) => g.matcher.split('|')))].sort();
+  const SC_PARAMS = ['hooks.session-context.includeGit=false', 'hooks.session-context.maxChars=4000'];
+  let cleanSettings;
+
+  beforeEach(() => {
+    cleanSettings = readSettings();
+  });
+
+  const at = (n, flags) => withFrozenDate(`2026-10-30T12:00:0${n}.000Z`, () => runApply(flags));
+  const batch = (n) => `2026-10-30T12-00-0${n}`;
+  const assertPristine = () => {
+    assert.deepEqual(readSettings(), cleanSettings);
+    assert.deepEqual(stateHooks(), []);
+  };
+
+  it('apply session-context, apply precompact-handoff, undo the last batch: the script and the SessionStart hook stay', async () => {
+    await at(1, { recipe: SC, param: SC_PARAMS });
+    const mine = read(scriptFile());
+    assert.match(mine, /const MAX_RAW = '4000'/);
+    assert.match(mine, /const GIT_RAW = 'false'/);
+    const second = await at(2, { recipe: PH });
+    // the second recipe does not know the first one's parameters: it keeps the script as it is and says so
+    assert.equal(read(scriptFile()), mine);
+    assert.match(second.stdout, /session-context\.mjs: shared with hooks\.session-context/);
+    const { stdout } = await runUndo();
+    assert.equal(read(scriptFile()), mine, 'undoing the later batch must not delete or reset the script');
+    assert.deepEqual(covered(), ALL_EVENTS);
+    assert.ok(!fs.existsSync(handoffFile()));
+    assert.equal(readSettings().hooks.PreCompact, undefined);
+    assert.ok(!stdout.includes('--force'), stdout);
+    assert.equal(readManifest(batch(2)).undone, true, 'nothing was left over, so the batch counts as undone');
+    await runUndo();
+    assertPristine();
+  });
+
+  it('apply session-context, apply precompact-handoff, undo the first batch by id: precompact-handoff keeps its script and coverage', async () => {
+    await at(1, { recipe: SC, param: SC_PARAMS });
+    const mine = read(scriptFile());
+    await at(2, { recipe: PH });
+    const { stdout } = await runUndo({}, [batch(1)]);
+    assert.equal(read(scriptFile()), mine, 'the script is still needed by precompact-handoff');
+    assert.deepEqual(covered(), ['compact', 'fork', 'resume'], 'only the part precompact-handoff asked for is left');
+    assert.ok(!stdout.includes('--force'), stdout);
+    assert.match(stdout, /session-context\.mjs.*still in use by hooks\.precompact-handoff/);
+    assert.equal(readManifest(batch(1)).undone, true);
+    // the remaining recipe now owns the script and the hook: undoing it cleans up everything
+    await runUndo({}, [batch(2)]);
+    assertPristine();
+  });
+
+  it('apply precompact-handoff, apply session-context, undo the last batch: the first recipe is back as it was', async () => {
+    await at(1, { recipe: PH });
+    const first = read(scriptFile());
+    const groupsBefore = JSON.stringify(sessionStart());
+    await at(2, { recipe: SC, param: SC_PARAMS });
+    assert.match(read(scriptFile()), /const GIT_RAW = 'false'/, 'the explicit parameters of the second recipe win');
+    assert.deepEqual(covered(), ALL_EVENTS);
+    await runUndo();
+    assert.equal(read(scriptFile()), first, 'the script of precompact-handoff comes back from the backup instead of being deleted');
+    assert.equal(JSON.stringify(sessionStart()), groupsBefore);
+    assert.ok(fs.existsSync(handoffFile()));
+    await runUndo();
+    assertPristine();
+  });
+
+  it('apply precompact-handoff, apply session-context, undo the first batch by id: session-context keeps the whole coverage', async () => {
+    await at(1, { recipe: PH });
+    await at(2, { recipe: SC, param: SC_PARAMS });
+    const mine = read(scriptFile());
+    const { stdout } = await runUndo({}, [batch(1)]);
+    assert.equal(read(scriptFile()), mine, 'session-context.mjs is still run by the SessionStart hook of the second batch');
+    assert.deepEqual(covered(), ALL_EVENTS, 'resume, compact and fork stay covered although their group belonged to the undone batch');
+    assert.ok(!stdout.includes('--force'), stdout);
+    assert.equal(readSettings().hooks.PreCompact, undefined);
+    assert.ok(!fs.existsSync(handoffFile()));
+    await runUndo({}, [batch(2)]);
+    assertPristine();
+  });
+
+  it('the coverage handed over by an undo is removed again with the batch that took it over', async () => {
+    await at(1, { recipe: PH });
+    await at(2, { recipe: SC });
+    await runUndo({}, [batch(1)]);
+    assert.deepEqual(covered(), ALL_EVENTS);
+    const taken = readManifest(batch(2)).recipes.flatMap((r) => r.actions).find((a) => a.type === 'settings.hook');
+    assert.deepEqual(taken.matcher.split('|').sort(), ALL_EVENTS, 'the journal now says that this batch owns every alternative');
+    await runUndo();
+    assertPristine();
+  });
+
+  it('applying both recipes in one batch keeps the parameters of session-context in either order', async () => {
+    await at(1, { recipe: `${SC},${PH}`, param: SC_PARAMS });
+    assert.match(read(scriptFile()), /const GIT_RAW = 'false'/);
+    assert.deepEqual(covered(), ALL_EVENTS);
+    await runUndo({ all: true });
+    assertPristine();
+    await at(2, { recipe: `${PH},${SC}`, param: SC_PARAMS });
+    assert.match(read(scriptFile()), /const GIT_RAW = 'false'/);
+    await runUndo({ all: true });
+    assertPristine();
+  });
+
+  it('undo --all and undo --dry-run handle the shared script in a multi-batch journal', async () => {
+    await at(1, { recipe: SC, param: SC_PARAMS });
+    await at(2, { recipe: PH });
+    const before = snapshotDir(ctx.root);
+    const dry = await runUndo({ all: true, 'dry-run': true });
+    assert.deepEqual(snapshotDir(ctx.root), before, 'a dry run changes nothing');
+    assert.ok(!dry.stdout.includes('--force'), dry.stdout);
+    await runUndo({ all: true });
+    assertPristine();
+  });
+
+  it('re-applying session-context with other parameters: undo gives the earlier parameters back, then removes the script', async () => {
+    await at(1, { recipe: SC });
+    const defaults = read(scriptFile());
+    assert.match(defaults, /const GIT_RAW = 'true'/);
+    await at(2, { recipe: SC, param: SC_PARAMS });
+    assert.match(read(scriptFile()), /const GIT_RAW = 'false'/);
+    assert.equal(sessionStart().length, 1, 'the hook is wired once');
+    await runUndo();
+    assert.equal(read(scriptFile()), defaults);
+    assert.equal(sessionStart().length, 1, 'the first batch still owns the hook');
+    await runUndo();
+    assertPristine();
+  });
+
+  it('re-applying session-context with other parameters, undoing the first batch first, keeps the new script', async () => {
+    await at(1, { recipe: SC });
+    await at(2, { recipe: SC, param: SC_PARAMS });
+    const newer = read(scriptFile());
+    await runUndo({}, [batch(1)]);
+    assert.equal(read(scriptFile()), newer);
+    await runUndo({}, [batch(2)]);
+    assertPristine();
+  });
+
+  it('re-applying precompact-handoff after session-context changes nothing and undoes cleanly', async () => {
+    await at(1, { recipe: SC, param: SC_PARAMS });
+    await at(2, { recipe: PH });
+    const mine = read(scriptFile());
+    const again = await at(3, { recipe: PH });
+    assert.equal(read(scriptFile()), mine);
+    // the second run found everything in place: it recorded nothing and must not shadow the batch that did the work
+    assert.ok(again.manifest.recipes.every((r) => r.actions.length === 0), 'the repeat run records nothing');
+    await runUndo();
+    assert.equal(readManifest(batch(2)).undone, true, 'a plain undo reaches the batch that did the work');
+    assert.equal(read(scriptFile()), mine, 'session-context still needs the script');
+    await runUndo();
+    assertPristine();
+  });
+
+  it('a script edited by the user is still kept, with and without a second recipe using it', async () => {
+    await at(1, { recipe: SC });
+    await at(2, { recipe: PH });
+    fs.appendFileSync(scriptFile(), '\n// tuned by hand\n');
+    const { stdout } = await runUndo({}, [batch(1)]);
+    assert.match(stdout, /session-context\.mjs/);
+    assert.ok(fs.existsSync(scriptFile()), 'an edited script must survive');
+  });
+});
+
 // ------------------------------------------------------------------ catalog <-> apply consistency
 
 describe('the recipe catalog against the apply engine', () => {

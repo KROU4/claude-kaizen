@@ -505,6 +505,23 @@ describe('kaizen end to end: measure, recommend, apply, verify, undo', () => {
     assert.equal(done.undone, true);
     assert.equal(done.partiallyUndone, undefined);
   });
+
+  it('undoing precompact-handoff leaves the session-context script and hook that another batch still uses', () => {
+    const home = measured();
+    const script = path.join(home.stateDir, 'hooks', 'session-context.mjs');
+    assert.equal(cli(home, ['apply', '--recipe', 'hooks.session-context', '--param', 'hooks.session-context.includeGit=false']).status, 0);
+    const mine = fs.readFileSync(script, 'utf8');
+    assert.equal(cli(home, ['apply', '--recipe', 'hooks.precompact-handoff']).status, 0);
+    assert.equal(fs.readFileSync(script, 'utf8'), mine, 'the second recipe must not reset the first one\'s parameters');
+    const undone = cli(home, ['undo']);
+    assert.equal(undone.status, 0, undone.stderr);
+    assert.equal(fs.readFileSync(script, 'utf8'), mine);
+    assert.ok(!undone.stdout.includes('--force'), undone.stdout);
+    const verified = cli(home, ['verify']);
+    assert.equal(verified.status, 0, verified.stdout + verified.stderr);
+    assert.equal(cli(home, ['undo']).status, 0);
+    assert.ok(!fs.existsSync(script));
+  });
 });
 
 describe('kaizen verify', () => {

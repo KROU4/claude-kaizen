@@ -131,6 +131,30 @@ function hookIdentity(h) {
   return `${h.type || 'command'}|${h.command || h.prompt || ''}`;
 }
 
+/** The alternatives of a hook matcher; null stands for "every event" (no matcher, or `*`). */
+function tokensOf(matcher) {
+  return matcher && matcher !== '*' ? String(matcher).split('|').filter(Boolean) : null;
+}
+
+/** What a journaled settings.hook entry needs to be covered: the matcher its recipe asked for (older journals: the one it added). */
+function needOf(entry) {
+  return entry.wanted !== undefined ? entry.wanted : entry.matcher;
+}
+
+const UNFILLED = /\{\{[a-zA-Z0-9_]+\}\}/;
+
+function samePath(a, b) {
+  return path.resolve(a) === path.resolve(b);
+}
+
+function cmpSeq(a, b) {
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] === b[i]) continue;
+    return a[i] < b[i] ? -1 : 1;
+  }
+  return 0;
+}
+
 // ------------------------------------------------------------- action handlers
 // Each returns a journal entry (or null when nothing changed). `dry` = describe only.
 
@@ -158,7 +182,22 @@ const handlers = {
         else for (const tok of String(g.matcher).split('|')) covered.add(tok);
       }
       const missing = matcher && !all ? matcher.split('|').filter((tok) => !covered.has(tok)) : [];
-      if (!missing.length) return { skipped: true, reason: io.t('apply.skip.hook_present'), file, event: a.event, command: entry.command };
+      if (!missing.length) {
+        // Wired by another recipe that is still applied (its group is what this recipe relies on): record that, so that
+        // undoing the other recipe leaves this coverage in place. Wired by the user, or by this same recipe: nothing to record.
+        const wantT = tokensOf(a.matcher);
+        const lenders = io
+          .live()
+          .filter((p) => p.entry.type === 'settings.hook' && !p.entry.shared && p.entry.event === a.event && p.entry.identity === id && samePath(p.entry.file, file) && p.recipe.id !== io.recipeId)
+          .filter((p) => {
+            const pt = tokensOf(p.entry.matcher);
+            return !wantT || !pt || pt.some((x) => wantT.includes(x));
+          });
+        const own = io.live().some((p) => p.entry.type === 'settings.hook' && p.entry.event === a.event && p.entry.identity === id && samePath(p.entry.file, file) && p.recipe.id === io.recipeId);
+        if (!lenders.length || own) return { skipped: true, reason: io.t('apply.skip.hook_present'), file, event: a.event, command: entry.command };
+        io.describe(io.say(`hook for ${a.event} is already installed by ${[...new Set(lenders.map((p) => p.recipe.id))].join(', ')}; shared`, `хук ${a.event} уже установлен рецептом ${[...new Set(lenders.map((p) => p.recipe.id))].join(', ')}; используется совместно`));
+        return { type: 'settings.hook', file, event: a.event, matcher: null, wanted: a.matcher || null, identity: id, shared: true };
+      }
       matcher = missing.join('|');
     }
     const group = { hooks: [entry] };
@@ -168,7 +207,9 @@ const handlers = {
       list.push(group);
       io.save(file, settings);
     }
-    return { type: 'settings.hook', file, event: a.event, matcher, identity: id };
+    // wanted: the whole matcher the recipe asked for (matcher is only what this batch added), so that undoing another
+    // batch can put back the part of the coverage this recipe still depends on
+    return { type: 'settings.hook', file, event: a.event, matcher, wanted: a.matcher || null, identity: id };
   },
 
   'settings.set'(a, ctx, io) {
@@ -209,7 +250,7 @@ const handlers = {
   file(a, ctx, io) {
     const target = expandHome(fill(a.target, ctx));
     const content = a.template ? renderTemplateFile(a.template, ctx.params) : fill(a.content, ctx);
-    return writeManaged(target, content, io, { executable: !!a.executable });
+    return writeManaged(target, content, io, { executable: !!a.executable, template: !!a.template });
   },
 
   skill(a, ctx, io) {
@@ -381,7 +422,17 @@ function paramsUnfilled(content, params) {
 function writeManaged(target, content, io, extra = {}) {
   const existed = exists(target);
   const current = existed ? fs.readFileSync(target, 'utf8') : null;
-  if (existed && current === content) return { skipped: true, reason: io.t('apply.skip.identical_file'), file: target };
+  // The file is also written by another recipe that is still applied (two recipes can share one hook script). A recipe
+  // that wants the very same content, or whose template leaves placeholders unfilled because the parameters belong to
+  // the other recipe, keeps the file as it is and records that it uses it: undoing the other recipe then leaves the file.
+  const owners = existed ? io.live().filter((p) => p.entry.type === 'file' && samePath(p.entry.file, target)) : [];
+  const foreign = owners.filter((p) => p.recipe.id !== io.recipeId);
+  if (existed && (current === content || (foreign.length && extra.template && UNFILLED.test(content)))) {
+    if (!foreign.length || foreign.length < owners.length) return { skipped: true, reason: current === content ? io.t('apply.skip.identical_file') : io.say('kept as it is: its parameters belong to another recipe', 'оставлен как есть: его параметры заданы другим рецептом'), file: target };
+    const names = [...new Set(foreign.map((p) => p.recipe.id))].join(', ');
+    io.describe(io.say(`${target}: shared with ${names}, kept as it is`, `${target}: общий файл рецепта ${names}, оставлен как есть`));
+    return { type: 'file', file: target, existedBefore: true, hash: sha(current), createdDir: null, shared: true };
+  }
   const ours = io.ownedFiles.has(path.resolve(target));
   if (existed && !ours && !io.force && !target.replace(/\\/g, '/').includes(toPosix(stateDir()))) {
     return { skipped: true, reason: io.t('apply.skip.not_ours'), file: target };
@@ -421,20 +472,63 @@ function ownedFiles() {
   return set;
 }
 
-function makeIo({ dry, force, measure, batchDir, recipeId, t = translator('en') }) {
+/**
+ * Every journal entry that is still in force: from batches that are not undone, minus entries already reverted
+ * (`e.undone`, or listed in `done` during a run that has not written yet). `extra` is a batch being built.
+ * `seq` orders entries in time: batch id, then recipe, then action.
+ */
+function collectLive(boxes, { done = new Set(), extra = null } = {}) {
+  const out = [];
+  const add = (box) => {
+    (box.manifest.recipes || []).forEach((recipe, ri) => {
+      (recipe.actions || []).forEach((entry, ei) => {
+        if (!entry.undone && !done.has(entry)) out.push({ entry, recipe, box, seq: [box.id, ri, ei] });
+      });
+    });
+  };
+  for (const box of boxes) if (!box.manifest.undone && !box.manifest.dry) add(box);
+  if (extra) add(extra);
+  return out;
+}
+
+function makeIo({ dry, force, measure, batchDir, recipeId, t = translator('en'), lang = 'en', live = null, applyDir = null }) {
   const cache = new Map();
   const described = [];
   const notes = [];
   const backedUp = new Set();
+  const touched = new Set();
+  const liveEntries = live || (() => collectLive(listManifests()));
   return {
     dry,
     force,
     measure,
     recipeId,
     t,
+    lang,
+    applyDir,
     ownedFiles: ownedFiles(),
+    touched,
     described,
     notes,
+    /** A message that is not in the locale files: the English text, or the Russian one when the run is in Russian. */
+    say(en, ru) {
+      return lang === 'ru' ? ru : en;
+    },
+    live: liveEntries,
+    /** The other entries in force that touch the same file / hook as this journal entry. */
+    peers(e) {
+      const same =
+        e.type === 'file'
+          ? (p) => p.entry.type === 'file' && samePath(p.entry.file, e.file)
+          : (p) => p.entry.type === 'settings.hook' && p.entry.event === e.event && p.entry.identity === e.identity && samePath(p.entry.file, e.file);
+      return liveEntries()
+        .filter((p) => p.entry !== e && same(p))
+        .sort((x, y) => cmpSeq(x.seq, y.seq));
+    },
+    /** A journal entry of another batch was changed: its manifest has to be written back. */
+    touch(box) {
+      if (!dry) touched.add(box);
+    },
     describe(line) {
       described.push(line);
     },
@@ -600,7 +694,8 @@ export async function cmdApply(args, { loadMeasure, pickLang }) {
     const allowed = Array.isArray(recipe.scope) ? recipe.scope : [recipe.scope || recipe.defaultScope || 'user'];
     if (!allowed.includes(scope)) lines.push(t('apply.scope_warn', { id: recipe.id, scope, allowed: allowed.join(', ') }));
     const ctx = buildContext({ scope, projectDir, params });
-    const io = makeIo({ dry, force: !!flags.force, measure, batchDir, recipeId: recipe.id, t });
+    // the entries of the recipes already handled in this batch count too: two recipes of one run can share a file
+    const io = makeIo({ dry, force: !!flags.force, measure, batchDir, recipeId: recipe.id, t, lang, live: () => collectLive(listManifests(), { extra: { id: batchId, manifest } }) });
     const entries = [];
     for (const action of recipe.actions || []) {
       if (!actionApplies(action, measure)) {
@@ -640,19 +735,109 @@ export async function cmdApply(args, { loadMeasure, pickLang }) {
 
 // ------------------------------------------------------------- undo
 
+/**
+ * Undo of a file that another entry still in force uses as well (two recipes share one hook script). The file is never
+ * deleted while somebody uses it: when the entry overwrote an earlier user's version, that version comes back from the
+ * batch backup; otherwise the file stays and the entries left over take over the duty to delete it once nobody uses it.
+ */
+function releaseSharedFile(e, peers, curHash, io) {
+  const known = [e.hash, ...peers.map((p) => p.entry.hash)];
+  if (!known.includes(curHash) && !io.revertEdited) return `kept: ${e.file} modified since apply`;
+  const passOn = () => {
+    // the file was created by this entry (or by one it took over from): whoever is left deletes it at the end
+    if (io.dry || !(e.existedBefore === false || e.inherit)) return;
+    for (const p of peers) {
+      p.entry.inherit = true;
+      io.touch(p.box);
+    }
+  };
+  if (e.shared) {
+    passOn();
+    return 'ok';
+  }
+  const me = io.live().find((p) => p.entry === e);
+  const earlier = me ? peers.filter((p) => cmpSeq(p.seq, me.seq) < 0) : [];
+  if (e.existedBefore && curHash === e.hash && earlier.length && io.applyDir) {
+    const saved = path.join(io.applyDir, 'backups', e.file.replace(/[:\\/]/g, '_'));
+    const before = exists(saved) ? fs.readFileSync(saved, 'utf8') : null;
+    if (before !== null && earlier.some((p) => p.entry.hash === sha(before))) {
+      io.describe(io.say(`${e.file}: back to the version of ${[...new Set(earlier.map((p) => p.recipe.id))].join(', ')}`, `${e.file}: возвращена версия рецепта ${[...new Set(earlier.map((p) => p.recipe.id))].join(', ')}`));
+      if (!io.dry) {
+        io.backup(e.file);
+        fs.writeFileSync(e.file, before, 'utf8');
+      }
+      return 'ok';
+    }
+  }
+  passOn();
+  return `shared: ${e.file} still in use by ${[...new Set(peers.map((p) => p.recipe.id))].join(', ')}`;
+}
+
 function undoEntry(e, io) {
   switch (e.type) {
     case 'settings.hook': {
       const s = io.load(e.file);
       const list = s.hooks && s.hooks[e.event];
+      if (e.shared) return 'ok'; // used another recipe's hook and installed nothing of its own
       if (!Array.isArray(list)) return 'hook list missing';
       let removed = 0;
+      let sample = null; // the hook as it was, to put back what other batches still need
+      const gone = new Set(); // matcher alternatives this undo took out
+      let goneAll = false;
+      const mine = e.adopted ? tokensOf(e.matcher) : null;
       for (const group of list) {
-        // the same command may sit in another group for other matchers (installed by another recipe): leave that one
-        if ((group.matcher || null) !== (e.matcher || null)) continue;
-        const before = (group.hooks || []).length;
-        group.hooks = (group.hooks || []).filter((h) => hookIdentity(h) !== e.identity);
-        removed += before - group.hooks.length;
+        const ids = (group.hooks || []).filter((h) => hookIdentity(h) === e.identity);
+        if (!ids.length) continue;
+        const gt = tokensOf(group.matcher);
+        if ((group.matcher || null) === (e.matcher || null)) {
+          sample ||= ids[0];
+          group.hooks = group.hooks.filter((h) => hookIdentity(h) !== e.identity);
+          removed += ids.length;
+          if (gt) gt.forEach((x) => gone.add(x));
+          else goneAll = true;
+        } else if (mine && gt && ids.length === group.hooks.length && gt.some((x) => mine.includes(x))) {
+          // this entry took over alternatives that an undone batch had installed (they sit in groups of their own)
+          sample ||= ids[0];
+          gt.filter((x) => mine.includes(x)).forEach((x) => gone.add(x));
+          const rest = gt.filter((x) => !mine.includes(x));
+          if (rest.length) group.matcher = rest.join('|');
+          else {
+            group.hooks = [];
+            removed += ids.length;
+          }
+        }
+        // else: the same command sits in another group for other matchers (installed by another recipe): leave that one
+      }
+      // Put back the coverage that other batches still in force asked for and that only the removed group provided; the
+      // batch that needs it takes the alternatives over, so that undoing it later removes them again.
+      if (sample && (gone.size || goneAll)) {
+        const covered = new Set();
+        let coveredAll = false;
+        for (const g of list) {
+          if (!(g.hooks || []).some((h) => hookIdentity(h) === e.identity)) continue;
+          const gt = tokensOf(g.matcher);
+          if (gt) gt.forEach((x) => covered.add(x));
+          else coveredAll = true;
+        }
+        for (const p of io.peers(e)) {
+          if (coveredAll) break;
+          const want = tokensOf(needOf(p.entry));
+          const restore = want ? want.filter((x) => (goneAll || gone.has(x)) && !covered.has(x)) : goneAll ? null : [];
+          if (restore && !restore.length) continue;
+          const group = { hooks: [{ ...sample }] };
+          if (restore) group.matcher = restore.join('|');
+          list.push(group);
+          if (restore) restore.forEach((x) => covered.add(x));
+          else coveredAll = true;
+          if (!io.dry) {
+            const order = want || [];
+            const merged = [...new Set([...(tokensOf(p.entry.matcher) || []), ...(restore || [])])].sort((x, y) => (order.indexOf(x) + 1 || 1e9) - (order.indexOf(y) + 1 || 1e9));
+            p.entry.matcher = restore ? merged.join('|') : null;
+            p.entry.adopted = true;
+            delete p.entry.shared;
+            io.touch(p.box);
+          }
+        }
       }
       s.hooks[e.event] = list.filter((g) => g.hooks && g.hooks.length);
       if (!s.hooks[e.event].length) delete s.hooks[e.event];
@@ -681,8 +866,11 @@ function undoEntry(e, io) {
       return 'ok';
     }
     case 'file': {
+      const peers = io.peers(e); // other batches / recipes still in force that use this file
+      if (e.shared && !peers.length && !e.inherit) return 'ok'; // only used a file somebody else wrote; nothing of its own to remove
       if (!exists(e.file)) return 'file already removed';
       const cur = fs.readFileSync(e.file, 'utf8');
+      if (peers.length) return releaseSharedFile(e, peers, sha(cur), io);
       if (sha(cur) !== e.hash && !io.revertEdited) return `kept: ${e.file} modified since apply`;
       io.describe(io.t('undo.plan.delete', { file: e.file }));
       if (!io.dry) {
@@ -791,19 +979,24 @@ const RESULT_KEYS = [
   [/^error: ([\s\S]*)$/, 'error', ['detail']],
 ];
 
-function localizeResult(result, t) {
+function localizeResult(result, t, lang = 'en') {
   for (const [re, key, names] of RESULT_KEYS) {
     const m = re.exec(result);
     if (m) return t(`undo.res.${key}`, Object.fromEntries(names.map((n, i) => [n, m[i + 1]])));
   }
+  const shared = /^shared: (.+) still in use by (.+)$/.exec(result);
+  if (shared && lang === 'ru') return `${shared[1]} оставлен: им ещё пользуется ${shared[2]}`;
   return result;
 }
 
 export async function cmdUndo(args, { pickLang }) {
   const flags = args.flags;
   const dry = !!flags['dry-run'];
-  const t = translator(pickLang(flags, null));
+  const lang = pickLang(flags, null);
+  const t = translator(lang);
   const manifests = listManifests().filter((m) => !m.manifest.undone && !m.manifest.dry);
+  // entries reverted in this run, also in a dry run that writes nothing: they no longer count as users of a shared file / hook
+  const done = new Set();
   // A batch in which every action was skipped (an apply that found everything already in place) recorded nothing to
   // revert. It must not shadow the batch that did the work, so "undo" and "undo --all" pass over it.
   const recorded = manifests.filter((m) => (m.manifest.recipes || []).some((r) => (r.actions || []).length || r.advice));
@@ -822,7 +1015,7 @@ export async function cmdUndo(args, { pickLang }) {
     const runStamp = new Date().toISOString().replace(/[:.]/g, '-');
     let runId = runStamp;
     for (let n = 2; exists(path.join(m.dir, 'undo', runId)); n++) runId = `${runStamp}-${String(n).padStart(2, '0')}`;
-    const io = makeIo({ dry, force: true, measure: null, batchDir: path.join(m.dir, 'undo', runId), recipeId: null, t });
+    const io = makeIo({ dry, force: true, measure: null, batchDir: path.join(m.dir, 'undo', runId), recipeId: null, t, lang, applyDir: m.dir, live: () => collectLive(manifests, { done }) });
     // --force: also revert what the user edited after apply (the files as they are now are backed up first)
     io.revertEdited = !!flags.force;
     const results = [];
@@ -838,11 +1031,16 @@ export async function cmdUndo(args, { pickLang }) {
         }
         results.push({ recipe: r.id, type: e.type, result });
         if (/^(kept|error):/.test(result)) pending.push(e);
-        else if (!dry) e.undone = true;
+        else {
+          done.add(e);
+          if (!dry) e.undone = true;
+        }
       }
     }
+    // other batches whose entries took over a shared file or hook coverage from this one
+    for (const box of io.touched) if (box !== m) writeJsonAtomic(path.join(box.dir, 'manifest.json'), box.manifest);
     for (const d of io.described) process.stdout.write(`  ${dry ? '→' : '✓'} ${d}\n`);
-    for (const r of results.filter((x) => x.result !== 'ok')) process.stdout.write(`  · ${r.recipe} ${r.type}: ${localizeResult(r.result, t)}\n`);
+    for (const r of results.filter((x) => x.result !== 'ok')) process.stdout.write(`  · ${r.recipe} ${r.type}: ${localizeResult(r.result, t, lang)}\n`);
     const n = results.filter((x) => x.result === 'ok').length;
     total += n;
     if (!dry) {
@@ -871,4 +1069,4 @@ export async function cmdUndo(args, { pickLang }) {
   return { undone: total };
 }
 
-export const __test = { handlers, undoEntry, makeIo, writeManaged, getPath, setPath, deletePath, hookIdentity, sha, TEMPLATES, os };
+export const __test = { handlers, undoEntry, makeIo, collectLive, writeManaged, getPath, setPath, deletePath, hookIdentity, sha, TEMPLATES, os };
