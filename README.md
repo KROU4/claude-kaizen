@@ -64,7 +64,7 @@ Then, in any session:
 
 ```bash
 git clone https://github.com/KROU4/claude-kaizen && cd claude-kaizen
-node scripts/kaizen.mjs measure        # digest to stdout, files in ~/.claude/kaizen/
+node scripts/kaizen.mjs measure        # digest to stdout, files in ~/.claude/kaizen/ (`paths` prints the real location)
 node scripts/kaizen.mjs recommend      # what the data says you should change
 node scripts/kaizen.mjs console        # pick in the browser → choices.json
 node scripts/kaizen.mjs choices --import my-choices.json   # validate a choices file you wrote or got back from an artifact
@@ -117,7 +117,7 @@ Full list with definitions: [`docs/recipes.md#metrics-recipes-can-test`](docs/re
 - Nothing leaves your machine, with two opt-in exceptions. There is no telemetry; the only network calls are the optional Telegram notification hook you configure yourself and the artifact console below.
 - **Artifact console (desktop app only).** The page is published as a private claude.ai artifact: the recommendations are part of the page, and your ticks, parameters and note are stored in the artifact's database until Claude reads them and deletes the document. Do not share the link and do not type secrets there (Claude asks for a Telegram bot token in chat instead). The local browser console and the terminal flow upload nothing.
 - The digest keeps counts and short, secret-scrubbed snippets of your own prompts (needed to spot repeated instructions). Tool output and Claude's replies are never retained.
-- State lives in `~/.claude/kaizen/` (override with `KAIZEN_STATE_DIR`). Delete the folder to forget everything.
+- State lives in `~/.claude/kaizen/` (override with `KAIZEN_STATE_DIR`; `node scripts/kaizen.mjs paths` prints the real location). It also holds the hook scripts and status line Kaizen installed and the undo journal, so do not delete it while anything is applied: run `undo --all` first, then delete the folder. Deleting it first leaves hooks in `settings.json` pointing at missing files (they fail on every event and stop guarding) and makes `undo` impossible.
 - Every change is journaled under `~/.claude/kaizen/applied/<batch>/` with backups of the files it touched.
 
 More in the [FAQ](docs/faq.md), [architecture notes](docs/architecture.md) and the [Claude Code formats reference](docs/reference/claude-code-formats.md).

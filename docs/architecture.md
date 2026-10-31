@@ -33,7 +33,7 @@ plugins / MCP config ──────────┘   scripts/lib/inventory.m
 
 | File | Responsibility |
 |---|---|
-| `scripts/kaizen.mjs` | CLI entry; subcommands `measure`, `recommend` (`--add FILE` merges extra recipes and remembers the path), `console`, `choices` (`--import FILE\|-` validates a choices file and writes `choices.json`), `apply` (`--param`, `--param-file recipe.name=path`, `--add FILE`), `undo`, `status`, `verify`, `doctor`, `selfcheck`, `docs`, `nudge`. |
+| `scripts/kaizen.mjs` | CLI entry; subcommands `measure`, `recommend` (`--add FILE` merges extra recipes and remembers the path), `console`, `choices` (`--import FILE\|-` validates a choices file and writes `choices.json`), `apply` (`--param`, `--param-file recipe.name=path`, `--add FILE`, `--from-batch ID [--recipe ids]` to re-apply a journaled batch with its own scope and parameters), `undo`, `paths` (the state directory and its files as JSON; skills and agents read it instead of assuming `~/.claude/kaizen`), `status`, `verify`, `doctor`, `selfcheck`, `docs`, `nudge`. |
 | `scripts/lib/transcripts.mjs` | Streams one JSONL file at a time; dedupes assistant lines by `requestId` and repeated lines by `uuid`; classifies tool errors; extracts prompt stems, corrections, hook health, permission decisions, durations. Per-file cache keyed by size + mtime + schema version. |
 | `scripts/lib/insights.mjs` | Aggregates `/insights` facets and session-meta when present. |
 | `scripts/lib/inventory.mjs` | Settings (user/project/local), hooks, permissions, skills, agents, plugins, MCP servers, CLAUDE.md files with topic hints. Masks `env` values. |
@@ -50,7 +50,11 @@ plugins / MCP config ──────────┘   scripts/lib/inventory.m
 
 `choices.json`: `{version, submittedAt, lang, selected: [{id, scope, params}], discuss: [id], notes}`. Whatever the UI (local server, artifact database, chat questions), it reaches `choices.json` through the same validation (`choices --import` or the local server), so ids, scopes and parameters are checked before `apply` reads them.
 
+The local console moves a `choices.json` left by an earlier session aside (`choices.previous.json`) when it starts, so the file exists only after this run's Apply; on timeout it exits with code 3 and prints `{"ok":false,"timedOut":true}`, and the `start` skill applies nothing without an `"ok":true` line.
+
 Extra recipes: the analyst may draft `custom.*` recipes into `extra-recipes.json`. `recommend --add FILE` merges and validates them and stores the path in the state dir; `apply` reloads that file (or `--add FILE`), so a custom recipe the user ticked is applied like a catalog one. Multi-line parameter values (drafted rules, a whole SKILL.md) are passed with `apply --param-file recipe.name=path`.
+
+The state directory also holds the installed hook scripts (`hooks/`), the status line and the undo journal (`applied/`); deleting it while anything is applied breaks the hooks in `settings.json` and makes `undo` impossible, so `undo --all` comes first.
 
 `applied/<batch>/manifest.json`: `{id, at, projectDir, recipes: [{id, scope, params, actions: [journal entries]}], undone}`. Journal entries carry what `undo` needs: previous values, added items, file hashes, removed server definitions.
 

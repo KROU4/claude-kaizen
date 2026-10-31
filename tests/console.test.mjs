@@ -535,3 +535,43 @@ describe('isLoopbackHost / isLoopbackOrigin', () => {
     for (const bad of ['https://127.0.0.1:5000', 'http://127.0.0.1:5001', 'null', 'http://evil.example:5000', undefined]) assert.equal(isLoopbackOrigin(bad, 5000), false, String(bad));
   });
 });
+
+describe('kaizen console (mode B): an old choices.json is never taken for this run', () => {
+  const old = { version: 1, submittedAt: '2026-10-24T10:00:00.000Z', lang: 'en', selected: [{ id: 'settings.cleanup-period', scope: 'user', params: {} }], discuss: [], notes: 'last week' };
+  const setup = () => {
+    const home = materializeHome();
+    writeJson(path.join(home.stateDir, 'recommendations.json'), { generatedAt: '2026-10-30T10:00:00.000Z', lang: 'en', windowDays: 30, sessions: 3, recommendations: [recommendation()], alreadyApplied: [], notApplicable: 0 });
+    writeJson(path.join(home.stateDir, 'choices.json'), old);
+    return home;
+  };
+
+  it('on timeout it exits 3, prints {"ok":false,"timedOut":true}, and leaves no choices.json for `apply` to pick up', () => {
+    const home = setup();
+    const r = runCli(['console', '--no-open', '--timeout', '0.02'], { env: home.env });
+    assert.equal(r.status, 3, r.stderr);
+    const lines = r.stdout.trim().split(/\r?\n/).map((l) => JSON.parse(l));
+    assert.deepEqual(lines[lines.length - 1], { ok: false, timedOut: true });
+    assert.ok(!lines.some((l) => l.ok === true), 'no submission line');
+    assert.ok(!fs.existsSync(path.join(home.stateDir, 'choices.json')), 'the stale selection is gone');
+    assert.deepEqual(readJson(path.join(home.stateDir, 'choices.previous.json')), old, 'and kept under another name');
+  });
+
+  it('`apply` after that timeout has nothing to apply instead of last week\'s selection', () => {
+    const home = setup();
+    const m = runCli(['measure', '--all', '--quiet'], { env: { ...home.env, CLAUDE_CONFIG_DIR: home.configDir } });
+    assert.equal(m.status, 0, m.stderr);
+    assert.equal(runCli(['console', '--no-open', '--timeout', '0.02'], { env: home.env }).status, 3);
+    const dry = runCli(['apply', '--dry-run'], { env: home.env });
+    assert.notEqual(dry.status, 0);
+    assert.ok(!/would be applied/.test(dry.stdout), dry.stdout);
+    assert.match(dry.stderr, /choices\.json/);
+  });
+
+  it('a console started without an old file works as before and writes no choices.previous.json', () => {
+    const home = materializeHome();
+    writeJson(path.join(home.stateDir, 'recommendations.json'), { generatedAt: '2026-10-30T10:00:00.000Z', lang: 'en', windowDays: 30, sessions: 3, recommendations: [recommendation()], alreadyApplied: [], notApplicable: 0 });
+    const r = runCli(['console', '--no-open', '--timeout', '0.02'], { env: home.env });
+    assert.equal(r.status, 3);
+    assert.ok(!fs.existsSync(path.join(home.stateDir, 'choices.previous.json')));
+  });
+});

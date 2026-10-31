@@ -140,7 +140,7 @@ describe('start: analyst drafts replace the catalog recipes of the same job', ()
   it('checks recommendations[].id, not alreadyApplied, and says what to do with a custom id found only there', () => {
     assert.match(text, /in `recommendations\[\]\.id` specifically/);
     assert.match(text, /only under `alreadyApplied`/);
-    assert.match(text, /apply --recipe <id> --add ~\/\.claude\/kaizen\/extra-recipes\.json/);
+    assert.match(text, /apply --recipe <id> --add <state>\/extra-recipes\.json/);
   });
 });
 
@@ -153,12 +153,12 @@ describe('analyst: custom ids are stable and a rewritten file re-offers them', (
 describe('apply skill: custom recipes always get --add with the named file', () => {
   const text = read('skills', 'apply', 'SKILL.md');
   it('names the extra recipes file and does not leave it to Kaizen to remember the path', () => {
-    assert.match(text, /add `--add ~\/\.claude\/kaizen\/extra-recipes\.json`/);
+    assert.match(text, /add `--add <state>\/extra-recipes\.json`/);
     assert.ok(!/usually reloads on its own/.test(text));
   });
   it('keeps the file in the refresh of step 1 and the listing of step 2, which would otherwise erase the remembered path', () => {
     const step1 = /^1\. .*$/m.exec(text)[0];
-    assert.match(step1, /recommend --json[^\n]*--add ~\/\.claude\/kaizen\/extra-recipes\.json/);
+    assert.match(step1, /recommend --json[^\n]*--add <state>\/extra-recipes\.json/);
     assert.match(/^2\. .*$/m.exec(text)[0], /recommend --all --json` \(with the same `--add`/);
   });
   it('the sequence the skill prescribes keeps a custom recipe applicable', () => {

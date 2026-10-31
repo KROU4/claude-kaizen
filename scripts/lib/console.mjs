@@ -107,6 +107,15 @@ export async function cmdConsole(flags, { loadMeasure, pickLang }) {
   const html = renderConsole(data);
   const choicesFile = path.join(state, 'choices.json');
   const timeoutMin = Number(flags.timeout || 30);
+  // A choices.json from an earlier session must never be taken for this run's answer: if the user closes the tab or the
+  // console times out, `apply` would otherwise read the old selection. The old file is kept as choices.previous.json.
+  if (fs.existsSync(choicesFile)) {
+    try {
+      fs.renameSync(choicesFile, path.join(state, 'choices.previous.json'));
+    } catch {
+      fs.rmSync(choicesFile, { force: true });
+    }
+  }
 
   return new Promise((resolve) => {
     let done = false;
@@ -179,6 +188,8 @@ export async function cmdConsole(flags, { loadMeasure, pickLang }) {
       if (done) return;
       process.stderr.write(t('cli.console_timeout') + '\n');
       process.exitCode = 3;
+      // a line an agent can tell from the submission: no "ok":true means there is no new selection
+      process.stdout.write(JSON.stringify({ ok: false, timedOut: true }) + '\n');
       server.close();
       resolve({ file: null, timedOut: true });
     }, timeoutMin * 60000);

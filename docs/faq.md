@@ -31,7 +31,10 @@ No. Kaizen reads the facets `/insights` leaves behind and reuses the allowlist i
 "Unused" means zero calls in the measurement window. Untick it in the console, or `undo` after the fact: the server definition is restored from the journal.
 
 **Where is everything?**
-`~/.claude/kaizen/`: `measure.json`, `measure.md`, `recommendations.json`, `choices.json`, `extra-recipes.json` (custom recipes drafted by the analyst), `drafts/` (text drafted for rules and skills), `hooks/` (installed scripts), `applied/<batch>/` (manifests and backups), `cache/`. Delete the folder to start over; installed hooks keep working until you `undo` them.
+`~/.claude/kaizen/`: `measure.json`, `measure.md`, `recommendations.json`, `choices.json`, `extra-recipes.json` (custom recipes drafted by the analyst), `drafts/` (text drafted for rules and skills), `hooks/` (installed scripts), `applied/<batch>/` (manifests and backups), `cache/`. The folder is `~/.claude/kaizen` by default; `KAIZEN_STATE_DIR` or `CLAUDE_CONFIG_DIR` move it, and `node scripts/kaizen.mjs paths` prints the real location and every file in it.
+
+**Can I delete that folder to start over, or to remove Kaizen?**
+Not first. The hook scripts and the status line Kaizen installed live in it (`hooks/*.mjs`, `statusline.mjs`) and `settings.json` points to them by absolute path, and the undo journal (`applied/`) is in it too. Delete it and every one of those hooks fails on each event (a guard such as `guard-destructive` stops guarding, the status line goes blank), and `undo` can no longer find what to remove. Run `node scripts/kaizen.mjs undo --all` first (or `/kaizen:undo --all`), check with `status` that nothing is left applied, and only then delete the folder. To start over without removing anything, delete just the generated files (`measure.*`, `recommendations*.json`, `choices*.json`, `cache/`) and keep `hooks/`, `statusline.mjs` and `applied/`.
 
 **How do I turn off the weekly reminder?**
 `~/.claude/kaizen/config.json` → `{"nudge": false}`. The reminder is a single line at session start and runs in a few milliseconds.

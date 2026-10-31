@@ -17,12 +17,12 @@ Open `skills/start/SKILL.md` in the clone and follow it step by step. It is writ
 
 The short version:
 
-1. `measure --quiet` → read `~/.claude/kaizen/measure.md` (never dump `measure.json`).
+1. `paths` → take `stateDir` and `measureMd` from its JSON (the state follows `KAIZEN_STATE_DIR` / `CLAUDE_CONFIG_DIR`; do not assume `~/.claude/kaizen`; `<state>` below is that directory). `measure --quiet` prints nothing → read `measureMd` (never dump `measure.json`).
 2. `recommend --json`.
-3. Show choices: artifact console if you have an Artifact tool (the page is a private claude.ai artifact; tell the user their choices pass through its database and not to type secrets; end your turn after publishing and ask them to reply "done"; then import with `choices --import <file>` and confirm the selection in chat), else `console` (browser), else multiple-choice questions written to a file and imported with `choices --import`.
-4. `apply --dry-run`, then `apply`. Multi-line parameters (drafted rules, a SKILL.md) go through `apply --param-file <recipe>.<param>=<path>`; extra or custom recipes through `--add <file>`.
+3. Show choices: artifact console if you have an Artifact tool (the page is a private claude.ai artifact; tell the user their choices pass through its database and not to type secrets; end your turn after publishing and ask them to reply "done"; then import with `choices --import <file>` and confirm the selection in chat), else `console` (browser; continue only if it exited 0 and printed `"ok":true`, a timeout means no selection and nothing is applied), else multiple-choice questions written to a file and imported with `choices --import`.
+4. `apply --dry-run`, then `apply`. Multi-line parameters (drafted rules, a SKILL.md) go through `apply --param-file <recipe>.<param>=<path>`; extra or custom recipes through `--add <file>`. In a `choices` file leave `scope` out unless the user picked one: a literal `"user"` overrides a recipe's `project` default.
 5. `verify` (add `--project <dir>` for project scope); `~/.claude.json` and created skills/agents are checked by the `kaizen-verifier` role or by reading the files.
-6. Explain `undo --last`.
+6. Explain undo. A run usually leaves several batches (step 4's `apply`, then one per drafted rule or skill), and `undo --last` reverts only the newest one: name this run's batch ids (`status`) and say `undo <id>` for each, newest first, or `undo --all` when no older Kaizen batch should stay. To remove one recipe from a batch: `undo <id>`, then `apply --from-batch <id> --recipe <ids to keep>` (keeps the parameters). To remove Kaizen completely, `undo --all` first and only then delete the state directory: the hook scripts and the undo journal live there.
 
 ## 3. Rules
 

@@ -6,7 +6,8 @@
 //   kaizen recommend [--lang en|ru] [--top N] [--json] [--all]
 //   kaizen console   [--mode local|render] [--port N] [--no-open] [--out FILE] [--lang]
 //   kaizen choices   --import FILE|-
-//   kaizen apply     [FILE|--recipe id,id] [--dry-run] [--scope user|project] [--project DIR] [--param r.p=v] [--param-file r.p=PATH] [--add FILE]
+//   kaizen paths     (JSON: the state dir and the files in it; skills and agents read it instead of a fixed ~/.claude/kaizen)
+//   kaizen apply     [FILE|--recipe id,id|--from-batch ID [--recipe id,id]] [--dry-run] [--scope user|project] [--project DIR] [--param r.p=v] [--param-file r.p=PATH] [--add FILE]
 //   kaizen undo      [ID|--last|--all] [--dry-run] [--force]
 //   kaizen status | doctor | selfcheck | docs | nudge | help | --version
 import fs from 'node:fs';
@@ -29,7 +30,7 @@ const VERSION = JSON.parse(fs.readFileSync(path.join(kitRoot(), 'package.json'),
  * Flags that take a value. Only these consume the next argument; every other flag (--dry-run, --force, --json, --all,
  * --last ...) is a boolean and never swallows the positional argument that follows it.
  */
-export const VALUE_FLAGS = new Set(['days', 'project', 'lang', 'scope', 'param', 'param-file', 'recipe', 'top', 'add', 'mode', 'port', 'out', 'timeout', 'transport', 'import']);
+export const VALUE_FLAGS = new Set(['days', 'project', 'lang', 'scope', 'param', 'param-file', 'recipe', 'top', 'add', 'mode', 'port', 'out', 'timeout', 'transport', 'import', 'from-batch']);
 
 export function parseArgs(argv) {
   const args = { _: [], flags: {} };
@@ -330,6 +331,71 @@ async function cmdChoices(args) {
     process.exitCode = 1;
     return null;
   }
+}
+
+// ---------------------------------------------------------------- paths
+/**
+ * `kaizen paths`: where Kaizen keeps its files for this run (KAIZEN_STATE_DIR / CLAUDE_CONFIG_DIR respected), as one
+ * JSON object. Skills and agents take every file location from here instead of assuming ~/.claude/kaizen.
+ */
+function cmdPaths() {
+  const state = stateDir();
+  const at = (...p) => path.join(state, ...p);
+  const report = {
+    stateDir: state,
+    configDir: configDir(),
+    measureMd: at('measure.md'),
+    measureJson: at('measure.json'),
+    measurePreviousMd: at('measure.previous.md'),
+    recommendations: at('recommendations.json'),
+    choices: at('choices.json'),
+    choicesImport: at('choices.import.json'),
+    extraRecipes: at('extra-recipes.json'),
+    drafts: at('drafts'),
+    hooks: at('hooks'),
+    applied: at('applied'),
+    consoleHtml: at('console.html'),
+    config: at('config.json'),
+  };
+  out(JSON.stringify(report, null, 2));
+  return report;
+}
+
+// ---------------------------------------------------------------- apply --from-batch
+/**
+ * `apply --from-batch ID [--recipe a,b]`: re-apply recipes of a journaled batch with the scope and parameters that batch
+ * used (drafted rules, skill bodies, chosen modes), e.g. after undoing the batch to drop one recipe. The manifest of the
+ * batch is turned into a choices document; `apply` then runs on it like on any choices file, so the dry run, the journal
+ * and `undo` behave as usual. Returns the args `apply` should run with.
+ */
+function applyArgsFromBatch(args) {
+  const id = args.flags['from-batch'];
+  if (!id || id === true) throw new UserError('--from-batch needs a batch id (see "status")');
+  if (args._[1]) throw new UserError('--from-batch cannot be combined with a choices FILE');
+  const manifestFile = path.join(stateDir(), 'applied', String(id), 'manifest.json');
+  const manifest = readJsonSafe(manifestFile);
+  if (!manifest || !Array.isArray(manifest.recipes)) throw new UserError(`--from-batch: no manifest at ${manifestFile}`);
+  const want = args.flags.recipe && args.flags.recipe !== true ? String(args.flags.recipe).split(',').map((x) => x.trim()).filter(Boolean) : null;
+  if (want) {
+    const missing = want.filter((r) => !manifest.recipes.some((x) => x.id === r));
+    if (missing.length) throw new UserError(`--from-batch: batch ${id} has no recipe ${missing.join(', ')} (it has: ${manifest.recipes.map((x) => x.id).join(', ')})`);
+  }
+  const picked = manifest.recipes.filter((r) => (want ? want.includes(r.id) : r.advice || (Array.isArray(r.actions) && r.actions.length)));
+  const choices = {
+    version: 1,
+    source: 'cli',
+    submittedAt: new Date().toISOString(),
+    lang: manifest.lang || 'en',
+    selected: picked.map((r) => ({ id: r.id, scope: r.scope || 'user', params: r.params && typeof r.params === 'object' ? r.params : {} })),
+    discuss: [],
+    notes: '',
+  };
+  const file = path.join(ensureDir(stateDir()), 'choices.from-batch.json');
+  writeJsonAtomic(file, choices);
+  const flags = { ...args.flags };
+  delete flags['from-batch'];
+  delete flags.recipe;
+  return { _: [args._[0], file], flags };
 }
 
 // ---------------------------------------------------------------- status / doctor
@@ -645,11 +711,14 @@ Usage: node scripts/kaizen.mjs <command> [options]
   choices    Store a choices document as choices.json (what the console submits)
              --import FILE|-   (JSON from a file or stdin; prints {ok,file,selected,discuss,notes})
   apply      Apply chosen recipes (choices.json by default)
-             [FILE | --recipe id,id]   --dry-run   --force   --scope user|project   --project DIR
+             [FILE | --recipe id,id | --from-batch ID [--recipe id,id]]   --dry-run   --force   --scope user|project   --project DIR
              --param recipe.name=value   --param-file recipe.name=PATH (file content, multi-line, becomes the value)
              --add FILE (extra recipes, e.g. custom.*; defaults to the file recorded by recommend --add)
+             --from-batch ID re-applies a journaled batch with the scope and parameters it was applied with
+               (after "undo ID", to keep some of its recipes: --from-batch ID --recipe a,b)
   undo       Revert an applied batch   [ID | --last | --all]   --dry-run
              --force also reverts what you edited after apply (kept entries otherwise stay undoable)
+  paths      Print the state directory and the files in it as JSON (KAIZEN_STATE_DIR respected)
   status     Show state: last measurement, recommendations, applied batches
   verify     Self-test installed hooks and status line, parse touched settings, check CLAUDE.md markers
              --project DIR   --json
@@ -688,7 +757,7 @@ export async function main(argv = process.argv.slice(2)) {
       return cmdChoices(args);
     case 'apply': {
       const { cmdApply } = await import('./lib/apply.mjs');
-      return cmdApply(args, { loadMeasure, pickLang });
+      return cmdApply(args.flags['from-batch'] !== undefined ? applyArgsFromBatch(args) : args, { loadMeasure, pickLang });
     }
     case 'undo': {
       const { cmdUndo } = await import('./lib/apply.mjs');
@@ -700,6 +769,8 @@ export async function main(argv = process.argv.slice(2)) {
       }
       return cmdUndo(args, { pickLang: (flags) => pickLang(flags, measure) });
     }
+    case 'paths':
+      return cmdPaths();
     case 'status':
       return cmdStatus();
     case 'verify':
