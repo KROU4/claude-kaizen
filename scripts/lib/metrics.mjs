@@ -97,6 +97,11 @@ function round(n, d = 2) {
 }
 
 /** Plugin names that provided MCP servers actually called (mcp__plugin_<plugin>_<server>__tool). */
+/** How Claude Code writes an MCP server name into tool names (mcp__<this>__<tool>). */
+function mcpToolServerName(name) {
+  return String(name).replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+
 function mcpUsedByPlugin(sessions) {
   const out = {};
   for (const s of sessions) {
@@ -311,7 +316,8 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
   // failing hooks: errors per configured hook command (only hooks still present in settings are actionable)
   const errorsByCommand = {};
   for (const s of S) merge(errorsByCommand, s.hooks.errorsByCommand);
-  const configuredCommands = new Set(inventory.hooks.commands.map((c) => c.command));
+  // hooks that come from plugins are counted for has*Hook but cannot be removed from settings, so they are not actionable
+  const configuredCommands = new Set(inventory.hooks.commands.filter((c) => !String(c.scope || '').startsWith('plugin:')).map((c) => c.command));
   const normalizeCmd = (c) => String(c).replace(/\s+/g, ' ').trim();
   const configuredNorm = new Map([...configuredCommands].map((c) => [normalizeCmd(c), c]));
   const failingHooks = Object.entries(errorsByCommand)
@@ -461,9 +467,13 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
     legacyCommands: inventory.legacyCommands.length,
     installedNames: installedSkillNames.slice(0, 300),
   };
-  const configured = new Set([...inventory.mcp.user, ...inventory.mcp.project, ...inventory.mcp.local]);
-  const usedServers = new Set(Object.keys(mcpUsed).map((k) => k.replace(/^plugin_/, '')));
-  const unusedMcp = (enoughUsage ? [...configured] : []).filter((name) => !usedServers.has(name) && ![...usedServers].some((u) => u.includes(name) || name.includes(u)));
+  // servers of the shared .mcp.json that the user disabled, or never approved, are not loaded and so cost nothing
+  const inactiveProject = new Set([...(inventory.mcp.disabledProject || []), ...(inventory.mcp.pendingProject || [])]);
+  const configured = new Set([...inventory.mcp.user, ...inventory.mcp.project.filter((n) => !inactiveProject.has(n)), ...inventory.mcp.local]);
+  // Claude Code builds tool names as mcp__<server with every char outside [a-zA-Z0-9_-] replaced by '_'>__<tool>, so
+  // compare the normalised configured name with the transcript key exactly; the configured name stays as written.
+  const usedServers = new Set(Object.keys(mcpUsed));
+  const unusedMcp = (enoughUsage ? [...configured] : []).filter((name) => !usedServers.has(mcpToolServerName(name)));
   const mcp = {
     used: Object.fromEntries(
       Object.entries(mcpUsed)

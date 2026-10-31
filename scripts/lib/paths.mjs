@@ -14,6 +14,17 @@ export function configDir() {
   return process.env.CLAUDE_CONFIG_DIR || path.join(homeDir(), '.claude');
 }
 
+/**
+ * Claude Code's global config file (account, user-scope MCP servers, per-project state).
+ * Without CLAUDE_CONFIG_DIR it is ~/.claude.json; with it, $CLAUDE_CONFIG_DIR/.claude.json (not the default profile's file).
+ * An old <config dir>/.config.json wins when it exists, as in Claude Code itself.
+ */
+export function globalConfigPath() {
+  const legacy = path.join(configDir(), '.config.json');
+  if (exists(legacy)) return legacy;
+  return path.join(process.env.CLAUDE_CONFIG_DIR || homeDir(), '.claude.json');
+}
+
 /** Where Kaizen keeps measurements, choices, backups and caches. */
 export function stateDir() {
   return process.env.KAIZEN_STATE_DIR || path.join(configDir(), 'kaizen');
@@ -83,6 +94,35 @@ export function settingsFiles(projectDir, cfg = configDir()) {
   if (projectDir) {
     out.push({ scope: 'project', file: path.join(projectDir, '.claude', 'settings.json') });
     out.push({ scope: 'local', file: path.join(projectDir, '.claude', 'settings.local.json') });
+  }
+  return out;
+}
+
+/** System directory with the organisation's managed settings (KAIZEN_MANAGED_SETTINGS_DIR overrides it, for tests). */
+export function managedSettingsDir() {
+  if (process.env.KAIZEN_MANAGED_SETTINGS_DIR) return process.env.KAIZEN_MANAGED_SETTINGS_DIR;
+  if (process.platform === 'win32') return 'C:\\Program Files\\ClaudeCode';
+  if (process.platform === 'darwin') return '/Library/Application Support/ClaudeCode';
+  return '/etc/claude-code';
+}
+
+/**
+ * Managed settings files that exist, in merge order (later wins): managed-settings.json, then managed-settings.d/*.json
+ * alphabetically. READ-ONLY: these are never write targets, so they are kept out of settingsFiles().
+ */
+export function managedSettingsFiles() {
+  const dir = managedSettingsDir();
+  const out = [];
+  const main = path.join(dir, 'managed-settings.json');
+  if (exists(main)) out.push({ scope: 'managed', file: main, readOnly: true });
+  try {
+    const dropIns = fs
+      .readdirSync(path.join(dir, 'managed-settings.d'))
+      .filter((f) => f.endsWith('.json') && !f.startsWith('.'))
+      .sort();
+    for (const f of dropIns) out.push({ scope: 'managed', file: path.join(dir, 'managed-settings.d', f), readOnly: true });
+  } catch {
+    // no drop-in directory
   }
   return out;
 }

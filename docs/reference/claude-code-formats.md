@@ -4,7 +4,9 @@ Condensed from the official docs at code.claude.com/docs (fetched 2026-10-31). T
 
 ## settings.json
 
-Files, lowest to highest precedence: `~/.claude/settings.json` (user) → `.claude/settings.json` (project, committed) → `.claude/settings.local.json` (project local, git-excluded) → `--settings` → managed. Lists such as `permissions.allow` merge across files. Strict JSON, no comments. `CLAUDE_CONFIG_DIR` relocates `~/.claude`. `~/.claude.json` is the global config (account, user-scope MCP servers, trust) — Kaizen only ever reads it, except the `mcp.disable` action which moves one `mcpServers` entry into a backup and can restore it.
+Files, lowest to highest precedence: `~/.claude/settings.json` (user) → `.claude/settings.json` (project, committed) → `.claude/settings.local.json` (project local, git-excluded) → `--settings` → managed. Lists such as `permissions.allow` merge across files. Strict JSON, no comments. `CLAUDE_CONFIG_DIR` relocates `~/.claude`. `~/.claude.json` is the global config (account, user-scope MCP servers, trust) — Kaizen only ever reads it, except the `mcp.disable` action which moves one `mcpServers` entry into a backup and can restore it. **With `CLAUDE_CONFIG_DIR` set the global config is `$CLAUDE_CONFIG_DIR/.claude.json`** (not the default profile's `~/.claude.json`); an old `<config dir>/.config.json` wins when it exists. `paths.mjs globalConfigPath()` is the single place that knows this; inventory and `apply` both use it.
+
+Managed settings (read-only for Kaizen, never a write target, so not part of `settingsFiles()`): `managed-settings.json`, then every `managed-settings.d/*.json` in alphabetical order (later wins; hidden and non-`.json` files are ignored), in `C:\Program Files\ClaudeCode\` (Windows), `/Library/Application Support/ClaudeCode/` (macOS), `/etc/claude-code/` (Linux, WSL). Kaizen reads their hooks, deny rules, `defaultMode` and `enabledPlugins` as the top layer. `KAIZEN_MANAGED_SETTINGS_DIR` overrides the directory (tests).
 
 Keys Kaizen touches:
 
@@ -18,9 +20,11 @@ Keys Kaizen touches:
 | `cleanupPeriodDays` | integer ≥ 1 (default 30) | Transcript retention; also bounds what `/insights` and Kaizen can see. |
 | `alwaysThinkingEnabled`, `effortLevel`, `outputStyle`, `model` | | Read for the inventory only. |
 | `enabledPlugins` | `{ "name@marketplace": bool }` | Disabling an unused plugin removes its skills/agents from every prompt. |
-| `enabledMcpjsonServers` / `disabledMcpjsonServers` | `string[]` | Project `.mcp.json` servers. |
+| `enabledMcpjsonServers` / `disabledMcpjsonServers` / `enableAllProjectMcpServers` | `string[]` / `string[]` / bool | Project `.mcp.json` servers need approval: one is active only when enabled (listed in `enabledMcpjsonServers`, or `enableAllProjectMcpServers: true`) and not in `disabledMcpjsonServers`. The approval is also recorded per project in `~/.claude.json` (`projects[<dir>]`); Kaizen merges both. A disabled or not-yet-approved server is not loaded, so `context.mcp-unused` ignores it. |
 | `attribution` | `{ commit, pr, sessionUrl }` | Replaces deprecated `includeCoAuthoredBy`. Not written by Kaizen (value types unverified). |
 | `autoMemoryEnabled`, `autoMemoryDirectory` | | Auto memory lives in `~/.claude/projects/<project>/memory/`. |
+
+MCP tool names are `mcp__<server>__<tool>`, where `<server>` is the configured name with every character outside `[a-zA-Z0-9_-]` replaced by `_` (`used.srv` → `used_srv`). Kaizen compares the normalised configured name with the transcript key exactly (no substring match) and keeps the configured name for actions. Servers a plugin provides appear as `plugin_<plugin>_<server>` and are not user-configured servers.
 
 ## Hooks
 
@@ -89,7 +93,7 @@ Subagents never get `AskUserQuestion`, `EnterPlanMode`/`ExitPlanMode`. Plugin ag
 
 ## CLAUDE.md and rules
 
-Loaded every session: `~/.claude/CLAUDE.md`, `./CLAUDE.md` or `./.claude/CLAUDE.md`, `./CLAUDE.local.md`, plus `@imports`. Path-scoped rules: `.claude/rules/*.md` (project) or `~/.claude/rules/*.md` (user) with frontmatter `paths: ["src/api/**/*.ts"]` load only when matching files are touched. Guidance: keep CLAUDE.md under ~200 lines; move conditional detail into rules or skills. Kaizen writes into a managed block:
+Loaded every session: `~/.claude/CLAUDE.md`, `./CLAUDE.md` or `./.claude/CLAUDE.md`, `./CLAUDE.local.md`, plus `@imports`. `AGENTS.md` and `.claude/AGENTS.md` are read **only when the project has none of `CLAUDE.md`, `.claude/CLAUDE.md`, `CLAUDE.local.md`** (default `claude-md-or-agents-md`), or when a CLAUDE.md imports them (`@AGENTS.md`); `~/.claude/CLAUDE.md` and `.claude/rules/` do not count for that check. Kaizen adds AGENTS.md to `claudeMdTokens` and to the rule hints only in those cases. Rules with a non-empty `paths:` frontmatter are not counted in `claudeMdTokens` (reported as `conditionalFiles`). Path-scoped rules: `.claude/rules/*.md` (project) or `~/.claude/rules/*.md` (user) with frontmatter `paths: ["src/api/**/*.ts"]` load only when matching files are touched. Guidance: keep CLAUDE.md under ~200 lines; move conditional detail into rules or skills. Kaizen writes into a managed block:
 
 ```markdown
 <!-- kaizen:start read-before-edit -->
@@ -112,6 +116,8 @@ Plugin root: `.claude-plugin/plugin.json` (only `name` required; kebab-case; nam
 | `~/.claude/usage-data/facets/*.json`, `session-meta/*.json` | Written by the built-in `/insights`: outcome, satisfaction, friction types, tool error categories | Aggregated when present. |
 | `~/.claude/history.jsonl` | Typed prompts with project and timestamp | Not needed; transcripts already contain prompts. |
 | `~/.claude/settings.json`, `.claude/settings*.json`, `~/.claude.json`, `.mcp.json` | Configuration | Inventory. `env` values are masked. |
-| `~/.claude/skills`, `agents`, `plugins/installed_plugins.json`, `plugins/known_marketplaces.json` | Installed extensions | Unused skill / plugin detection. |
+| `~/.claude/skills`, `agents`, `plugins/installed_plugins.json`, `plugins/known_marketplaces.json` | Installed extensions | Unused skill / plugin detection. A plugin with `enabledPlugins: false` (effective value over user, project, local, managed) contributes no skills, agents or hooks. The installed entry is chosen as Claude Code does: `local` scope for this `projectPath`, then `project`, then `user`. Enabled plugins' `hooks/hooks.json` (`{"hooks": {...}}`) count toward `hasSessionStartHook`, `hasPreCompactHook`, `hasNotifyHook`, `hasGuardHook`, `hasFormatterHook` with scope `plugin:<name>`, but are never offered for removal; Kaizen's own plugin is skipped. |
+
+Frontmatter (skills, agents, rules) is read after stripping a leading BOM; block scalars (`description: >-` / `|`), continuation lines and block lists are joined.
 
 Retention: `cleanupPeriodDays` (default 30) deletes older transcripts at startup, so a 30-day window is the realistic default.

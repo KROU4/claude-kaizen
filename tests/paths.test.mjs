@@ -11,8 +11,11 @@ import {
   ensureDir,
   exists,
   expandHome,
+  globalConfigPath,
   homeDir,
   kitRoot,
+  managedSettingsDir,
+  managedSettingsFiles,
   projectsDir,
   readJsonSafe,
   settingsFiles,
@@ -204,5 +207,69 @@ describe('platform helpers', () => {
     } finally {
       undo();
     }
+  });
+});
+
+describe('globalConfigPath', () => {
+  it('is ~/.claude.json without CLAUDE_CONFIG_DIR', () => {
+    assert.equal(globalConfigPath(), path.join(homeDir(), '.claude.json'));
+  });
+
+  it('is $CLAUDE_CONFIG_DIR/.claude.json when the config dir is relocated, not the default profile file', () => {
+    const other = path.join(root, 'profile');
+    const undo = setEnv({ CLAUDE_CONFIG_DIR: other });
+    assert.equal(globalConfigPath(), path.join(other, '.claude.json'));
+    undo();
+  });
+
+  it('prefers a legacy <config dir>/.config.json when it exists', () => {
+    const other = path.join(root, 'profile');
+    const undo = setEnv({ CLAUDE_CONFIG_DIR: other });
+    writeText(path.join(other, '.config.json'), '{}');
+    assert.equal(globalConfigPath(), path.join(other, '.config.json'));
+    undo();
+    assert.equal(globalConfigPath(), path.join(homeDir(), '.claude.json'), 'the default profile has no legacy file');
+  });
+});
+
+describe('managed settings files', () => {
+  it('lives in the platform system directory unless overridden', () => {
+    const undo = setEnv({ KAIZEN_MANAGED_SETTINGS_DIR: undefined });
+    const dir = managedSettingsDir();
+    if (process.platform === 'win32') assert.equal(dir, 'C:\\Program Files\\ClaudeCode');
+    else if (process.platform === 'darwin') assert.equal(dir, '/Library/Application Support/ClaudeCode');
+    else assert.equal(dir, '/etc/claude-code');
+    undo();
+    const undo2 = setEnv({ KAIZEN_MANAGED_SETTINGS_DIR: path.join(root, 'm') });
+    assert.equal(managedSettingsDir(), path.join(root, 'm'));
+    undo2();
+  });
+
+  it('lists managed-settings.json first, then drop-ins alphabetically, skipping hidden and non-json files, all read-only', () => {
+    const dir = path.join(root, 'm');
+    const undo = setEnv({ KAIZEN_MANAGED_SETTINGS_DIR: dir });
+    assert.deepEqual(managedSettingsFiles(), []);
+    writeText(path.join(dir, 'managed-settings.d', '20-b.json'), '{}');
+    writeText(path.join(dir, 'managed-settings.d', '10-a.json'), '{}');
+    writeText(path.join(dir, 'managed-settings.d', '.hidden.json'), '{}');
+    writeText(path.join(dir, 'managed-settings.d', 'readme.md'), 'x');
+    writeText(path.join(dir, 'managed-settings.json'), '{}');
+    assert.deepEqual(
+      managedSettingsFiles(),
+      [
+        path.join(dir, 'managed-settings.json'),
+        path.join(dir, 'managed-settings.d', '10-a.json'),
+        path.join(dir, 'managed-settings.d', '20-b.json'),
+      ].map((file) => ({ scope: 'managed', file, readOnly: true })),
+    );
+    undo();
+  });
+
+  it('is never part of settingsFiles(), which is the list of write targets', () => {
+    const dir = path.join(root, 'm');
+    const undo = setEnv({ KAIZEN_MANAGED_SETTINGS_DIR: dir });
+    writeText(path.join(dir, 'managed-settings.json'), '{}');
+    assert.ok(!settingsFiles('/proj', '/cfg').some((f) => f.scope === 'managed'));
+    undo();
   });
 });

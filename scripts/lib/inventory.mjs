@@ -3,7 +3,7 @@
 // Reads structure and sizes only; never copies secrets (env values are masked).
 import fs from 'node:fs';
 import path from 'node:path';
-import { configDir, exists, homeDir, readJsonSafe, settingsFiles } from './paths.mjs';
+import { configDir, exists, globalConfigPath, managedSettingsFiles, readJsonSafe, settingsFiles } from './paths.mjs';
 
 export function estimateTokens(text) {
   if (!text) return 0;
@@ -18,15 +18,36 @@ export function estimateTokens(text) {
   return Math.round(text.length / cpt);
 }
 
+/**
+ * Frontmatter as flat strings. A leading BOM is ignored (Claude Code strips it), `key: >` / `|` block scalars and
+ * indented continuation lines are joined, and a block list (`paths:` + `- item` lines) becomes "item, item".
+ */
 function frontmatter(text) {
-  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  const m = String(text).replace(/^﻿/, '').match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (!m) return {};
+  const lines = m[1].split(/\r?\n/);
   const out = {};
-  for (const line of m[1].split(/\r?\n/)) {
-    const kv = line.match(/^([A-Za-z_-]+):\s*(.*)$/);
-    if (kv) out[kv[1]] = kv[2].replace(/^["']|["']$/g, '');
+  for (let i = 0; i < lines.length; i++) {
+    const kv = lines[i].match(/^([A-Za-z_-][\w-]*):[ \t]*(.*)$/);
+    if (!kv) continue;
+    const block = [];
+    while (i + 1 < lines.length && (/^[ \t]+\S/.test(lines[i + 1]) || /^-(\s|$)/.test(lines[i + 1]) || lines[i + 1].trim() === '')) block.push(lines[++i].trim());
+    while (block.length && !block[block.length - 1]) block.pop();
+    const inline = kv[2].trim();
+    let value;
+    if (/^[>|][+-]?\d*$/.test(inline)) value = block.join(inline[0] === '>' ? ' ' : '\n').replace(/\s+$/, '');
+    else if (inline) value = [inline, ...block.filter(Boolean)].join(' ');
+    else if (block.length && block.every((b) => !b || b.startsWith('-'))) value = block.filter(Boolean).map((b) => b.replace(/^-\s*/, '').replace(/^["']|["']$/g, '')).join(', ');
+    else value = block.filter(Boolean).join(' ');
+    out[kv[1]] = value.replace(/^["']|["']$/g, '');
   }
   return out;
+}
+
+/** A rule file with a non-empty `paths:` frontmatter loads only when matching files are touched, not on every request. */
+function isPathScoped(text) {
+  const p = (frontmatter(text).paths || '').trim();
+  return p !== '' && p !== '[]';
 }
 
 function listSkills(dir, source) {
@@ -90,6 +111,7 @@ function summarizeHooks(hooks) {
     for (const m of matchers) {
       const list = Array.isArray(m && m.hooks) ? m.hooks : [];
       for (const h of list) {
+        if (!h || typeof h !== 'object' || Array.isArray(h)) continue;
         total++;
         events[event] = (events[event] || 0) + 1;
         commands.push({
@@ -145,7 +167,14 @@ function readSettings(file) {
     attribution: raw.attribution || (raw.includeCoAuthoredBy === false ? { commit: 'off' } : null),
     disableAllHooks: raw.disableAllHooks === true,
     autoMemory: raw.autoMemoryEnabled ?? null,
+    enableAllProjectMcpServers: raw.enableAllProjectMcpServers === true,
+    enabledMcpjsonServers: stringList(raw.enabledMcpjsonServers),
+    disabledMcpjsonServers: stringList(raw.disabledMcpjsonServers),
   };
+}
+
+function stringList(v) {
+  return Array.isArray(v) ? v.filter((x) => typeof x === 'string') : [];
 }
 
 /**
@@ -164,64 +193,143 @@ export function claudeMdHints(text) {
   };
 }
 
-function claudeMdFiles(projectDir, cfg) {
-  const candidates = [
-    { scope: 'user', file: path.join(cfg, 'CLAUDE.md') },
-    { scope: 'user-rules', dir: path.join(cfg, 'rules') },
-  ];
-  if (projectDir) {
-    candidates.push({ scope: 'project', file: path.join(projectDir, 'CLAUDE.md') });
-    candidates.push({ scope: 'project', file: path.join(projectDir, '.claude', 'CLAUDE.md') });
-    candidates.push({ scope: 'local', file: path.join(projectDir, 'CLAUDE.local.md') });
-    candidates.push({ scope: 'project-rules', dir: path.join(projectDir, '.claude', 'rules') });
-    candidates.push({ scope: 'agents-md', file: path.join(projectDir, 'AGENTS.md') });
-  }
+/** `@path` imports of a CLAUDE.md, resolved against the importing file. */
+function importedFiles(file, text) {
   const out = [];
-  for (const c of candidates) {
-    if (c.file && exists(c.file)) {
-      const text = fs.readFileSync(c.file, 'utf8');
-      const imports = (text.match(/^@[^\s]+$/gm) || []).length;
-      out.push({ scope: c.scope, file: c.file, chars: text.length, tokens: estimateTokens(text), lines: text.split('\n').length, imports, hints: claudeMdHints(text), kaizenBlocks: (text.match(/<!-- kaizen:start /g) || []).length });
-    } else if (c.dir && exists(c.dir)) {
-      let chars = 0;
-      let files = 0;
-      for (const f of fs.readdirSync(c.dir)) {
-        if (!f.endsWith('.md')) continue;
-        files++;
-        chars += fs.statSync(path.join(c.dir, f)).size;
-      }
-      if (files) out.push({ scope: c.scope, file: c.dir, files, chars, tokens: estimateTokens(' '.repeat(chars)) });
+  for (const m of text.matchAll(/(?:^|\s)@(\S+)/g)) out.push(path.resolve(path.dirname(file), m[1]));
+  return out;
+}
+
+function sameFile(a, b) {
+  const norm = (p) => (process.platform === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p));
+  return norm(a) === norm(b);
+}
+
+function readTextSafe(file) {
+  try {
+    return fs.readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+function claudeMdEntry(scope, file, text) {
+  const imports = (text.match(/^@[^\s]+$/gm) || []).length;
+  return { scope, file, chars: text.length, tokens: estimateTokens(text), lines: text.split('\n').length, imports, hints: claudeMdHints(text), kaizenBlocks: (text.match(/<!-- kaizen:start /g) || []).length };
+}
+
+/**
+ * Rules directory: only rules that load on every request count toward tokens. A rule with `paths:` frontmatter loads
+ * when matching files are touched, so it is reported separately. Unreadable entries (dangling symlinks) are skipped.
+ */
+function rulesEntry(scope, dir) {
+  let names;
+  try {
+    names = fs.readdirSync(dir).filter((f) => f.endsWith('.md'));
+  } catch {
+    return null;
+  }
+  let files = 0;
+  let chars = 0;
+  let conditionalFiles = 0;
+  let conditionalChars = 0;
+  for (const f of names) {
+    const full = path.join(dir, f);
+    let size;
+    let text;
+    try {
+      if (!fs.statSync(full).isFile()) continue;
+      size = fs.statSync(full).size;
+      text = fs.readFileSync(full, 'utf8');
+    } catch {
+      continue;
     }
+    if (isPathScoped(text)) {
+      conditionalFiles++;
+      conditionalChars += size;
+    } else {
+      files++;
+      chars += size;
+    }
+  }
+  if (!files && !conditionalFiles) return null;
+  return { scope, file: dir, files, chars, tokens: estimateTokens(' '.repeat(chars)), conditionalFiles, conditionalChars };
+}
+
+function claudeMdFiles(projectDir, cfg) {
+  const out = [];
+  const add = (entry) => entry && out.push(entry);
+  const read = (scope, file) => {
+    if (!exists(file)) return null;
+    const text = readTextSafe(file);
+    if (text === null) return null;
+    add(claudeMdEntry(scope, file, text));
+    return text;
+  };
+  read('user', path.join(cfg, 'CLAUDE.md'));
+  if (exists(path.join(cfg, 'rules'))) add(rulesEntry('user-rules', path.join(cfg, 'rules')));
+  if (!projectDir) return out;
+  const texts = [];
+  for (const [scope, file] of [
+    ['project', path.join(projectDir, 'CLAUDE.md')],
+    ['project', path.join(projectDir, '.claude', 'CLAUDE.md')],
+    ['local', path.join(projectDir, 'CLAUDE.local.md')],
+  ]) {
+    const text = read(scope, file);
+    if (text !== null) texts.push({ file, text });
+  }
+  if (exists(path.join(projectDir, '.claude', 'rules'))) add(rulesEntry('project-rules', path.join(projectDir, '.claude', 'rules')));
+  // Claude Code reads AGENTS.md / .claude/AGENTS.md only when the project has no CLAUDE.md, .claude/CLAUDE.md or
+  // CLAUDE.local.md of its own; with one, AGENTS.md counts only when a CLAUDE.md imports it.
+  const imported = texts.flatMap((t) => importedFiles(t.file, t.text));
+  for (const file of [path.join(projectDir, 'AGENTS.md'), path.join(projectDir, '.claude', 'AGENTS.md')]) {
+    if (!texts.length || imported.some((i) => sameFile(i, file))) read('agents-md', file);
   }
   return out;
 }
 
-function mcpServers(projectDir, cfg) {
-  const out = { user: [], project: [], local: [], disabledProject: [] };
-  const globalCfg = readJsonSafe(path.join(homeDir(), '.claude.json'));
+function uniq(list) {
+  return [...new Set(list)];
+}
+
+/**
+ * MCP servers by scope. Servers of the shared .mcp.json need approval: they are active only when enabled
+ * (enableAllProjectMcpServers, enabledMcpjsonServers) and not in disabledMcpjsonServers; the lists come from every
+ * settings file (managed included) and from the project's entry in the global config.
+ */
+function mcpServers(projectDir, settings) {
+  const out = { user: [], project: [], local: [], disabledProject: [], pendingProject: [] };
+  const globalCfg = readJsonSafe(globalConfigPath());
   if (globalCfg && globalCfg.mcpServers && typeof globalCfg.mcpServers === 'object') {
     out.user = Object.keys(globalCfg.mcpServers);
   }
   if (projectDir) {
     const mcpJson = readJsonSafe(path.join(projectDir, '.mcp.json'));
-    if (mcpJson && mcpJson.mcpServers) out.project = Object.keys(mcpJson.mcpServers);
-    const proj = globalCfg && globalCfg.projects ? globalCfg.projects[projectDir] : null;
-    if (proj) {
-      if (proj.mcpServers) out.local = Object.keys(proj.mcpServers);
-      if (Array.isArray(proj.disabledMcpjsonServers)) out.disabledProject = proj.disabledMcpjsonServers;
-    }
+    if (mcpJson && mcpJson.mcpServers && typeof mcpJson.mcpServers === 'object') out.project = Object.keys(mcpJson.mcpServers);
+    const proj = globalCfg && globalCfg.projects && typeof globalCfg.projects === 'object' ? globalCfg.projects[projectDir] : null;
+    if (proj && proj.mcpServers && typeof proj.mcpServers === 'object') out.local = Object.keys(proj.mcpServers);
+    const disabled = uniq([...stringList(proj && proj.disabledMcpjsonServers), ...settings.flatMap((s) => s.disabledMcpjsonServers)]);
+    const enabled = new Set([...stringList(proj && proj.enabledMcpjsonServers), ...settings.flatMap((s) => s.enabledMcpjsonServers)]);
+    const enableAll = (proj && proj.enableAllProjectMcpServers === true) || settings.some((s) => s.enableAllProjectMcpServers);
+    out.disabledProject = disabled;
+    out.pendingProject = enableAll ? [] : out.project.filter((n) => !disabled.includes(n) && !enabled.has(n));
   }
-  // plugin-provided servers are visible in transcripts as mcp__plugin_<plugin>_<server>__tool
-  void cfg;
   return out;
 }
 
-function plugins(cfg) {
+/** The installed_plugins.json entry that applies here: local-scope for this project, then project-scope, then user. */
+function pickInstall(entries, projectDir) {
+  const list = (Array.isArray(entries) ? entries : [entries]).filter((e) => e && typeof e === 'object');
+  const here = (e) => projectDir && typeof e.projectPath === 'string' && sameFile(e.projectPath, projectDir);
+  return list.find((e) => e.scope === 'local' && here(e)) || list.find((e) => e.scope === 'project' && here(e)) || list.find((e) => e.scope === 'user') || list[0];
+}
+
+function plugins(cfg, projectDir, enabledMap) {
   const installed = readJsonSafe(path.join(cfg, 'plugins', 'installed_plugins.json'));
   const list = [];
-  if (installed && installed.plugins) {
+  if (installed && installed.plugins && typeof installed.plugins === 'object') {
     for (const [key, entries] of Object.entries(installed.plugins)) {
-      const e = Array.isArray(entries) ? entries[0] : entries;
+      const e = pickInstall(entries, projectDir);
       const [name, marketplace] = key.split('@');
       const installPath = e && e.installPath;
       let components = null;
@@ -233,11 +341,20 @@ function plugins(cfg) {
           mcp: exists(path.join(installPath, '.mcp.json')),
         };
       }
-      list.push({ name, marketplace, version: e && e.version, installPath, components });
+      list.push({ name, marketplace, version: e && e.version, installPath, components, enabled: enabledMap[key] !== false });
     }
   }
   const marketplaces = readJsonSafe(path.join(cfg, 'plugins', 'known_marketplaces.json')) || {};
   return { installed: list, marketplaces: Object.keys(marketplaces) };
+}
+
+/** Hooks a plugin registers in hooks/hooks.json (`{"hooks": {...}}` wrapper). Kaizen's own nudge hook is not counted. */
+function pluginHooks(p) {
+  if (p.name === 'kaizen' || !p.installPath) return null;
+  const raw = readJsonSafe(path.join(p.installPath, 'hooks', 'hooks.json'));
+  if (!raw || typeof raw !== 'object') return null;
+  const s = summarizeHooks(raw.hooks && typeof raw.hooks === 'object' && !Array.isArray(raw.hooks) ? raw.hooks : raw);
+  return s.total ? { scope: `plugin:${p.name}`, hooks: s } : null;
 }
 
 /**
@@ -247,9 +364,16 @@ function plugins(cfg) {
 export function inventory({ projectDir = null } = {}) {
   const cfg = configDir();
   const settings = [];
-  for (const { scope, file } of settingsFiles(projectDir, cfg)) {
+  // managed settings come last (highest precedence) and are only ever read
+  for (const { scope, file } of [...settingsFiles(projectDir, cfg), ...managedSettingsFiles()]) {
     const s = readSettings(file);
     if (s) settings.push({ scope, ...s });
+  }
+  // effective enabledPlugins: later (higher-precedence) files override earlier ones
+  const enabledMap = {};
+  for (const s of settings) {
+    for (const k of s.enabledPlugins) enabledMap[k] = true;
+    for (const k of s.disabledPlugins) enabledMap[k] = false;
   }
   const skills = [
     ...listSkills(path.join(cfg, 'skills'), 'user'),
@@ -264,24 +388,28 @@ export function inventory({ projectDir = null } = {}) {
     ...listAgents(path.join(cfg, 'agents'), 'user'),
     ...(projectDir ? listAgents(path.join(projectDir, '.claude', 'agents'), 'project') : []),
   ];
-  const pl = plugins(cfg);
+  const pl = plugins(cfg, projectDir, enabledMap);
+  const fromPlugins = [];
   for (const p of pl.installed) {
-    if (p.installPath && exists(p.installPath)) {
-      skills.push(...listSkills(path.join(p.installPath, 'skills'), `plugin:${p.name}`));
-      agents.push(...listAgents(path.join(p.installPath, 'agents'), `plugin:${p.name}`));
-    }
+    // a plugin switched off in enabledPlugins contributes no skills, agents or hooks to Claude Code
+    if (!p.enabled || !p.installPath || !exists(p.installPath)) continue;
+    skills.push(...listSkills(path.join(p.installPath, 'skills'), `plugin:${p.name}`));
+    agents.push(...listAgents(path.join(p.installPath, 'agents'), `plugin:${p.name}`));
+    const ph = pluginHooks(p);
+    if (ph) fromPlugins.push(ph);
   }
   const claudeMd = claudeMdFiles(projectDir, cfg);
   const memoryDir = path.join(cfg, 'projects');
-  const hooksTotal = settings.reduce((a, s) => a + s.hooks.total, 0);
+  const hookSources = [...settings.map((s) => ({ scope: s.scope, hooks: s.hooks })), ...fromPlugins];
+  const hooksTotal = hookSources.reduce((a, s) => a + s.hooks.total, 0);
   const hookEvents = {};
-  for (const s of settings) for (const [ev, n] of Object.entries(s.hooks.events)) hookEvents[ev] = (hookEvents[ev] || 0) + n;
+  for (const s of hookSources) for (const [ev, n] of Object.entries(s.hooks.events)) hookEvents[ev] = (hookEvents[ev] || 0) + n;
 
   return {
     configDir: cfg,
     projectDir,
     settings,
-    hooks: { total: hooksTotal, events: hookEvents, commands: settings.flatMap((s) => s.hooks.commands.map((c) => ({ scope: s.scope, ...c }))) },
+    hooks: { total: hooksTotal, events: hookEvents, commands: hookSources.flatMap((s) => s.hooks.commands.map((c) => ({ scope: s.scope, ...c }))) },
     permissions: {
       allow: settings.reduce((a, s) => a + s.permissions.allow, 0),
       deny: settings.reduce((a, s) => a + s.permissions.deny, 0),
@@ -295,7 +423,7 @@ export function inventory({ projectDir = null } = {}) {
     legacyCommands,
     agents,
     plugins: pl,
-    mcp: mcpServers(projectDir, cfg),
+    mcp: mcpServers(projectDir, settings),
     claudeMd,
     claudeMdTokens: claudeMd.reduce((a, f) => a + (f.tokens || 0), 0),
     skillDescriptionTokens: skills.reduce((a, s) => a + estimateTokens(' '.repeat(s.descriptionChars)), 0),

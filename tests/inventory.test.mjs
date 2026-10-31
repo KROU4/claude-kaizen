@@ -13,7 +13,7 @@ let restoreEnv;
 
 beforeEach(() => {
   home = materializeHome();
-  restoreEnv = setEnv({ ...home.env, CLAUDE_PROJECT_DIR: undefined });
+  restoreEnv = setEnv({ ...home.env, CLAUDE_PROJECT_DIR: undefined, KAIZEN_MANAGED_SETTINGS_DIR: path.join(home.root, 'managed') });
 });
 afterEach(() => restoreEnv());
 after(() => cleanupTempDirs());
@@ -178,7 +178,7 @@ describe('inventory of the fixture home', () => {
   });
 
   it('reads the MCP servers of ~/.claude.json as user-scope servers', () => {
-    assert.deepEqual(inv.mcp, { user: ['used-srv', 'dead-srv'], project: [], local: [], disabledProject: [] });
+    assert.deepEqual(inv.mcp, { user: ['used-srv', 'dead-srv'], project: [], local: [], disabledProject: [], pendingProject: [] });
   });
 
   it('measures CLAUDE.md', () => {
@@ -209,7 +209,7 @@ describe('inventory of other configurations', () => {
       assert.deepEqual(inv.skills, []);
       assert.deepEqual(inv.agents, []);
       assert.deepEqual(inv.plugins, { installed: [], marketplaces: [] });
-      assert.deepEqual(inv.mcp, { user: [], project: [], local: [], disabledProject: [] });
+      assert.deepEqual(inv.mcp, { user: [], project: [], local: [], disabledProject: [], pendingProject: [] });
       assert.deepEqual(inv.claudeMd, []);
       assert.equal(inv.permissions.defaultMode, 'default');
       assert.equal(inv.statusLine, false);
@@ -253,7 +253,7 @@ describe('inventory of other configurations', () => {
     assert.equal(inv.statusLine, true);
     assert.equal(inv.settings[2].language, 'russian');
     assert.equal(inv.settings[2].cleanupPeriodDays, 90);
-    assert.deepEqual(inv.claudeMd.map((f) => f.scope), ['user', 'project', 'local', 'project-rules', 'agents-md']);
+    assert.deepEqual(inv.claudeMd.map((f) => f.scope), ['user', 'project', 'local', 'project-rules'], 'AGENTS.md is not read when the project has a CLAUDE.md');
     assert.equal(inv.claudeMd[1].imports, 1);
     assert.equal(inv.claudeMd[3].files, 1, 'only *.md files of the rules directory count');
     assert.deepEqual(inv.skills.filter((s) => s.source === 'project').map((s) => s.name).sort(), ['deploy', 'no-frontmatter']);
@@ -263,7 +263,7 @@ describe('inventory of other configurations', () => {
     assert.equal(deploy.descriptionChars, 'Deploys it'.length, 'quotes around frontmatter values are stripped');
     assert.deepEqual(inv.agents.filter((a) => a.source === 'project').map((a) => [a.name, a.model, a.tools]).sort(), [['no-name', null, null], ['reviewer', 'opus', 3]], 'an agent without frontmatter is named after its file');
     assert.deepEqual(inv.legacyCommands.map((c) => c.name), ['old-command']);
-    assert.deepEqual(inv.mcp, { user: ['used-srv', 'dead-srv'], project: ['proj-srv'], local: ['local-srv'], disabledProject: ['proj-srv'] });
+    assert.deepEqual(inv.mcp, { user: ['used-srv', 'dead-srv'], project: ['proj-srv'], local: ['local-srv'], disabledProject: ['proj-srv'], pendingProject: [] });
   });
 
   it('detects Kaizen blocks in CLAUDE.md', () => {
@@ -312,5 +312,265 @@ describe('inventory of other configurations', () => {
       ['solo', 'market', '3.0.0', null],
       ['multi', 'market', '1.0.0', null],
     ]);
+  });
+});
+
+describe('global config location (CLAUDE_CONFIG_DIR)', () => {
+  it('reads the MCP servers of $CLAUDE_CONFIG_DIR/.claude.json, not of the default profile ~/.claude.json', () => {
+    writeJson(path.join(home.home, '.claude.json'), { mcpServers: { 'default-profile-srv': { command: 'x' } } });
+    writeJson(home.claudeJson, { mcpServers: { 'relocated-srv': { command: 'y' } }, projects: {} });
+    assert.deepEqual(inventory({ projectDir: null }).mcp.user, ['relocated-srv']);
+  });
+
+  it('reads ~/.claude.json when CLAUDE_CONFIG_DIR is not set', () => {
+    const root = makeTempDir('kaizen-inv-');
+    const restore = setEnv({ HOME: root, USERPROFILE: root, CLAUDE_CONFIG_DIR: undefined });
+    try {
+      writeJson(path.join(root, '.claude.json'), { mcpServers: { 'home-srv': {} } });
+      assert.deepEqual(inventory({ projectDir: null }).mcp.user, ['home-srv']);
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe('robustness against odd files', () => {
+  it('does not crash on a dangling symlink in a rules directory and still counts the other rules', (t) => {
+    const rules = path.join(home.configDir, 'rules');
+    writeText(path.join(rules, 'ok.md'), 'x'.repeat(400));
+    const gone = path.join(home.root, 'gone.md');
+    writeText(gone, 'shared');
+    try {
+      fs.symlinkSync(gone, path.join(rules, 'shared.md'));
+    } catch (e) {
+      t.skip(`cannot create symlinks here: ${e.code}`);
+      return;
+    }
+    fs.rmSync(gone);
+    const rulesEntry = inventory({ projectDir: null }).claudeMd.find((f) => f.scope === 'user-rules');
+    assert.equal(rulesEntry.files, 1);
+    assert.equal(rulesEntry.chars, 400);
+  });
+
+  it('does not crash on a rules entry that is a directory named *.md', () => {
+    fs.mkdirSync(path.join(home.configDir, 'rules', 'dir.md'), { recursive: true });
+    writeText(path.join(home.configDir, 'rules', 'ok.md'), 'x'.repeat(40));
+    assert.equal(inventory({ projectDir: null }).claudeMd.find((f) => f.scope === 'user-rules').files, 1);
+  });
+
+  it('skips null and non-object hook handlers instead of crashing', () => {
+    const project = makeTempDir('kaizen-proj-');
+    writeJson(path.join(project, '.claude', 'settings.local.json'), { hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [null, 'x', 7, [], { type: 'command', command: 'echo ok' }] }] } });
+    const inv = inventory({ projectDir: project });
+    assert.equal(inv.hooks.commands.filter((c) => c.event === 'PreToolUse').length, 1);
+    assert.equal(inv.hooks.commands.find((c) => c.event === 'PreToolUse').command, 'echo ok');
+  });
+});
+
+describe('frontmatter of skills and agents', () => {
+  const skill = (dir, text) => writeText(path.join(home.configDir, 'skills', dir, 'SKILL.md'), text);
+  const find = (name) => inventory({ projectDir: null }).skills.find((s) => s.name === name);
+
+  it('ignores a leading BOM', () => {
+    skill('bom', `﻿---\nname: bom-skill\ndescription: ${'d'.repeat(300)}\ndisable-model-invocation: true\n---\nBody`);
+    const s = find('bom-skill');
+    assert.ok(s, 'the name comes from the frontmatter, not from the directory');
+    assert.equal(s.descriptionChars, 300);
+    assert.equal(s.modelInvocable, false);
+  });
+
+  it('reads folded (>, >-) and literal (|, |-) block scalars', () => {
+    const para = `${'a'.repeat(100)}\n  ${'b'.repeat(100)}\n  ${'c'.repeat(100)}`;
+    skill('folded', `---\nname: folded\ndescription: >-\n  ${para}\n---\nBody`);
+    skill('literal', `---\nname: literal\ndescription: |\n  line one\n  line two\n---\nBody`);
+    skill('after', `---\ndescription: >\n  first\n  second\nname: after-name\nuser-invocable: false\n---\nBody`);
+    assert.equal(find('folded').descriptionChars, 100 * 3 + 2, 'lines are joined with a space');
+    assert.equal(find('literal').descriptionChars, 'line one\nline two'.length);
+    assert.equal(find('after-name').descriptionChars, 'first second'.length);
+    assert.equal(find('after-name').userInvocable, false, 'keys after a block scalar are still read');
+  });
+
+  it('reads a multi-line plain scalar and a block list of tools', () => {
+    skill('multi', '---\nname: multi\ndescription: first part\n  second part\n---\nBody');
+    assert.equal(find('multi').descriptionChars, 'first part second part'.length);
+    writeText(path.join(home.configDir, 'agents', 'lister.md'), '---\nname: lister\ndescription: x\ntools:\n  - Read\n  - Grep\n  - "Glob"\n---\nBody');
+    assert.equal(inventory({ projectDir: null }).agents.find((a) => a.name === 'lister').tools, 3);
+  });
+});
+
+describe('CLAUDE.md, AGENTS.md and rules that really load', () => {
+  const project = () => makeTempDir('kaizen-proj-');
+
+  it('counts AGENTS.md when the project has no CLAUDE.md of its own (also .claude/AGENTS.md)', () => {
+    const p = project();
+    writeText(path.join(p, 'AGENTS.md'), 'Always answer in Russian.\n');
+    writeText(path.join(p, '.claude', 'AGENTS.md'), 'Run the tests before commit.\n');
+    const inv = inventory({ projectDir: p });
+    assert.deepEqual(inv.claudeMd.map((f) => f.scope), ['user', 'agents-md', 'agents-md']);
+    assert.equal(inv.claudeMd[1].hints.language, true);
+  });
+
+  it('ignores AGENTS.md next to a CLAUDE.md, a .claude/CLAUDE.md or a CLAUDE.local.md, and so does not take its hints', () => {
+    for (const mine of [['CLAUDE.md'], ['.claude', 'CLAUDE.md'], ['CLAUDE.local.md']]) {
+      const p = project();
+      writeText(path.join(p, ...mine), 'build with make\n');
+      const baseline = inventory({ projectDir: p }).claudeMdTokens;
+      writeText(path.join(p, 'AGENTS.md'), `Always answer in Russian.\n${'x'.repeat(4000)}\n`);
+      const inv = inventory({ projectDir: p });
+      assert.ok(!inv.claudeMd.some((f) => f.scope === 'agents-md'), mine.join('/'));
+      assert.equal(inv.claudeMdTokens, baseline, 'the tokens of AGENTS.md are not added');
+      assert.ok(!inv.claudeMd.some((f) => f.hints && f.hints.language && f.scope !== 'user'), 'its language rule does not count as covered');
+    }
+  });
+
+  it('counts AGENTS.md when CLAUDE.md imports it', () => {
+    const p = project();
+    writeText(path.join(p, 'CLAUDE.md'), 'See below.\n@AGENTS.md\n');
+    writeText(path.join(p, 'AGENTS.md'), 'Agents rules.\n');
+    assert.deepEqual(inventory({ projectDir: p }).claudeMd.map((f) => f.scope), ['user', 'project', 'agents-md']);
+  });
+
+  it('does not count path-scoped rules (frontmatter paths:) as loaded on every request', () => {
+    const rules = path.join(home.configDir, 'rules');
+    writeText(path.join(rules, 'always.md'), 'y'.repeat(800));
+    writeText(path.join(rules, 'python.md'), `---\npaths: ["**/*.py"]\n---\n${'x'.repeat(14000)}`);
+    writeText(path.join(rules, 'block.md'), `---\npaths:\n  - "src/**/*.ts"\n  - "lib/**"\n---\n${'x'.repeat(5000)}`);
+    writeText(path.join(rules, 'empty-paths.md'), `---\npaths: []\n---\n${'z'.repeat(400)}`);
+    const before = inventory({ projectDir: null });
+    const entry = before.claudeMd.find((f) => f.scope === 'user-rules');
+    assert.equal(entry.files, 2, 'always.md and the rule with an empty paths list');
+    assert.equal(entry.chars, 800 + `---\npaths: []\n---\n${'z'.repeat(400)}`.length);
+    assert.equal(entry.conditionalFiles, 2);
+    assert.equal(entry.tokens, estimateTokens(' '.repeat(entry.chars)));
+    assert.ok(entry.tokens < 400, `tokens ${entry.tokens}`);
+  });
+
+  it('keeps a rules directory that holds only path-scoped rules, with no tokens', () => {
+    writeText(path.join(home.configDir, 'rules', 'only.md'), '---\npaths: ["a/**"]\n---\nbody');
+    const entry = inventory({ projectDir: null }).claudeMd.find((f) => f.scope === 'user-rules');
+    assert.equal(entry.files, 0);
+    assert.equal(entry.tokens, 0);
+    assert.equal(entry.conditionalFiles, 1);
+  });
+});
+
+describe('plugins switched off in enabledPlugins', () => {
+  it('contribute no skills, agents or plugin hooks, and are marked disabled', () => {
+    writeJson(home.settingsFile, { enabledPlugins: { 'demo@fixture-market': true, 'idle@fixture-market': false } });
+    const inv = inventory({ projectDir: null });
+    assert.deepEqual(inv.skills.filter((s) => s.source.startsWith('plugin:')).map((s) => s.source), ['plugin:demo']);
+    assert.deepEqual(inv.plugins.installed.map((p) => [p.name, p.enabled]), [['demo', true], ['idle', false]]);
+  });
+
+  it('are decided by the highest-precedence file that mentions them', () => {
+    const project = makeTempDir('kaizen-proj-');
+    writeJson(home.settingsFile, { enabledPlugins: { 'idle@fixture-market': false } });
+    writeJson(path.join(project, '.claude', 'settings.local.json'), { enabledPlugins: { 'idle@fixture-market': true } });
+    assert.ok(inventory({ projectDir: project }).skills.some((s) => s.source === 'plugin:idle'));
+    assert.ok(!inventory({ projectDir: null }).skills.some((s) => s.source === 'plugin:idle'));
+  });
+
+  it('are still counted when enabledPlugins does not mention them at all', () => {
+    writeJson(home.settingsFile, {});
+    assert.equal(inventory({ projectDir: null }).skills.filter((s) => s.source.startsWith('plugin:')).length, 2);
+  });
+
+  it('picks the install entry of the current project over entries for other projects', () => {
+    const project = makeTempDir('kaizen-proj-');
+    const other = makeTempDir('kaizen-other-');
+    writeJson(path.join(home.configDir, 'plugins', 'installed_plugins.json'), {
+      plugins: { 'multi@market': [{ scope: 'local', projectPath: other, version: '9.9.9' }, { scope: 'user', version: '1.0.0' }, { scope: 'local', projectPath: project, version: '2.0.0' }] },
+    });
+    assert.equal(inventory({ projectDir: project }).plugins.installed[0].version, '2.0.0');
+    assert.equal(inventory({ projectDir: null }).plugins.installed[0].version, '1.0.0');
+  });
+});
+
+describe('hooks provided by plugins', () => {
+  const addPlugin = (name, hooksJson, { enabled = true } = {}) => {
+    const dir = path.join(home.root, 'plugins-src', name);
+    if (hooksJson) writeJson(path.join(dir, 'hooks', 'hooks.json'), hooksJson);
+    const file = path.join(home.configDir, 'plugins', 'installed_plugins.json');
+    const installed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    installed.plugins[`${name}@market`] = [{ scope: 'user', installPath: dir, version: '1.0.0' }];
+    writeJson(file, installed);
+    const settings = JSON.parse(fs.readFileSync(home.settingsFile, 'utf8'));
+    settings.enabledPlugins[`${name}@market`] = enabled;
+    writeJson(home.settingsFile, settings);
+  };
+
+  it('are counted in hooks.total, hooks.events and hooks.commands with scope plugin:<name>', () => {
+    addPlugin('memory', { hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'node ${CLAUDE_PLUGIN_ROOT}/start.mjs' }] }], PreCompact: [{ hooks: [{ type: 'command', command: 'node pre.mjs' }] }] } });
+    const inv = inventory({ projectDir: null });
+    assert.equal(inv.hooks.total, 4);
+    assert.equal(inv.hooks.events.SessionStart, 1);
+    assert.equal(inv.hooks.events.PreCompact, 1);
+    assert.deepEqual(inv.hooks.commands.filter((c) => c.scope === 'plugin:memory').map((c) => c.event), ['SessionStart', 'PreCompact']);
+    assert.equal(inv.settings.reduce((a, s) => a + s.hooks.total, 0), 2, 'settings hooks are unchanged');
+  });
+
+  it('are ignored for a disabled plugin, for Kaizen itself and for a hooks.json that is not valid', () => {
+    addPlugin('off', { hooks: { Notification: [{ hooks: [{ type: 'command', command: 'notify' }] }] } }, { enabled: false });
+    addPlugin('kaizen', { hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'node kaizen.mjs nudge' }] }] } });
+    const broken = path.join(home.root, 'plugins-src', 'broken', 'hooks');
+    writeText(path.join(broken, 'hooks.json'), '{ nope');
+    addPlugin('broken', null);
+    const inv = inventory({ projectDir: null });
+    assert.equal(inv.hooks.total, 2);
+    assert.deepEqual(inv.hooks.events, { PostToolUse: 1, Stop: 1 });
+  });
+
+  it('accept the bare event map without the "hooks" wrapper', () => {
+    addPlugin('bare', { Stop: [{ hooks: [{ type: 'command', command: 'x' }] }] });
+    assert.equal(inventory({ projectDir: null }).hooks.events.Stop, 2);
+  });
+});
+
+describe('managed settings', () => {
+  const managedDir = () => path.join(home.root, 'managed');
+
+  it('are read last, read-only, from managed-settings.json and its managed-settings.d drop-ins in order', () => {
+    writeJson(path.join(managedDir(), 'managed-settings.json'), { permissions: { deny: ['Read(./.env)'], defaultMode: 'plan' }, hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'node block-force-push.mjs' }] }] } });
+    writeJson(path.join(managedDir(), 'managed-settings.d', '20-b.json'), { permissions: { defaultMode: 'acceptEdits' } });
+    writeJson(path.join(managedDir(), 'managed-settings.d', '10-a.json'), { enabledPlugins: { 'demo@fixture-market': false } });
+    writeText(path.join(managedDir(), 'managed-settings.d', 'notes.txt'), 'ignored');
+    const before = fs.readFileSync(path.join(managedDir(), 'managed-settings.json'), 'utf8');
+    const inv = inventory({ projectDir: null });
+    assert.deepEqual(inv.settings.map((s) => s.scope), ['user', 'managed', 'managed', 'managed']);
+    assert.deepEqual(inv.permissions.denyRules, ['Read(./.env)']);
+    assert.equal(inv.permissions.defaultMode, 'acceptEdits', 'the last drop-in wins');
+    assert.ok(inv.hooks.commands.some((c) => c.scope === 'managed' && /block-force-push/.test(c.command)));
+    assert.ok(!inv.skills.some((s) => s.source === 'plugin:demo'), 'a plugin disabled by managed settings is not inventoried');
+    assert.equal(fs.readFileSync(path.join(managedDir(), 'managed-settings.json'), 'utf8'), before);
+  });
+
+  it('are absent without a managed directory', () => {
+    assert.deepEqual(inventory({ projectDir: null }).settings.map((s) => s.scope), ['user']);
+  });
+});
+
+describe('MCP servers of the shared .mcp.json', () => {
+  const setup = (cfgProject, settings = {}) => {
+    const project = makeTempDir('kaizen-proj-');
+    writeJson(path.join(project, '.mcp.json'), { mcpServers: { a: {}, b: {}, c: {} } });
+    const cfg = JSON.parse(fs.readFileSync(home.claudeJson, 'utf8'));
+    cfg.projects = { [project]: cfgProject };
+    writeJson(home.claudeJson, cfg);
+    if (Object.keys(settings).length) writeJson(path.join(project, '.claude', 'settings.local.json'), settings);
+    return inventory({ projectDir: project }).mcp;
+  };
+
+  it('are pending until approved: enabledMcpjsonServers, enableAllProjectMcpServers', () => {
+    assert.deepEqual(setup({}).pendingProject, ['a', 'b', 'c']);
+    assert.deepEqual(setup({ enabledMcpjsonServers: ['a'] }).pendingProject, ['b', 'c']);
+    assert.deepEqual(setup({}, { enabledMcpjsonServers: ['b'] }).pendingProject, ['a', 'c']);
+    assert.deepEqual(setup({ enableAllProjectMcpServers: true }).pendingProject, []);
+    assert.deepEqual(setup({}, { enableAllProjectMcpServers: true }).pendingProject, []);
+  });
+
+  it('merge disabledMcpjsonServers of the global config and of every settings file, and disabled wins over enabled', () => {
+    const mcp = setup({ disabledMcpjsonServers: ['a'], enabledMcpjsonServers: ['a', 'b'] }, { disabledMcpjsonServers: ['b', 7] });
+    assert.deepEqual(mcp.disabledProject, ['a', 'b']);
+    assert.deepEqual(mcp.pendingProject, ['c']);
   });
 });

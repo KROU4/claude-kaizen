@@ -5,13 +5,15 @@
 // tests/fixtures/usage-data. Scenario tests that need other inputs hand-build session summaries instead.
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import { readInsights } from '../scripts/lib/insights.mjs';
 import { inventory } from '../scripts/lib/inventory.mjs';
 import { detectLang } from '../scripts/lib/i18n.mjs';
 import { METRIC_DOCS, MEASURE_VERSION, MIN_SESSIONS_FOR_UNUSED, SAFE_VERBS, buildMeasure, suggestAllowRules } from '../scripts/lib/metrics.mjs';
 import { loadCatalog, resolvePath } from '../scripts/lib/recipes.mjs';
 import { commandVerb, newSessionSummary, scanTranscripts } from '../scripts/lib/transcripts.mjs';
-import { PROJECTS_FIXTURE, USAGE_DATA_FIXTURE, cleanupTempDirs, materializeHome, setEnv } from './helpers.mjs';
+import { PROJECTS_FIXTURE, USAGE_DATA_FIXTURE, cleanupTempDirs, makeTempDir, materializeHome, setEnv, writeJson, writeText } from './helpers.mjs';
 
 let restoreEnv;
 let sessions;
@@ -60,7 +62,7 @@ function collectMetricPaths(cond, out = new Set()) {
 
 before(async () => {
   const home = materializeHome();
-  restoreEnv = setEnv({ ...home.env, CLAUDE_PROJECT_DIR: undefined });
+  restoreEnv = setEnv({ ...home.env, CLAUDE_PROJECT_DIR: undefined, KAIZEN_MANAGED_SETTINGS_DIR: path.join(home.root, 'managed') });
   scan = await scanTranscripts({ projectsDir: PROJECTS_FIXTURE });
   sessions = scan.sessions;
   inv = inventory({ projectDir: null });
@@ -686,8 +688,31 @@ describe('unused MCP servers', () => {
     assert.deepEqual(withMcp({ github: { calls: 2, tools: { x: 2 } } }).unused, ['dead-srv']);
   });
 
-  it('treats a plugin-provided server as the configured one when the names overlap', () => {
-    assert.deepEqual(withMcp({ plugin_github_github: { calls: 1, tools: { x: 1 } } }).unused, ['dead-srv']);
+  it('does not mistake a plugin-provided server for a configured one when the names merely overlap (exact comparison)', () => {
+    assert.deepEqual(withMcp({ plugin_github_github: { calls: 1, tools: { x: 1 } } }).unused, ['github', 'dead-srv']);
+    assert.deepEqual(withMcp({ github_extra: { calls: 1, tools: { x: 1 } } }).unused, ['github', 'dead-srv'], 'no substring match');
+    assert.deepEqual(withMcp({ git: { calls: 1, tools: { x: 1 } } }).unused, ['github', 'dead-srv'], 'no substring match the other way round');
+  });
+
+  it('matches a server whose name has characters outside [A-Za-z0-9_-] with the normalised key of its tool calls', () => {
+    const m = withMcp({ used_srv: { calls: 3, tools: { ping: 3 } }, my_server__1_0_: { calls: 1, tools: { x: 1 } } }, ['used.srv', 'dead-srv', 'my server (1.0)']);
+    assert.deepEqual(m.unused, ['dead-srv'], 'called servers are not reported; the original names are kept for the others');
+    assert.equal(m.configuredCount, 3);
+    assert.deepEqual(withMcp({}, ['used.srv', 'a b']).unused, ['used.srv', 'a b'], 'the action receives the name as configured');
+  });
+
+  it('ignores servers of .mcp.json that are disabled or still waiting for approval, but not active ones', () => {
+    const i = structuredClone(inv);
+    i.mcp = { user: ['dead-srv'], project: ['off-srv', 'new-srv', 'live-srv'], local: [], disabledProject: ['off-srv'], pendingProject: ['new-srv'] };
+    const m = buildMeasure({ sessions: [makeSession(), ...padding()], inventory: i, insights: null, env: ENV }).mcp;
+    assert.deepEqual(m.unused, ['dead-srv', 'live-srv']);
+    assert.equal(m.configuredCount, 2);
+  });
+
+  it('treats an inventory without the pendingProject list like before', () => {
+    const i = structuredClone(inv);
+    i.mcp = { user: [], project: ['a', 'b'], local: [], disabledProject: ['a'] };
+    assert.deepEqual(buildMeasure({ sessions: [makeSession(), ...padding()], inventory: i, insights: null, env: ENV }).mcp.unused, ['b']);
   });
 
   it('lists every configured server when nothing was called', () => {
@@ -814,5 +839,80 @@ describe('consistency with the recipe catalog and the metric docs', () => {
       }
     }
     assert.deepEqual(problems, []);
+  });
+});
+
+describe('measure of configurations that Claude Code reads differently from the naive file scan', () => {
+  let h;
+  let restore;
+  const measureNow = (sessionList = [makeSession(), ...padding()], projectDir = null) => buildMeasure({ sessions: sessionList, inventory: inventory({ projectDir }), insights: null, env: ENV });
+  const addPlugin = (name, hooks) => {
+    const dir = path.join(h.root, 'plugins-src', name);
+    writeJson(path.join(dir, 'hooks', 'hooks.json'), { hooks });
+    const file = path.join(h.configDir, 'plugins', 'installed_plugins.json');
+    const installed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    installed.plugins[`${name}@market`] = [{ scope: 'user', installPath: dir, version: '1.0.0' }];
+    writeJson(file, installed);
+    const settings = JSON.parse(fs.readFileSync(h.settingsFile, 'utf8'));
+    settings.enabledPlugins[`${name}@market`] = true;
+    writeJson(h.settingsFile, settings);
+  };
+
+  before(() => {
+    h = materializeHome();
+    restore = setEnv({ ...h.env, CLAUDE_PROJECT_DIR: undefined, KAIZEN_MANAGED_SETTINGS_DIR: path.join(h.root, 'managed') });
+  });
+  after(() => restore());
+
+  it('counts hooks of enabled plugins toward the has*Hook flags', () => {
+    const before = measureNow().context;
+    assert.equal(before.hasSessionStartHook, false);
+    assert.equal(before.hasPreCompactHook, false);
+    assert.equal(before.hasNotifyHook, false);
+    assert.equal(before.hasGuardHook, false);
+    addPlugin('memory', {
+      SessionStart: [{ hooks: [{ type: 'command', command: 'node start.mjs' }] }],
+      PreCompact: [{ hooks: [{ type: 'command', command: 'node pre.mjs' }] }],
+      Notification: [{ hooks: [{ type: 'command', command: 'node n.mjs' }] }],
+      PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'node guard-destructive.mjs' }] }],
+    });
+    const after = measureNow().context;
+    assert.equal(after.hasSessionStartHook, true);
+    assert.equal(after.hasPreCompactHook, true);
+    assert.equal(after.hasNotifyHook, true);
+    assert.equal(after.hasGuardHook, true);
+    assert.equal(after.hooksCount, before.hooksCount + 4);
+  });
+
+  it('keeps plugin hooks out of the actionable failing hooks (they cannot be removed from settings)', () => {
+    const bad = makeSession({ hooks: { ...newSessionSummary('/p/s.jsonl').hooks, errorsByCommand: { 'SessionStart|node start.mjs': 25, 'Stop|npx prettier --write': 25 } } });
+    const failing = measureNow([bad, ...padding()]).friction;
+    assert.deepEqual(failing.failingHookCommands, ['npx prettier --write']);
+    assert.equal(failing.failingHooks.find((x) => x.command === 'node start.mjs').configured, false);
+  });
+
+  it('leaves the skills of a plugin switched off in enabledPlugins out of the installed and unused counts', () => {
+    const on = measureNow().skills;
+    assert.ok(on.unused.includes('idle-plugin-skill'));
+    const settings = JSON.parse(fs.readFileSync(h.settingsFile, 'utf8'));
+    settings.enabledPlugins['idle@fixture-market'] = false;
+    writeJson(h.settingsFile, settings);
+    const off = measureNow().skills;
+    assert.equal(off.installed, on.installed - 1);
+    assert.ok(!off.unused.includes('idle-plugin-skill'));
+    assert.ok(!off.unusedPlugins.includes('idle@fixture-market'), 'a disabled plugin is not offered for disabling again');
+    assert.ok(off.descriptionTokens <= on.descriptionTokens);
+  });
+
+  it('does not count path-scoped rules or a skipped AGENTS.md toward claudeMdTokens, so claude-md.diet no longer misfires', () => {
+    const project = makeTempDir('kaizen-proj-');
+    writeText(path.join(project, 'CLAUDE.md'), 'build with make\n');
+    writeText(path.join(project, 'AGENTS.md'), `Agent notes.\n${'x'.repeat(13000)}\n`);
+    writeText(path.join(h.configDir, 'rules', 'python.md'), `---\npaths: ["**/*.py"]\n---\n${'x'.repeat(13500)}`);
+    const withScoped = measureNow([makeSession(), ...padding()], project).context;
+    writeText(path.join(h.configDir, 'rules', 'python.md'), `${'x'.repeat(13500)}`);
+    const unscoped = measureNow([makeSession(), ...padding()], project).context;
+    assert.ok(withScoped.claudeMdTokens < 2000, `scoped rules and AGENTS.md leaked into the total: ${withScoped.claudeMdTokens}`);
+    assert.ok(unscoped.claudeMdTokens >= 3000, 'the same rule without paths: loads every time and still counts');
   });
 });
