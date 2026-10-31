@@ -17,12 +17,35 @@ export function configDir() {
 /**
  * Claude Code's global config file (account, user-scope MCP servers, per-project state).
  * Without CLAUDE_CONFIG_DIR it is ~/.claude.json; with it, $CLAUDE_CONFIG_DIR/.claude.json (not the default profile's file).
- * An old <config dir>/.config.json wins when it exists, as in Claude Code itself.
+ * An old <config dir>/.config.json wins only as in Claude Code itself: a regular file that is non-empty, or writable
+ * while .claude.json does not exist. A leftover empty file (or a directory) of that name is ignored.
  */
 export function globalConfigPath() {
   const legacy = path.join(configDir(), '.config.json');
-  if (exists(legacy)) return legacy;
-  return path.join(process.env.CLAUDE_CONFIG_DIR || homeDir(), '.claude.json');
+  const current = path.join(process.env.CLAUDE_CONFIG_DIR || homeDir(), '.claude.json');
+  try {
+    const st = fs.statSync(legacy);
+    if (st.isFile() && (st.size > 0 || ((st.mode & 0o222) !== 0 && !exists(current)))) return legacy;
+  } catch {
+    // no legacy file
+  }
+  return current;
+}
+
+/**
+ * The key of the global config's `projects` map that stands for a directory. Claude Code keys projects with forward
+ * slashes on Windows, so the native path (backslashes, trailing slash, other drive-letter case) is compared normalised;
+ * an exact key always wins. `accept` narrows the candidates (for example to entries that hold MCP servers).
+ */
+export function projectConfigKey(projects, projectDir, accept = () => true) {
+  if (!projects || typeof projects !== 'object' || !projectDir) return null;
+  const keys = Object.keys(projects).filter((k) => accept(projects[k], k));
+  const norm = (p) => {
+    const s = toPosix(p).replace(/\/+$/, '');
+    return process.platform === 'win32' ? s.toLowerCase() : s;
+  };
+  const want = norm(projectDir);
+  return keys.find((k) => k === projectDir) || keys.find((k) => k === toPosix(projectDir)) || keys.find((k) => norm(k) === want) || null;
 }
 
 /** Where Kaizen keeps measurements, choices, backups and caches. */

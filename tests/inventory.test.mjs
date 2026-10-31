@@ -178,7 +178,7 @@ describe('inventory of the fixture home', () => {
   });
 
   it('reads the MCP servers of ~/.claude.json as user-scope servers', () => {
-    assert.deepEqual(inv.mcp, { user: ['used-srv', 'dead-srv'], project: [], local: [], disabledProject: [], pendingProject: [] });
+    assert.deepEqual(inv.mcp, { user: ['used-srv', 'dead-srv'], project: [], local: [], disabledProject: [], pendingProject: [], disabledHere: [] });
   });
 
   it('measures CLAUDE.md', () => {
@@ -209,7 +209,7 @@ describe('inventory of other configurations', () => {
       assert.deepEqual(inv.skills, []);
       assert.deepEqual(inv.agents, []);
       assert.deepEqual(inv.plugins, { installed: [], marketplaces: [] });
-      assert.deepEqual(inv.mcp, { user: [], project: [], local: [], disabledProject: [], pendingProject: [] });
+      assert.deepEqual(inv.mcp, { user: [], project: [], local: [], disabledProject: [], pendingProject: [], disabledHere: [] });
       assert.deepEqual(inv.claudeMd, []);
       assert.equal(inv.permissions.defaultMode, 'default');
       assert.equal(inv.statusLine, false);
@@ -263,7 +263,7 @@ describe('inventory of other configurations', () => {
     assert.equal(deploy.descriptionChars, 'Deploys it'.length, 'quotes around frontmatter values are stripped');
     assert.deepEqual(inv.agents.filter((a) => a.source === 'project').map((a) => [a.name, a.model, a.tools]).sort(), [['no-name', null, null], ['reviewer', 'opus', 3]], 'an agent without frontmatter is named after its file');
     assert.deepEqual(inv.legacyCommands.map((c) => c.name), ['old-command']);
-    assert.deepEqual(inv.mcp, { user: ['used-srv', 'dead-srv'], project: ['proj-srv'], local: ['local-srv'], disabledProject: ['proj-srv'], pendingProject: [] });
+    assert.deepEqual(inv.mcp, { user: ['used-srv', 'dead-srv'], project: ['proj-srv'], local: ['local-srv'], disabledProject: ['proj-srv'], pendingProject: [], disabledHere: [] });
   });
 
   it('detects Kaizen blocks in CLAUDE.md', () => {
@@ -572,5 +572,213 @@ describe('MCP servers of the shared .mcp.json', () => {
     const mcp = setup({ disabledMcpjsonServers: ['a'], enabledMcpjsonServers: ['a', 'b'] }, { disabledMcpjsonServers: ['b', 7] });
     assert.deepEqual(mcp.disabledProject, ['a', 'b']);
     assert.deepEqual(mcp.pendingProject, ['c']);
+  });
+});
+
+describe('the project entry of ~/.claude.json is found the way Claude Code keys it', () => {
+  const posix = (p) => p.replace(/\\/g, '/');
+  const withEntry = (key, entry, project) => {
+    const cfg = JSON.parse(fs.readFileSync(home.claudeJson, 'utf8'));
+    cfg.projects = { [key]: entry };
+    writeJson(home.claudeJson, cfg);
+    writeJson(path.join(project, '.mcp.json'), { mcpServers: { shared: {}, other: {} } });
+    return inventory({ projectDir: project }).mcp;
+  };
+
+  it('matches a forward-slash key (Windows) for local servers and for recorded approvals', () => {
+    const project = makeTempDir('kaizen-proj-');
+    const mcp = withEntry(posix(project), { mcpServers: { 'local-srv': {} }, enabledMcpjsonServers: ['shared'] }, project);
+    assert.deepEqual(mcp.local, ['local-srv']);
+    assert.deepEqual(mcp.pendingProject, ['other'], 'the approved server is not pending any more');
+  });
+
+  it('matches a key with a trailing slash, and on Windows a different drive-letter case', () => {
+    const project = makeTempDir('kaizen-proj-');
+    assert.deepEqual(withEntry(`${posix(project)}/`, { mcpServers: { a: {} } }, project).local, ['a']);
+    if (process.platform === 'win32') {
+      const flipped = project[0] === project[0].toUpperCase() ? project[0].toLowerCase() + project.slice(1) : project[0].toUpperCase() + project.slice(1);
+      assert.deepEqual(withEntry(posix(flipped), { mcpServers: { b: {} } }, project).local, ['b']);
+    }
+  });
+
+  it('still matches the native path key, and ignores the entry of another project', () => {
+    const project = makeTempDir('kaizen-proj-');
+    assert.deepEqual(withEntry(project, { mcpServers: { native: {} } }, project).local, ['native']);
+    assert.deepEqual(withEntry(path.join(project, 'sub'), { mcpServers: { sub: {} } }, project).local, []);
+  });
+
+  it('reports servers switched off with /mcp for this project (disabledMcpServers) as disabledHere', () => {
+    const project = makeTempDir('kaizen-proj-');
+    const mcp = withEntry(posix(project), { mcpServers: { 'local-off': {}, 'local-on': {} }, disabledMcpServers: ['local-off', 'used-srv', 5] }, project);
+    assert.deepEqual(mcp.local, ['local-off', 'local-on']);
+    assert.deepEqual(mcp.disabledHere, ['local-off', 'used-srv']);
+    const other = makeTempDir('kaizen-proj-');
+    assert.deepEqual(inventory({ projectDir: other }).mcp.disabledHere, [], 'the list belongs to its project');
+  });
+});
+
+describe('plugins installed for another project', () => {
+  const install = (entries, { skill = 's1', hooks = true } = {}) => {
+    const dir = path.join(home.root, 'plugins-src', 'onlyother');
+    writeText(path.join(dir, 'skills', skill, 'SKILL.md'), `---\nname: ${skill}\ndescription: x\n---\nBody`);
+    if (hooks) writeJson(path.join(dir, 'hooks', 'hooks.json'), { hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'node start.mjs' }] }] } });
+    const file = path.join(home.configDir, 'plugins', 'installed_plugins.json');
+    const installed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    installed.plugins['onlyother@market'] = entries(dir);
+    writeJson(file, installed);
+  };
+  const names = (inv) => inv.plugins.installed.map((p) => p.name);
+
+  it('a plugin installed only at local scope for another project is not installed here (no skills, agents, hooks)', () => {
+    const project = makeTempDir('kaizen-proj-');
+    const other = makeTempDir('kaizen-other-');
+    install((dir) => [{ scope: 'local', projectPath: other, installPath: dir, version: '1.0.0' }]);
+    for (const projectDir of [project, null]) {
+      const inv = inventory({ projectDir });
+      assert.ok(!names(inv).includes('onlyother'), `projectDir ${projectDir}`);
+      assert.ok(!inv.skills.some((s) => s.name === 's1'));
+      assert.equal(inv.hooks.events.SessionStart, undefined);
+    }
+  });
+
+  it('the same install counts in the project it belongs to, at local and at project scope', () => {
+    const project = makeTempDir('kaizen-proj-');
+    for (const scope of ['local', 'project']) {
+      install((dir) => [{ scope, projectPath: project, installPath: dir, version: '1.0.0' }]);
+      const inv = inventory({ projectDir: project });
+      assert.ok(names(inv).includes('onlyother'), scope);
+      assert.ok(inv.skills.some((s) => s.name === 's1'), scope);
+      assert.equal(inv.hooks.events.SessionStart, 1, scope);
+    }
+  });
+
+  it('a user-scope install still applies everywhere, next to local installs elsewhere', () => {
+    const other = makeTempDir('kaizen-other-');
+    install((dir) => [{ scope: 'local', projectPath: other, installPath: path.join(dir, 'nowhere'), version: '9.9.9' }, { scope: 'user', installPath: dir, version: '1.0.0' }]);
+    const inv = inventory({ projectDir: null });
+    assert.equal(inv.plugins.installed.find((p) => p.name === 'onlyother').version, '1.0.0');
+    assert.ok(inv.skills.some((s) => s.name === 's1'));
+  });
+});
+
+describe('AGENTS.md and the CLAUDE.md files of ancestor directories', () => {
+  const tree = () => {
+    const parent = makeTempDir('kaizen-mono-');
+    const project = path.join(parent, 'packages', 'app');
+    writeText(path.join(project, 'AGENTS.md'), `Always answer in Russian.\n${'x'.repeat(4000)}\n`);
+    return { parent, project };
+  };
+  const agentsCounted = (project) => inventory({ projectDir: project }).claudeMd.some((f) => f.scope === 'agents-md');
+
+  it('counts AGENTS.md when no directory above has a CLAUDE.md', () => {
+    assert.equal(agentsCounted(tree().project), true);
+  });
+
+  it('skips AGENTS.md when any ancestor has CLAUDE.md, .claude/CLAUDE.md or CLAUDE.local.md (Claude Code skips it too)', () => {
+    for (const [dir, file] of [[[], 'CLAUDE.md'], [['packages'], 'CLAUDE.md'], [[], '.claude/CLAUDE.md'], [['packages'], 'CLAUDE.local.md']]) {
+      const { parent, project } = tree();
+      writeText(path.join(parent, ...dir, ...file.split('/')), 'build with make\n');
+      const inv = inventory({ projectDir: project });
+      assert.ok(!inv.claudeMd.some((f) => f.scope === 'agents-md'), `${dir.join('/')}/${file}`);
+      assert.ok(!inv.claudeMd.some((f) => f.hints && f.hints.language && f.scope !== 'user'), 'its hints are not taken either');
+    }
+  });
+
+  it('counts AGENTS.md when a CLAUDE.md of an ancestor imports it', () => {
+    const { parent, project } = tree();
+    writeText(path.join(parent, 'CLAUDE.md'), 'See @packages/app/AGENTS.md\n@packages/app/AGENTS.md\n');
+    assert.equal(agentsCounted(project), true);
+  });
+
+  it('does not take the user CLAUDE.md for an ancestor project file', () => {
+    // <home>/.claude/CLAUDE.md is the user file; a project below the home directory keeps its AGENTS.md
+    const project = path.join(home.home, 'work', 'app');
+    writeText(path.join(home.configDir, 'CLAUDE.md'), 'user rules\n');
+    writeText(path.join(project, 'AGENTS.md'), 'Agent notes.\n');
+    assert.equal(agentsCounted(project), true);
+  });
+});
+
+describe('rules in subdirectories of .claude/rules', () => {
+  it('counts nested rules and reports nested path-scoped ones as conditional', () => {
+    const project = makeTempDir('kaizen-proj-');
+    const rules = path.join(project, '.claude', 'rules');
+    writeText(path.join(rules, 'top.md'), 'x'.repeat(400));
+    writeText(path.join(rules, 'frontend', 'style.md'), 'y'.repeat(800));
+    writeText(path.join(rules, 'frontend', 'deep', 'more.md'), 'z'.repeat(200));
+    writeText(path.join(rules, 'frontend', 'scoped.md'), `---\npaths: ["src/**/*.tsx"]\n---\n${'s'.repeat(300)}`);
+    writeText(path.join(rules, 'backend', 'notes.txt'), 'ignored');
+    const entry = inventory({ projectDir: project }).claudeMd.find((f) => f.scope === 'project-rules');
+    assert.equal(entry.files, 3);
+    assert.equal(entry.chars, 400 + 800 + 200);
+    assert.equal(entry.conditionalFiles, 1);
+  });
+
+  it('counts a rule once when a symlinked directory loops back, and skips dangling links', (t) => {
+    const project = makeTempDir('kaizen-proj-');
+    const rules = path.join(project, '.claude', 'rules');
+    writeText(path.join(rules, 'sub', 'a.md'), 'a'.repeat(100));
+    try {
+      fs.symlinkSync(rules, path.join(rules, 'sub', 'loop'), 'junction');
+      fs.symlinkSync(path.join(project, 'missing'), path.join(rules, 'sub', 'gone'), 'junction');
+    } catch (e) {
+      t.skip(`cannot create symlinks here: ${e.code}`);
+      return;
+    }
+    const entry = inventory({ projectDir: project }).claudeMd.find((f) => f.scope === 'project-rules');
+    assert.equal(entry.files, 1);
+    assert.equal(entry.chars, 100);
+  });
+});
+
+describe('hooks declared in the plugin manifest', () => {
+  const hook = (event, command) => ({ [event]: [{ hooks: [{ type: 'command', command }] }] });
+  const addPlugin = (name, manifest, files = {}) => {
+    const dir = path.join(home.root, 'plugins-src', name);
+    writeJson(path.join(dir, '.claude-plugin', 'plugin.json'), { name, ...manifest });
+    for (const [rel, data] of Object.entries(files)) writeJson(path.join(dir, rel), data);
+    const file = path.join(home.configDir, 'plugins', 'installed_plugins.json');
+    const installed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    installed.plugins[`${name}@market`] = [{ scope: 'user', installPath: dir, version: '1.0.0' }];
+    writeJson(file, installed);
+    return dir;
+  };
+  const plugin = (name) => inventory({ projectDir: null }).plugins.installed.find((p) => p.name === name);
+
+  it('counts an inline hooks object (also with the "hooks" wrapper)', () => {
+    addPlugin('inl', { hooks: hook('PostToolUse', 'prettier --write') });
+    addPlugin('wrapped', { hooks: { hooks: hook('Notification', 'notify') } });
+    const inv = inventory({ projectDir: null });
+    assert.ok(inv.hooks.commands.some((c) => c.scope === 'plugin:inl' && c.event === 'PostToolUse' && c.command === 'prettier --write'));
+    assert.ok(inv.hooks.commands.some((c) => c.scope === 'plugin:wrapped' && c.event === 'Notification'));
+    assert.equal(plugin('inl').components.hooks, true);
+  });
+
+  it('counts hook files named by a path or an array of paths, relative to the plugin', () => {
+    addPlugin('ref', { hooks: './config/my-hooks.json' }, { 'config/my-hooks.json': { hooks: hook('SessionStart', 'node a.mjs') } });
+    addPlugin('multi', { hooks: ['./one.json', './two.json', { Stop: [{ hooks: [{ type: 'command', command: 'inline' }] }] }] }, { 'one.json': hook('PreCompact', 'node b.mjs'), 'two.json': { hooks: hook('Stop', 'node c.mjs') } });
+    const inv = inventory({ projectDir: null });
+    assert.deepEqual(inv.hooks.commands.filter((c) => c.scope === 'plugin:ref').map((c) => c.command), ['node a.mjs']);
+    assert.deepEqual(inv.hooks.commands.filter((c) => c.scope === 'plugin:multi').map((c) => c.command).sort(), ['inline', 'node b.mjs', 'node c.mjs']);
+    assert.equal(inv.hooks.events.PreCompact, 1);
+  });
+
+  it('adds the manifest hooks to hooks/hooks.json without counting the same file twice', () => {
+    addPlugin('both', { hooks: ['./hooks/hooks.json', { Stop: [{ hooks: [{ type: 'command', command: 'extra' }] }] }] }, { 'hooks/hooks.json': { hooks: hook('SessionStart', 'node s.mjs') } });
+    const mine = inventory({ projectDir: null }).hooks.commands.filter((c) => c.scope === 'plugin:both');
+    assert.deepEqual(mine.map((c) => c.command).sort(), ['extra', 'node s.mjs']);
+  });
+
+  it('ignores manifest paths that leave the plugin directory, missing files and a disabled plugin', () => {
+    const outside = path.join(home.root, 'outside.json');
+    writeJson(outside, hook('Stop', 'escaped'));
+    addPlugin('escape', { hooks: ['../../outside.json', './missing.json', path.join(home.root, 'outside.json')] });
+    addPlugin('off', { hooks: hook('Stop', 'disabled') });
+    const settings = JSON.parse(fs.readFileSync(home.settingsFile, 'utf8'));
+    settings.enabledPlugins['off@market'] = false;
+    writeJson(home.settingsFile, settings);
+    const inv = inventory({ projectDir: null });
+    assert.ok(!inv.hooks.commands.some((c) => c.scope === 'plugin:escape' || c.scope === 'plugin:off'));
+    assert.equal(plugin('escape').components.hooks, false);
   });
 });

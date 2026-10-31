@@ -2,8 +2,9 @@
 // hooks, permissions, skills, agents, plugins, MCP servers, CLAUDE.md files.
 // Reads structure and sizes only; never copies secrets (env values are masked).
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
-import { configDir, exists, globalConfigPath, managedSettingsFiles, readJsonSafe, settingsFiles } from './paths.mjs';
+import { configDir, exists, globalConfigPath, homeDir, managedSettingsFiles, projectConfigKey, readJsonSafe, settingsFiles } from './paths.mjs';
 
 export function estimateTokens(text) {
   if (!text) return 0;
@@ -218,27 +219,46 @@ function claudeMdEntry(scope, file, text) {
   return { scope, file, chars: text.length, tokens: estimateTokens(text), lines: text.split('\n').length, imports, hints: claudeMdHints(text), kaizenBlocks: (text.match(/<!-- kaizen:start /g) || []).length };
 }
 
+/** Every *.md file under a rules directory, subdirectories included (Claude Code walks them), symlinks followed once. */
+function ruleFiles(dir, seen = new Set(), depth = 0) {
+  let real;
+  let entries;
+  try {
+    real = fs.realpathSync(dir);
+    if (seen.has(real) || depth > 10) return [];
+    seen.add(real);
+    entries = fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const name of entries.sort()) {
+    const full = path.join(dir, name);
+    let st;
+    try {
+      st = fs.statSync(full);
+    } catch {
+      continue; // dangling symlink
+    }
+    if (st.isDirectory()) out.push(...ruleFiles(full, seen, depth + 1));
+    else if (st.isFile() && name.endsWith('.md')) out.push(full);
+  }
+  return out;
+}
+
 /**
  * Rules directory: only rules that load on every request count toward tokens. A rule with `paths:` frontmatter loads
  * when matching files are touched, so it is reported separately. Unreadable entries (dangling symlinks) are skipped.
  */
 function rulesEntry(scope, dir) {
-  let names;
-  try {
-    names = fs.readdirSync(dir).filter((f) => f.endsWith('.md'));
-  } catch {
-    return null;
-  }
   let files = 0;
   let chars = 0;
   let conditionalFiles = 0;
   let conditionalChars = 0;
-  for (const f of names) {
-    const full = path.join(dir, f);
+  for (const full of ruleFiles(dir)) {
     let size;
     let text;
     try {
-      if (!fs.statSync(full).isFile()) continue;
       size = fs.statSync(full).size;
       text = fs.readFileSync(full, 'utf8');
     } catch {
@@ -254,6 +274,31 @@ function rulesEntry(scope, dir) {
   }
   if (!files && !conditionalFiles) return null;
   return { scope, file: dir, files, chars, tokens: estimateTokens(' '.repeat(chars)), conditionalFiles, conditionalChars };
+}
+
+/**
+ * CLAUDE.md files of the directories above the project (parent up to, not including, the filesystem root), read but not
+ * counted: they only decide whether AGENTS.md is used. The user's own CLAUDE.md (config dir, or ~/.claude of the
+ * default profile) is the user file, not a project file, and does not count for that.
+ */
+function ancestorClaudeMds(projectDir, cfg) {
+  const out = [];
+  const userFiles = [path.join(cfg, 'CLAUDE.md'), path.join(homeDir(), '.claude', 'CLAUDE.md')];
+  try {
+    userFiles.push(path.join(os.userInfo().homedir, '.claude', 'CLAUDE.md'));
+  } catch {
+    // no user record
+  }
+  let dir = path.resolve(projectDir);
+  for (let up = path.dirname(dir); up !== dir && up !== path.parse(up).root; up = path.dirname(dir)) {
+    dir = up;
+    for (const file of [path.join(dir, 'CLAUDE.md'), path.join(dir, '.claude', 'CLAUDE.md'), path.join(dir, 'CLAUDE.local.md')]) {
+      if (userFiles.some((u) => sameFile(file, u))) continue;
+      const text = readTextSafe(file);
+      if (text !== null) out.push({ file, text });
+    }
+  }
+  return out;
 }
 
 function claudeMdFiles(projectDir, cfg) {
@@ -279,8 +324,9 @@ function claudeMdFiles(projectDir, cfg) {
     if (text !== null) texts.push({ file, text });
   }
   if (exists(path.join(projectDir, '.claude', 'rules'))) add(rulesEntry('project-rules', path.join(projectDir, '.claude', 'rules')));
-  // Claude Code reads AGENTS.md / .claude/AGENTS.md only when the project has no CLAUDE.md, .claude/CLAUDE.md or
-  // CLAUDE.local.md of its own; with one, AGENTS.md counts only when a CLAUDE.md imports it.
+  // Claude Code reads AGENTS.md / .claude/AGENTS.md only when neither the project nor any ancestor directory has a
+  // CLAUDE.md, .claude/CLAUDE.md or CLAUDE.local.md; with one, AGENTS.md counts only when a CLAUDE.md imports it.
+  texts.push(...ancestorClaudeMds(projectDir, cfg));
   const imported = texts.flatMap((t) => importedFiles(t.file, t.text));
   for (const file of [path.join(projectDir, 'AGENTS.md'), path.join(projectDir, '.claude', 'AGENTS.md')]) {
     if (!texts.length || imported.some((i) => sameFile(i, file))) read('agents-md', file);
@@ -298,7 +344,7 @@ function uniq(list) {
  * settings file (managed included) and from the project's entry in the global config.
  */
 function mcpServers(projectDir, settings) {
-  const out = { user: [], project: [], local: [], disabledProject: [], pendingProject: [] };
+  const out = { user: [], project: [], local: [], disabledProject: [], pendingProject: [], disabledHere: [] };
   const globalCfg = readJsonSafe(globalConfigPath());
   if (globalCfg && globalCfg.mcpServers && typeof globalCfg.mcpServers === 'object') {
     out.user = Object.keys(globalCfg.mcpServers);
@@ -306,22 +352,29 @@ function mcpServers(projectDir, settings) {
   if (projectDir) {
     const mcpJson = readJsonSafe(path.join(projectDir, '.mcp.json'));
     if (mcpJson && mcpJson.mcpServers && typeof mcpJson.mcpServers === 'object') out.project = Object.keys(mcpJson.mcpServers);
-    const proj = globalCfg && globalCfg.projects && typeof globalCfg.projects === 'object' ? globalCfg.projects[projectDir] : null;
+    // the project's entry is keyed with forward slashes on Windows, so the native path is matched normalised
+    const key = globalCfg ? projectConfigKey(globalCfg.projects, projectDir) : null;
+    const proj = key ? globalCfg.projects[key] : null;
     if (proj && proj.mcpServers && typeof proj.mcpServers === 'object') out.local = Object.keys(proj.mcpServers);
     const disabled = uniq([...stringList(proj && proj.disabledMcpjsonServers), ...settings.flatMap((s) => s.disabledMcpjsonServers)]);
     const enabled = new Set([...stringList(proj && proj.enabledMcpjsonServers), ...settings.flatMap((s) => s.enabledMcpjsonServers)]);
     const enableAll = (proj && proj.enableAllProjectMcpServers === true) || settings.some((s) => s.enableAllProjectMcpServers);
     out.disabledProject = disabled;
+    // switched off with /mcp for this project: not connected, so it costs no context here
+    out.disabledHere = uniq(stringList(proj && proj.disabledMcpServers));
     out.pendingProject = enableAll ? [] : out.project.filter((n) => !disabled.includes(n) && !enabled.has(n));
   }
   return out;
 }
 
-/** The installed_plugins.json entry that applies here: local-scope for this project, then project-scope, then user. */
+/**
+ * The installed_plugins.json entry that applies here: local-scope for this project, then project-scope, then user
+ * (an entry without a scope is a legacy user install). Undefined when the plugin is installed only for other projects.
+ */
 function pickInstall(entries, projectDir) {
   const list = (Array.isArray(entries) ? entries : [entries]).filter((e) => e && typeof e === 'object');
   const here = (e) => projectDir && typeof e.projectPath === 'string' && sameFile(e.projectPath, projectDir);
-  return list.find((e) => e.scope === 'local' && here(e)) || list.find((e) => e.scope === 'project' && here(e)) || list.find((e) => e.scope === 'user') || list[0];
+  return list.find((e) => e.scope === 'local' && here(e)) || list.find((e) => e.scope === 'project' && here(e)) || list.find((e) => e.scope === 'user' || e.scope === 'managed' || typeof e.scope !== 'string');
 }
 
 function plugins(cfg, projectDir, enabledMap) {
@@ -330,31 +383,73 @@ function plugins(cfg, projectDir, enabledMap) {
   if (installed && installed.plugins && typeof installed.plugins === 'object') {
     for (const [key, entries] of Object.entries(installed.plugins)) {
       const e = pickInstall(entries, projectDir);
+      if (!e) continue; // installed with local or project scope for another project only: not present here
       const [name, marketplace] = key.split('@');
-      const installPath = e && e.installPath;
+      const installPath = e.installPath;
       let components = null;
       if (installPath && exists(installPath)) {
         components = {
           skills: listSkills(path.join(installPath, 'skills'), 'plugin').length,
           agents: listAgents(path.join(installPath, 'agents'), 'plugin').length,
-          hooks: exists(path.join(installPath, 'hooks', 'hooks.json')),
+          hooks: pluginHookMaps(installPath).length > 0,
           mcp: exists(path.join(installPath, '.mcp.json')),
         };
       }
-      list.push({ name, marketplace, version: e && e.version, installPath, components, enabled: enabledMap[key] !== false });
+      list.push({ name, marketplace, version: e.version, installPath, components, enabled: enabledMap[key] !== false });
     }
   }
   const marketplaces = readJsonSafe(path.join(cfg, 'plugins', 'known_marketplaces.json')) || {};
   return { installed: list, marketplaces: Object.keys(marketplaces) };
 }
 
-/** Hooks a plugin registers in hooks/hooks.json (`{"hooks": {...}}` wrapper). Kaizen's own nudge hook is not counted. */
+/** The event map of a hooks file or inline manifest value: `{"hooks": {...}}` wrapper or the bare map. */
+function hookMap(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  return raw.hooks && typeof raw.hooks === 'object' && !Array.isArray(raw.hooks) ? raw.hooks : raw;
+}
+
+/**
+ * Hook maps a plugin declares: the conventional hooks/hooks.json, plus whatever .claude-plugin/plugin.json `hooks` holds
+ * (an inline object, a path, or an array of paths/objects; paths are relative to the plugin and must stay inside it).
+ */
+function pluginHookMaps(installPath) {
+  const maps = [];
+  const seen = new Set();
+  const addFile = (file) => {
+    const real = path.resolve(file);
+    if (seen.has(real.toLowerCase())) return;
+    seen.add(real.toLowerCase());
+    const m = hookMap(readJsonSafe(real));
+    if (m) maps.push(m);
+  };
+  addFile(path.join(installPath, 'hooks', 'hooks.json'));
+  const manifest = readJsonSafe(path.join(installPath, '.claude-plugin', 'plugin.json'));
+  const declared = manifest && typeof manifest === 'object' ? manifest.hooks : null;
+  for (const item of Array.isArray(declared) ? declared : [declared]) {
+    if (typeof item === 'string') {
+      const file = path.resolve(installPath, item);
+      const rel = path.relative(path.resolve(installPath), file);
+      if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) addFile(file);
+    } else {
+      const m = hookMap(item);
+      if (m) maps.push(m);
+    }
+  }
+  return maps.filter((m) => summarizeHooks(m).total > 0);
+}
+
+/** Hooks an enabled plugin registers (hooks/hooks.json and the manifest). Kaizen's own nudge hook is not counted. */
 function pluginHooks(p) {
   if (p.name === 'kaizen' || !p.installPath) return null;
-  const raw = readJsonSafe(path.join(p.installPath, 'hooks', 'hooks.json'));
-  if (!raw || typeof raw !== 'object') return null;
-  const s = summarizeHooks(raw.hooks && typeof raw.hooks === 'object' && !Array.isArray(raw.hooks) ? raw.hooks : raw);
-  return s.total ? { scope: `plugin:${p.name}`, hooks: s } : null;
+  const parts = pluginHookMaps(p.installPath).map(summarizeHooks);
+  if (!parts.length) return null;
+  const hooks = { events: {}, commands: [], total: 0 };
+  for (const part of parts) {
+    hooks.total += part.total;
+    hooks.commands.push(...part.commands);
+    for (const [ev, n] of Object.entries(part.events)) hooks.events[ev] = (hooks.events[ev] || 0) + n;
+  }
+  return { scope: `plugin:${p.name}`, hooks };
 }
 
 /**

@@ -16,6 +16,7 @@ import {
   kitRoot,
   managedSettingsDir,
   managedSettingsFiles,
+  projectConfigKey,
   projectsDir,
   readJsonSafe,
   settingsFiles,
@@ -229,6 +230,63 @@ describe('globalConfigPath', () => {
     assert.equal(globalConfigPath(), path.join(other, '.config.json'));
     undo();
     assert.equal(globalConfigPath(), path.join(homeDir(), '.claude.json'), 'the default profile has no legacy file');
+  });
+
+  it('ignores a leftover empty .config.json next to .claude.json, as Claude Code does', () => {
+    const other = path.join(root, 'profile');
+    const undo = setEnv({ CLAUDE_CONFIG_DIR: other });
+    writeText(path.join(other, '.claude.json'), '{"mcpServers":{}}');
+    writeText(path.join(other, '.config.json'), '');
+    assert.equal(globalConfigPath(), path.join(other, '.claude.json'));
+    writeText(path.join(other, '.config.json'), '{}');
+    assert.equal(globalConfigPath(), path.join(other, '.config.json'), 'a non-empty legacy file wins');
+    undo();
+  });
+
+  it('ignores a .config.json that is a directory', () => {
+    const other = path.join(root, 'profile');
+    const undo = setEnv({ CLAUDE_CONFIG_DIR: other });
+    fs.mkdirSync(path.join(other, '.config.json'), { recursive: true });
+    assert.equal(globalConfigPath(), path.join(other, '.claude.json'));
+    undo();
+  });
+
+  it('uses an empty writable .config.json only while .claude.json does not exist', () => {
+    const other = path.join(root, 'profile');
+    const undo = setEnv({ CLAUDE_CONFIG_DIR: other });
+    writeText(path.join(other, '.config.json'), '');
+    assert.equal(globalConfigPath(), path.join(other, '.config.json'));
+    writeText(path.join(other, '.claude.json'), '{}');
+    assert.equal(globalConfigPath(), path.join(other, '.claude.json'));
+    undo();
+  });
+});
+
+describe('projectConfigKey', () => {
+  const projects = { 'C:/Work/Proj': { a: 1 }, '/home/u/proj': { b: 2 }, '/home/u/other': {} };
+
+  it('finds the entry of a native path when Claude Code keyed it with forward slashes', () => {
+    assert.equal(projectConfigKey({ 'C:/Work/Proj': {} }, 'C:\\Work\\Proj'), 'C:/Work/Proj');
+    assert.equal(projectConfigKey({ 'C:/Work/Proj': {} }, 'C:\\Work\\Proj\\'), 'C:/Work/Proj', 'a trailing separator is ignored');
+    assert.equal(projectConfigKey(projects, '/home/u/proj/'), '/home/u/proj');
+  });
+
+  it('prefers an exact key, then the forward-slash form', () => {
+    assert.equal(projectConfigKey({ 'C:/W/P': {}, 'C:\\W\\P': {} }, 'C:\\W\\P'), 'C:\\W\\P');
+    assert.equal(projectConfigKey({ 'C:/W/P': {} }, 'C:\\W\\P'), 'C:/W/P');
+  });
+
+  it('is case-insensitive only on Windows', () => {
+    const expected = process.platform === 'win32' ? 'C:/Work/Proj' : null;
+    assert.equal(projectConfigKey({ 'C:/Work/Proj': {} }, 'c:\\work\\proj'), expected);
+  });
+
+  it('honours the accept filter and copes with missing input', () => {
+    assert.equal(projectConfigKey(projects, '/home/u/other', (v) => v && v.b), null);
+    assert.equal(projectConfigKey(projects, '/home/u/proj', (v) => v && v.b), '/home/u/proj');
+    assert.equal(projectConfigKey(null, '/x'), null);
+    assert.equal(projectConfigKey(projects, null), null);
+    assert.equal(projectConfigKey(projects, '/nope'), null);
   });
 });
 

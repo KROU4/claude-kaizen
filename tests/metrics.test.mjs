@@ -709,6 +709,14 @@ describe('unused MCP servers', () => {
     assert.equal(m.configuredCount, 2);
   });
 
+  it('ignores user and local servers switched off with /mcp for this project (disabledMcpServers): they cost no context', () => {
+    const i = structuredClone(inv);
+    i.mcp = { user: ['dead-srv', 'user-off'], project: [], local: ['local-off', 'local-live'], disabledProject: [], pendingProject: [], disabledHere: ['user-off', 'local-off'] };
+    const m = buildMeasure({ sessions: [makeSession(), ...padding()], inventory: i, insights: null, env: ENV }).mcp;
+    assert.deepEqual(m.unused, ['dead-srv', 'local-live']);
+    assert.equal(m.configuredCount, 2);
+  });
+
   it('treats an inventory without the pendingProject list like before', () => {
     const i = structuredClone(inv);
     i.mcp = { user: [], project: ['a', 'b'], local: [], disabledProject: ['a'] };
@@ -882,6 +890,22 @@ describe('measure of configurations that Claude Code reads differently from the 
     assert.equal(after.hasNotifyHook, true);
     assert.equal(after.hasGuardHook, true);
     assert.equal(after.hooksCount, before.hooksCount + 4);
+  });
+
+  it('keeps failing hooks of managed settings out of the actionable list (settings.hook.remove cannot touch them) but visible in the digest', () => {
+    const managed = path.join(h.root, 'managed', 'managed-settings.json');
+    writeJson(managed, { hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'node corp-guard.mjs' }, { type: 'command', command: 'npx prettier --write' }] }] } });
+    try {
+      const bad = makeSession({ hooks: { ...newSessionSummary('/p/s.jsonl').hooks, errorsByCommand: { 'PreToolUse|node corp-guard.mjs': 30, 'Stop|npx prettier --write': 25 } } });
+      const friction = measureNow([bad, ...padding()]).friction;
+      const corp = friction.failingHooks.find((x) => x.command === 'node corp-guard.mjs');
+      assert.equal(corp.configured, false, 'a managed hook is not removable');
+      assert.equal(corp.source, 'managed', 'it stays in the digest as information');
+      assert.equal(corp.errors, 30);
+      assert.deepEqual(friction.failingHookCommands, ['npx prettier --write'], 'the same command in a removable file is still offered');
+    } finally {
+      fs.rmSync(path.dirname(managed), { recursive: true, force: true });
+    }
   });
 
   it('keeps plugin hooks out of the actionable failing hooks (they cannot be removed from settings)', () => {

@@ -317,10 +317,16 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
   // failing hooks: errors per configured hook command (only hooks still present in settings are actionable)
   const errorsByCommand = {};
   for (const s of S) merge(errorsByCommand, s.hooks.errorsByCommand);
-  // hooks that come from plugins are counted for has*Hook but cannot be removed from settings, so they are not actionable
-  const configuredCommands = new Set(inventory.hooks.commands.filter((c) => !String(c.scope || '').startsWith('plugin:')).map((c) => c.command));
+  // settings.hook.remove edits only the user, project and local settings files. Hooks of plugins and of managed
+  // settings are counted for has*Hook but cannot be removed that way, so they stay in the digest as information only.
+  const removableScopes = new Set(['user', 'project', 'local']);
   const normalizeCmd = (c) => String(c).replace(/\s+/g, ' ').trim();
-  const configuredNorm = new Map([...configuredCommands].map((c) => [normalizeCmd(c), c]));
+  const configuredNorm = new Map(inventory.hooks.commands.filter((c) => !c.scope || removableScopes.has(c.scope)).map((c) => [normalizeCmd(c.command), c.command]));
+  const fixedSource = new Map();
+  for (const c of inventory.hooks.commands) {
+    const src = c.scope === 'managed' ? 'managed' : String(c.scope || '').startsWith('plugin:') ? 'plugin' : null;
+    if (src && !fixedSource.has(normalizeCmd(c.command))) fixedSource.set(normalizeCmd(c.command), src);
+  }
   const failingHooks = Object.entries(errorsByCommand)
     .map(([key, errors]) => {
       const idx = key.indexOf('|');
@@ -328,7 +334,8 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
       const command = key.slice(idx + 1);
       const configured = configuredNorm.get(normalizeCmd(command)) || null;
       // `command` is the display copy (redacted); `configuredCommand` stays exactly as written in settings.json for matching
-      return { event, command: redact(command), errors, configured: !!configured, configuredCommand: configured };
+      const source = configured ? null : fixedSource.get(normalizeCmd(command)) || null; // 'managed' / 'plugin': not removable
+      return { event, command: redact(command), errors, configured: !!configured, configuredCommand: configured, ...(source ? { source } : {}) };
     })
     .sort((a, b) => b.errors - a.errors)
     .slice(0, 10);
@@ -468,9 +475,13 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
     legacyCommands: inventory.legacyCommands.length,
     installedNames: installedSkillNames.slice(0, 300),
   };
-  // servers of the shared .mcp.json that the user disabled, or never approved, are not loaded and so cost nothing
+  // servers of the shared .mcp.json that the user disabled, or never approved, and servers switched off with /mcp for
+  // this project (disabledMcpServers) are not loaded and so cost nothing
   const inactiveProject = new Set([...(inventory.mcp.disabledProject || []), ...(inventory.mcp.pendingProject || [])]);
-  const configured = new Set([...inventory.mcp.user, ...inventory.mcp.project.filter((n) => !inactiveProject.has(n)), ...inventory.mcp.local]);
+  const disabledHere = new Set(inventory.mcp.disabledHere || []);
+  const configured = new Set(
+    [...inventory.mcp.user, ...inventory.mcp.project.filter((n) => !inactiveProject.has(n)), ...inventory.mcp.local].filter((n) => !disabledHere.has(n)),
+  );
   // Claude Code builds tool names as mcp__<server with every char outside [a-zA-Z0-9_-] replaced by '_'>__<tool>, so
   // compare the normalised configured name with the transcript key exactly; the configured name stays as written.
   const usedServers = new Set(Object.keys(mcpUsed));
