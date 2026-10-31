@@ -173,8 +173,9 @@ const handlers = {
   skill(a, ctx, io) {
     const name = fill(a.name, ctx).trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
     if (!name) throw new Error('skill action: empty name');
+    if (a.content && paramsUnfilled(a.content, ctx.params)) return { skipped: true, reason: `skill ${name}: text parameter not filled in (ask Claude to draft it, then re-apply)` };
     let content = a.template ? renderTemplate(fs.readFileSync(path.join(TEMPLATES, a.template), 'utf8'), ctx.params) : fill(a.content, ctx);
-    if (!content.trim()) throw new Error(`skill ${name}: empty content (the param was not filled in)`);
+    if (!content.trim()) throw new Error(`skill ${name}: empty content`);
     if (!/^---\r?\n/.test(content)) content = `---\nname: ${name}\ndescription: ${name.replace(/-/g, ' ')}\n---\n\n${content}`;
     const target = path.join(ctx.skillsDir, name, 'SKILL.md');
     return writeManaged(target, content, io, { createdDir: path.join(ctx.skillsDir, name) });
@@ -190,6 +191,7 @@ const handlers = {
   'claude-md.block'(a, ctx, io) {
     const target = expandHome(fill(a.target || '{claudeMd}', ctx));
     const id = a.id || io.recipeId;
+    if (a.content && paramsUnfilled(a.content, ctx.params)) return { skipped: true, reason: 'text parameter not filled in (ask Claude to draft it, then re-apply)', id };
     const body = (a.template ? renderTemplate(fs.readFileSync(path.join(TEMPLATES, a.template), 'utf8'), ctx.params) : fill(a.content, ctx)).trim();
     if (!body) throw new Error(`claude-md.block ${id}: empty content`);
     const start = `<!-- kaizen:start ${id} -->`;
@@ -254,6 +256,16 @@ const handlers = {
 
 function escapeRe(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** True when the content references {params.x} placeholders and every one of them is empty. */
+function paramsUnfilled(content, params) {
+  const refs = [...String(content).matchAll(/\{params\.([a-zA-Z0-9_]+)\}/g)].map((m) => m[1]);
+  if (!refs.length) return false;
+  return refs.every((k) => {
+    const v = params[k];
+    return v === undefined || v === null || (typeof v === 'string' && !v.trim()) || (Array.isArray(v) && !v.length);
+  });
 }
 
 function writeManaged(target, content, io, extra = {}) {

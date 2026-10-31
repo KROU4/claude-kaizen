@@ -428,7 +428,13 @@ export async function main(argv = process.argv.slice(2)) {
     }
     case 'undo': {
       const { cmdUndo } = await import('./lib/apply.mjs');
-      return cmdUndo(args, { pickLang });
+      let measure = null;
+      try {
+        measure = loadMeasure();
+      } catch {
+        /* language falls back to config / en */
+      }
+      return cmdUndo(args, { pickLang: (flags) => pickLang(flags, measure) });
     }
     case 'status':
       return cmdStatus();

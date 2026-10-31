@@ -34,14 +34,9 @@ function tailLines(file, maxBytes) {
     const start = Math.max(0, size - maxBytes);
     const buf = Buffer.alloc(size - start);
     let off = 0;
-    while (off < buf.length) {
-      const n = fs.readSync(fd, buf, off, buf.length - off, start + off);
-      if (n <= 0) break;
-      off += n;
-    }
+    for (let n = 1; n > 0 && off < buf.length; off += n) n = fs.readSync(fd, buf, off, buf.length - off, start + off);
     const lines = buf.subarray(0, off).toString('utf8').split('\n');
-    if (start > 0) lines.shift();
-    return lines;
+    return start > 0 ? lines.slice(1) : lines;
   } catch {
     return [];
   } finally {
@@ -93,6 +88,7 @@ function selftest() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kaizen-vbs-'));
   let failed = 0;
   const check = (name, ok, why) => { console.log(ok ? `ok ${name}` : `FAIL ${name} ${why}`); if (!ok) failed++; };
+  const ev = (payload, mode = 'block', re = DEFAULT_RE) => evaluate(payload, mode, re); // independent of the installed parameters
   const user = (text) => JSON.stringify({ type: 'user', message: { role: 'user', content: text } });
   const asst = (...blocks) => JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: blocks } });
   const use = (name, input) => ({ type: 'tool_use', id: 't1', name, input });
@@ -102,20 +98,20 @@ function selftest() {
   let n = 0;
   const transcript = (...lines) => { const f = path.join(tmp, `t${n++}.jsonl`); fs.writeFileSync(f, lines.join('\n') + '\n'); return { transcript_path: f }; };
   try {
-    const r1 = evaluate(transcript(user('fix it'), edit('C:\\p\\src\\a.ts'), result, edit('/p/b.py')));
+    const r1 = ev(transcript(user('fix it'), edit('C:\\p\\src\\a.ts'), result, edit('/p/b.py')));
     check('code edited, no checks -> block', r1 && r1.decision === 'block' && r1.reason.includes('2 source file(s)') && r1.reason.includes('a.ts, b.py'), JSON.stringify(r1));
-    check('tests ran -> silent', evaluate(transcript(user('fix'), edit('/p/a.ts'), result, bash('cd p && npm test -- --run'))) === null, 'expected silence');
-    check('only docs/config edited -> silent', evaluate(transcript(user('docs'), edit('/p/README.md'), edit('/p/package.json'), edit('/p/x.yaml'))) === null, 'expected silence');
-    check('stop_hook_active -> silent', evaluate({ ...transcript(user('fix'), edit('/p/a.ts')), stop_hook_active: true }) === null, 'expected silence');
-    check('new prompt resets the turn', evaluate(transcript(user('one'), edit('/p/a.ts'), user('what is this?'), asst({ type: 'text', text: 'an answer' }))) === null, 'expected silence');
-    check('earlier test run does not cover a new edit', evaluate(transcript(user('one'), bash('pytest -q'), user('two'), edit('/p/a.py')))?.decision === 'block', 'expected block');
+    check('tests ran -> silent', ev(transcript(user('fix'), edit('/p/a.ts'), result, bash('cd p && npm test -- --run'))) === null, 'expected silence');
+    check('only docs/config edited -> silent', ev(transcript(user('docs'), edit('/p/README.md'), edit('/p/package.json'), edit('/p/x.yaml'))) === null, 'expected silence');
+    check('stop_hook_active -> silent', ev({ ...transcript(user('fix'), edit('/p/a.ts')), stop_hook_active: true }) === null, 'expected silence');
+    check('new prompt resets the turn', ev(transcript(user('one'), edit('/p/a.ts'), user('what is this?'), asst({ type: 'text', text: 'an answer' }))) === null, 'expected silence');
+    check('earlier test run does not cover a new edit', ev(transcript(user('one'), bash('pytest -q'), user('two'), edit('/p/a.py')))?.decision === 'block', 'expected block');
     const side = JSON.stringify({ type: 'assistant', isSidechain: true, message: { role: 'assistant', content: [use('Edit', { file_path: '/p/a.ts' })] } });
-    check('sidechain edits ignored', evaluate(transcript(user('go'), side)) === null, 'expected silence');
-    check('remind mode', evaluate(transcript(user('fix'), edit('/p/a.go')), 'remind')?.systemMessage?.includes('1 file(s)'), 'expected systemMessage');
-    check('custom testPattern', evaluate(transcript(user('x'), edit('/p/a.rs'), bash('make verify')), 'block', compile('make verify')) === null, 'expected silence');
+    check('sidechain edits ignored', ev(transcript(user('go'), side)) === null, 'expected silence');
+    check('remind mode', ev(transcript(user('fix'), edit('/p/a.go')), 'remind')?.systemMessage?.includes('1 file(s)'), 'expected systemMessage');
+    check('custom testPattern', ev(transcript(user('x'), edit('/p/a.rs'), bash('make verify')), 'block', compile('make verify')) === null, 'expected silence');
     check('invalid testPattern falls back', compile('([').test('pytest'), 'expected default pattern');
-    check('missing transcript -> silent', evaluate({ transcript_path: path.join(tmp, 'nope.jsonl') }) === null && evaluate({}) === null, 'expected silence');
-    check('garbage lines tolerated', evaluate(transcript('not json', '{"type":"user"', user('x'), edit('/p/a.ts')))?.decision === 'block', 'expected block');
+    check('missing transcript -> silent', ev({ transcript_path: path.join(tmp, 'nope.jsonl') }) === null && ev({}) === null, 'expected silence');
+    check('garbage lines tolerated', ev(transcript('not json', '{"type":"user"', user('x'), edit('/p/a.ts')))?.decision === 'block', 'expected block');
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

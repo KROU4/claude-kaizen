@@ -14,7 +14,8 @@ const MODE_RAW = '{{mode}}';
 const BRANCHES_RAW = '{{protectedBranches}}';
 const unset = (v) => typeof v !== 'string' || v.startsWith('{' + '{') || v.trim() === '';
 const MODE = !unset(MODE_RAW) && MODE_RAW.trim() === 'ask' ? 'ask' : 'deny';
-const PROTECTED = (unset(BRANCHES_RAW) ? 'main,master,production' : BRANCHES_RAW).split(',').map((s) => s.trim()).filter(Boolean);
+const BRANCH_LIST = (unset(BRANCHES_RAW) ? '' : BRANCHES_RAW).split(',').map((s) => s.trim()).filter(Boolean);
+const PROTECTED = BRANCH_LIST.length ? BRANCH_LIST : ['main', 'master', 'production'];
 
 const WELL_KNOWN = new Set(['node_modules', 'dist', 'build', 'out', 'target', 'coverage', 'tmp', 'temp', '.tmp', '.cache', '.next', '.nuxt', '.output', '.svelte-kit', '.turbo', '.parcel-cache', '.angular', '.gradle', '.terraform', '.nyc_output', '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache', '.tox', '.venv', 'venv', 'obj']);
 const SYSTEM_DIR = /^(?:bin|boot|dev|etc|lib|lib32|lib64|proc|root|sbin|sys|usr|var|windows|program files|program files \(x86\)|programdata|system|library|applications)$/i;
@@ -186,7 +187,7 @@ function evaluate(payload, ctx = {}) {
 function selftest() {
   const bad = [
     'rm -rf /', 'rm -rf ~', 'sudo rm -fr $HOME/', 'rm -rf *', 'rm -rf .', 'rm -rf C:\\', 'rm -rf /usr/lib', 'rm -rf foo', 'git reset --hard HEAD~1', 'git clean -fdx',
-    'git checkout -- .', 'git push --force origin main', 'git push -f', 'git push origin +master', 'git branch -D old', 'psql -c "DROP TABLE users"',
+    'git checkout -- .', `git push --force origin ${PROTECTED[0]}`, 'git push -f', `git push origin +${PROTECTED[0]}`, 'git branch -D old', 'psql -c "DROP TABLE users"',
     'echo "TRUNCATE TABLE a;" | mysql', 'del /s /q C:\\', 'rmdir /s /q D:\\', 'format D:', 'mkfs.ext4 /dev/sdb1', 'dd if=/dev/zero of=/dev/sda', 'chmod -R 777 /',
     'cat x > /dev/sda', 'bash -c "rm -rf /"', 'ls && rm -rf ~/',
   ];

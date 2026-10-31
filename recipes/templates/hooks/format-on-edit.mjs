@@ -92,15 +92,15 @@ function run(step, cwd, deadline) {
   spawnSync(q(step.bin), step.args.map(q), { cwd, timeout: Math.max(500, deadline - Date.now()), stdio: 'ignore', shell, windowsHide: true });
 }
 
-function format(payload) {
+function format(payload, opts = {}) {
   const raw = payload.tool_input && payload.tool_input.file_path;
   if (typeof raw !== 'string' || !raw) return;
-  const file = path.resolve(payload.cwd || process.cwd(), raw);
+  const file = path.resolve(typeof payload.cwd === 'string' ? payload.cwd : process.cwd(), raw);
   let st;
   try { st = fs.statSync(file); } catch { return; }
   if (!st.isFile() || st.size > 2 * 1024 * 1024) return;
   const deadline = Date.now() + TIMEOUT_MS;
-  for (const step of plan(file)) run(step, path.dirname(file), deadline);
+  for (const step of plan(file, opts)) run(step, path.dirname(file), deadline);
 }
 
 function selftest() {
@@ -123,7 +123,7 @@ function selftest() {
     const py = mk('py/p.py', 'x');
     mk('py2/pyproject.toml', '[tool.ruff]\n');
     const py2 = mk('py2/q.py', 'x');
-    const opts = (...names) => ({ stopAt: tmp, which: (n) => (names.includes(n) ? `/bin/${n}` : null) });
+    const opts = (...names) => ({ stopAt: tmp, formatter: 'auto', which: (n) => (names.includes(n) ? `/bin/${n}` : null) });
     const first = (steps) => JSON.stringify(steps[0] || null);
     const p1 = plan(js, opts());
     check('prettier: local install', p1.length === 1 && p1[0].bin === process.execPath && p1[0].args.includes('--write'), first(p1));
@@ -139,8 +139,8 @@ function selftest() {
     check('unknown extension -> skip', plan(mk('notes.txt'), opts('ruff', 'gofmt', 'npx')).length === 0, 'expected no steps');
     check('formatter=none -> skip', plan(js, { ...opts(), formatter: 'none' }).length === 0, 'expected no steps');
     check('forced black ignores .js', plan(js, { ...opts('black'), formatter: 'black' }).length === 0, 'expected no steps');
-    format({ tool_input: { file_path: path.join(tmp, 'missing.js') } });
-    format({ tool_input: { file_path: js }, cwd: tmp });
+    format({ tool_input: { file_path: path.join(tmp, 'missing.js') } }, { formatter: 'auto' });
+    format({ tool_input: { file_path: js }, cwd: tmp }, { formatter: 'auto' });
     check('end-to-end run through a fake local prettier', fs.readFileSync(js, 'utf8') === 'formatted', 'file was not rewritten');
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
