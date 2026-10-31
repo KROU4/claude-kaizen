@@ -596,7 +596,8 @@ function collect() {
   const on = cards.filter((c) => c.cb.checked);
   return {
     version: 1, submittedAt: new Date().toISOString(), lang: D.lang || L,
-    selected: on.filter((c) => !c.advice).map(read),
+    /* explicit false: map() would pass the index as `persist` and drop secrets from every card after the first */
+    selected: on.filter((c) => !c.advice).map((c) => read(c, false)),
     discuss: on.filter((c) => c.advice).map((c) => c.r.id),
     notes: $('notes').value.trim()
   };

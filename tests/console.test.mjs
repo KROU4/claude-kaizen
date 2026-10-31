@@ -180,6 +180,18 @@ describe('console/index.html', () => {
     assert.equal([...html.matchAll(/setItem\(/g)].length, 1);
   });
 
+  it('keeps secret parameters in the submission whatever the position of their recipe', () => {
+    // read(c, persist) must never be handed to map() directly: map passes the index as `persist`,
+    // which dropped the token of every selected recipe after the first one
+    assert.doesNotMatch(html, /\.map\(read\)/);
+    const collect = html.slice(html.indexOf('selected: on.filter'), html.indexOf('selected: on.filter') + 120);
+    assert.match(collect, /read\(c, false\)/);
+    // behavioural check of the same logic: the second card keeps its secret field
+    const read = (c, persist) => ({ id: c.id, params: Object.fromEntries(c.fields.filter((f) => !(persist && f.secret)).map((f) => [f.name, f.get()])) });
+    const cards = [{ id: 'a', fields: [] }, { id: 'n', fields: [{ name: 'telegramBotToken', secret: true, get: () => 'T' }] }];
+    assert.equal(cards.map((c) => read(c, false))[1].params.telegramBotToken, 'T');
+  });
+
   it('only uses translation keys that the locales or its own fallback table define', () => {
     const used = [...new Set([...html.matchAll(/\bt\('([a-z_]+)'\)/g)].map((m) => m[1]))];
     assert.ok(used.length > 15, 'the page should use many translated labels');
