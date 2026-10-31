@@ -277,6 +277,7 @@ const EN = {
   footer: 'Local only: this page runs on your machine; nothing is uploaded.',
   footer_artifact: 'This page is a private claude.ai artifact: your choices and parameters are stored in its database until Claude reads them. Do not enter secrets here.',
   secret_in_chat: 'Claude will ask for this in the chat',
+  opt_true: 'yes', opt_false: 'no', opt_deny: 'block', opt_ask: 'ask me',
   copy_json: 'Copy choices as JSON', copied: 'Copied. Paste it into Claude Code.',
   offline_hint: "The page could not reach Claude Code's storage. Copy the JSON below and paste it into the chat.",
   cat_permissions: 'Permissions', cat_hooks: 'Hooks', cat_skills: 'Skills', cat_agents: 'Subagents',
@@ -291,7 +292,8 @@ const RU = { /* fallbacks for the optional keys, used only when lang is ru */
   stat_sessions: 'Сессии', stat_days: 'Дни', stat_prompts: 'Запросы', stat_recommendations: 'Рекомендации',
   source: 'Источник', discuss: 'Отметьте, чтобы обсудить это с Claude',
   footer_artifact: 'Страница — приватный артефакт claude.ai: ваш выбор и параметры хранятся в его базе данных, пока Claude их не прочитает. Не вводите здесь секреты.',
-  secret_in_chat: 'Claude спросит это в чате'
+  secret_in_chat: 'Claude спросит это в чате',
+  opt_true: 'да', opt_false: 'нет', opt_deny: 'блокировать', opt_ask: 'спрашивать меня'
 };
 
 /* demo dataset: used when the file is opened without data */
@@ -419,7 +421,9 @@ function makeField(p, id) {
       if (Array.isArray(v)) ctl.querySelectorAll('input').forEach((i) => { i.checked = v.map(str).includes(i.value); });
     };
   } else if (p.type === 'select') {
-    ctl = h('select', { id, class: 'in' }, opts.map((o) => h('option', { value: o, text: o, selected: o === str(p.value) })));
+    /* the value stays raw ("true", "deny"); only the visible text is translated when a string exists */
+    const optText = (o) => (I['opt_' + o] || (L === 'ru' && RU['opt_' + o]) || EN['opt_' + o] || o);
+    ctl = h('select', { id, class: 'in' }, opts.map((o) => h('option', { value: o, text: optText(o), selected: o === str(p.value) })));
     get = () => ctl.value;
     set = (v) => { if (opts.includes(str(v))) ctl.value = str(v); };
   } else if (p.secret) {
@@ -517,6 +521,8 @@ const rankOf = (c) => { const i = ORDER.indexOf(c); return i < 0 ? 99 : i; };
 const cats = [...new Set(cards.map((c) => c.cat))].sort((a, b) => rankOf(a) - rankOf(b));
 
 $('h1').textContent = t('title');
+document.title = t('title');
+document.documentElement.lang = L;
 $('sub').replaceChildren(...rich(t('subtitle', { sessions: num(stats.sessions), days: num(stats.days) })));
 $('ft').textContent = t(mode === 'artifact' ? 'footer_artifact' : 'footer');
 $('demo').hidden = !demo;
