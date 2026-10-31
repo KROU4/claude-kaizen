@@ -20,7 +20,8 @@ const INCLUDE_GIT = unset(GIT_RAW) || !/^(?:false|0|no|off)$/i.test(GIT_RAW.trim
 const configDir = () => process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
 
 function git(args, cwd) {
-  const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 3000, windowsHide: true, maxBuffer: 1 << 20 });
+  // core.quotePath=false keeps non-ASCII (e.g. Cyrillic) file names readable instead of octal escapes.
+  const r = spawnSync('git', ['-c', 'core.quotePath=false', ...args], { cwd, encoding: 'utf8', timeout: 3000, windowsHide: true, maxBuffer: 1 << 20 });
   return r.status === 0 ? String(r.stdout) : null;
 }
 

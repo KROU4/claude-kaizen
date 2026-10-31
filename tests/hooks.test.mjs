@@ -255,3 +255,79 @@ test('format-on-edit: a shell file is formatted by shfmt when it is on PATH and 
   assert.equal(go(target, path.dirname(process.execPath)), 'x', 'no shfmt on PATH: nothing happens');
   assert.equal(go(other, `${bin}${path.delimiter}${path.dirname(process.execPath)}`), 'x', 'shfmt does not touch other file types');
 });
+
+// A fake CLI that appends "<cwd>|<args>" to the file named by KZ_LOG, so tests see exactly how a formatter was called.
+function fakeTool(name) {
+  const bin = fs.mkdtempSync(path.join(tmp, 'fake-'));
+  if (process.platform === 'win32') fs.writeFileSync(path.join(bin, `${name}.cmd`), '@echo off\r\n>> "%KZ_LOG%" echo %CD%^|%*\r\n');
+  else fs.writeFileSync(path.join(bin, name), '#!/bin/sh\nprintf "%s|%s\\n" "$PWD" "$*" >> "$KZ_LOG"\n', { mode: 0o755 });
+  return bin;
+}
+function runFormatter(script, bin, file, cwd) {
+  const log = path.join(bin, 'calls.log');
+  const r = spawnSync(process.execPath, [script], { input: JSON.stringify({ tool_input: { file_path: file }, cwd }), encoding: 'utf8', timeout: 20000, windowsHide: true, env: { ...process.env, PATH: `${bin}${path.delimiter}${path.dirname(process.execPath)}`, KZ_LOG: log } });
+  assert.equal(r.status, 0, r.stderr);
+  // .cmd shims are started through cmd.exe with every argument quoted: drop the quotes before comparing
+  return fs.existsSync(log) ? fs.readFileSync(log, 'utf8').replace(/"/g, '').split(/\r?\n/).filter(Boolean) : [];
+}
+
+test('format-on-edit: Python gets `ruff format` only, never a lint autofix that deletes unused imports', () => {
+  for (const formatter of ['auto', 'ruff']) {
+    const bin = fakeTool('ruff');
+    const file = path.join(bin, 'a.py');
+    fs.writeFileSync(file, 'import os\n');
+    const calls = runFormatter(render('format-on-edit.mjs', { formatter, timeoutSec: '20' }), bin, file, bin);
+    assert.equal(calls.length, 1, `${formatter}: ${calls.join(' / ')}`);
+    assert.match(calls[0], /\|format /);
+    assert.doesNotMatch(calls.join('\n'), /check|--fix/);
+  }
+});
+
+test('format-on-edit: dotnet format runs in the project directory with a relative --include path', () => {
+  const bin = fakeTool('dotnet');
+  const proj = path.join(bin, 'app');
+  fs.mkdirSync(path.join(proj, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(proj, 'app.csproj'), '<Project/>');
+  const file = path.join(proj, 'src', 'A.cs');
+  fs.writeFileSync(file, 'class A{}');
+  const calls = runFormatter(render('format-on-edit.mjs', { formatter: 'dotnet format', timeoutSec: '20' }), bin, file, proj);
+  assert.equal(calls.length, 1, calls.join(' / '));
+  const [cwd, args] = calls[0].split('|');
+  assert.equal(fs.realpathSync(cwd), fs.realpathSync(proj));
+  assert.match(args, /^format .*app\.csproj --include src[\\/]A\.cs$/);
+});
+
+test('format-on-edit: timeoutSec cannot exceed the 30 s hook timeout (the rendered selftest checks the cap)', () => {
+  const script = render('format-on-edit.mjs', { formatter: 'auto', timeoutSec: '120' });
+  const r = spawnSync(process.execPath, [script, '--selftest'], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /ok timeout is capped below the hook timeout/);
+});
+
+test('session-context: non-ASCII file names are shown as written, not as octal escapes', (t) => {
+  if (spawnSync('git', ['--version'], { windowsHide: true }).status !== 0) return t.skip('git is not installed');
+  const repo = fs.mkdtempSync(path.join(tmp, 'repo-'));
+  assert.equal(spawnSync('git', ['init', '-q'], { cwd: repo, windowsHide: true }).status, 0);
+  fs.writeFileSync(path.join(repo, 'файл с пробелом.txt'), 'x');
+  const script = render('session-context.mjs', { maxChars: '1500', includeGit: 'true' });
+  const out = run(script, { hook_event_name: 'SessionStart', session_id: 'nonascii', cwd: repo });
+  assert.ok(out && out.additionalContext.includes('файл с пробелом.txt'), JSON.stringify(out));
+  assert.doesNotMatch(out.additionalContext, /\\\d{3}/);
+});
+
+test('long-command-nudge: PowerShell calls are nudged like Bash ones; wrapped or short ones are not', () => {
+  const script = render('long-command-nudge.mjs', {});
+  const st = spawnSync(process.execPath, [script, '--selftest'], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+  assert.equal(st.status, 0, st.stdout + st.stderr);
+  assert.ok(!/^FAIL/m.test(st.stdout), st.stdout);
+  for (const c of ['npm run dev', 'Start-Sleep -Seconds 300', 'while ($true) { Get-Date }', 'tsc --watch', 'Get-Content app.log -Wait']) {
+    const out = run(script, shell('PowerShell', c));
+    assert.ok(out && /run_in_background/.test(out.additionalContext), c);
+    assert.equal('permissionDecision' in out, false, 'a nudge never decides permissions');
+  }
+  for (const c of ['Start-Sleep -Seconds 5', 'Start-Job { npm run dev }', 'npm run build', 'npm run dev']) {
+    const payload = shell('PowerShell', c);
+    if (c === 'npm run dev') payload.tool_input.run_in_background = true;
+    assert.equal(run(script, payload), null, c);
+  }
+});

@@ -1,13 +1,13 @@
 // Kaizen hook: format-on-edit
 // What it does: after Claude edits a file, formats that one file with the project's own tooling: prettier (only
-//   when installed in a local node_modules, or when the project has a prettier config and npx exists), ruff or
+//   when installed in a local node_modules, or when the project has a prettier config and npx exists), ruff format (no lint autofixes that could delete code) or
 //   black for Python, gofmt, rustfmt. When a language-specific formatter is chosen, it also runs dotnet format (C#),
 //   rubocop -a (Ruby), php-cs-fixer, swiftformat, ktlint -F (Kotlin), google-java-format -i, terraform fmt and
 //   shfmt -w, each only if the tool is on PATH. Silent, never blocks; skips missing files, files over 2 MB and unknown types.
 // Registered for: PostToolUse, matcher "Edit|Write|MultiEdit".
 // Parameters (substituted by Kaizen at install time): formatter (auto|prettier|ruff|black|gofmt|rustfmt|dotnet format|
 //   rubocop|php-cs-fixer|swiftformat|ktlint|google-java-format|terraform fmt|shfmt|none),
-//   timeoutSec (overall limit per edit, default 20).
+//   timeoutSec (overall limit per edit, default 20, capped at 25 s: the hook is registered with a 30 s timeout).
 // Remove: delete the PostToolUse entry that runs this file from settings.json, or run `kaizen undo`.
 // Self-test: node format-on-edit.mjs --selftest
 import { spawnSync } from 'node:child_process';
@@ -19,7 +19,7 @@ const FORMATTER_RAW = '{{formatter}}';
 const TIMEOUT_RAW = '{{timeoutSec}}';
 const unset = (v) => typeof v !== 'string' || v.startsWith('{' + '{') || v.trim() === '';
 const FORMATTER = unset(FORMATTER_RAW) ? 'auto' : FORMATTER_RAW.trim().toLowerCase();
-const TIMEOUT_MS = Math.min(120, Math.max(1, Number(unset(TIMEOUT_RAW) ? 20 : TIMEOUT_RAW) || 20)) * 1000;
+const TIMEOUT_MS = Math.min(25, Math.max(1, Number(unset(TIMEOUT_RAW) ? 20 : TIMEOUT_RAW) || 20)) * 1000;
 const PRETTIER_EXT = new Set(['js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'json', 'css', 'scss', 'md', 'yaml', 'yml', 'html', 'vue', 'svelte']);
 const PRETTIER_CONFIGS = ['.prettierrc', '.prettierrc.json', '.prettierrc.yaml', '.prettierrc.yml', '.prettierrc.json5', '.prettierrc.toml', '.prettierrc.js', '.prettierrc.cjs', '.prettierrc.mjs', 'prettier.config.js', 'prettier.config.cjs', 'prettier.config.mjs', 'prettier.config.ts'];
 
@@ -44,7 +44,7 @@ function onPath(name) {
 
 // Formatters that need no project detection: run when chosen explicitly and the binary is on PATH.
 const TOOLS = {
-  'dotnet format': { bin: 'dotnet', exts: ['cs'], args: (f, stopAt) => dotnetArgs(f, stopAt) },
+  'dotnet format': { bin: 'dotnet', exts: ['cs'], args: (f, stopAt) => dotnetStep(f, stopAt) },
   rubocop: { bin: 'rubocop', exts: ['rb', 'rake'], args: (f) => ['-a', f] },
   'php-cs-fixer': { bin: 'php-cs-fixer', exts: ['php'], args: (f) => ['fix', '--quiet', '--no-interaction', f] },
   swiftformat: { bin: 'swiftformat', exts: ['swift'], args: (f) => ['--quiet', f] },
@@ -54,13 +54,14 @@ const TOOLS = {
   shfmt: { bin: 'shfmt', exts: ['sh', 'bash'], args: (f) => ['-w', f] },
 };
 
-// dotnet format works on a project or solution: the nearest .sln (else .csproj) above the file.
-function dotnetArgs(file, stopAt) {
+// dotnet format works on a project or solution: the nearest .sln (else .csproj) above the file. It honours --include
+// only as a path relative to that project directory, so the step runs there and the file is passed relative to it.
+function dotnetStep(file, stopAt) {
   for (const d of ancestors(path.dirname(file), stopAt)) {
     let names = [];
     try { names = fs.readdirSync(d); } catch { /* unreadable directory */ }
     const ws = names.find((n) => n.endsWith('.sln')) || names.find((n) => n.endsWith('.csproj'));
-    if (ws) return ['format', path.join(d, ws), '--include', file];
+    if (ws) return { args: ['format', path.join(d, ws), '--include', path.relative(d, file)], cwd: d };
   }
   return null;
 }
@@ -92,7 +93,7 @@ function pythonSteps(file, which, formatter, stopAt) {
     ruff = which('python3') || which('python') || which('py');
     pre = ['-m', 'ruff'];
   }
-  if (ruff) return [{ bin: ruff, args: [...pre, 'format', file] }, { bin: ruff, args: [...pre, 'check', '--fix', file] }];
+  if (ruff) return [{ bin: ruff, args: [...pre, 'format', file] }];
   const black = formatter !== 'ruff' && which('black');
   return black ? [{ bin: black, args: ['-q', file] }] : [];
 }
@@ -106,8 +107,8 @@ function plan(file, opts = {}) {
   const tool = TOOLS[formatter];
   if (tool) {
     const bin = tool.exts.includes(ext) && which(tool.bin);
-    const args = bin && tool.args(file, opts.stopAt);
-    return args ? [{ bin, args }] : [];
+    const r = bin && tool.args(file, opts.stopAt);
+    return r ? [Array.isArray(r) ? { bin, args: r } : { bin, ...r }] : [];
   }
   const wants = { prettier: 'prettier', ruff: 'python', black: 'python', gofmt: 'go', rustfmt: 'rust' }[formatter];
   if (!kind || formatter === 'none' || (formatter !== 'auto' && wants !== kind)) return [];
@@ -118,7 +119,7 @@ function plan(file, opts = {}) {
 }
 
 function run(step, cwd, deadline) {
-  const opts = { cwd, timeout: Math.max(500, deadline - Date.now()), stdio: 'ignore', windowsHide: true };
+  const opts = { cwd: step.cwd || cwd, timeout: Math.max(500, deadline - Date.now()), stdio: 'ignore', windowsHide: true };
   const all = [step.bin, ...step.args];
   if (!/\.(?:cmd|bat)$/i.test(step.bin)) spawnSync(step.bin, step.args, opts);
   else if (!all.some((a) => /["%^&|<>!]/.test(a))) spawnSync(all.map((a) => `"${a}"`).join(' '), { ...opts, shell: true }); // .cmd shims need cmd.exe
@@ -163,7 +164,7 @@ function selftest() {
     check('prettier: config + npx', plan(ts, opts('npx'))[0]?.args[0] === '--no-install', 'expected npx step');
     check('prettier: config without npx -> skip', plan(ts, opts()).length === 0, 'expected no steps');
     const p5 = plan(py, opts('ruff'));
-    check('python: ruff format then check --fix', p5.length === 2 && p5[0].args[0] === 'format' && p5[1].args.slice(0, 2).join(' ') === 'check --fix', first(p5));
+    check('python: ruff format only, no lint autofix', p5.length === 1 && p5[0].args[0] === 'format' && !JSON.stringify(p5).includes('check'), first(p5));
     check('python: black fallback', plan(py, opts('black'))[0]?.args[0] === '-q', 'expected black');
     check('python: pyproject mentions ruff', plan(py2, opts('python'))[0]?.args.slice(0, 2).join(' ') === '-m ruff', 'expected python -m ruff');
     check('go: gofmt -w', plan(mk('m.go'), opts('gofmt'))[0]?.args[0] === '-w', 'expected gofmt');
@@ -182,7 +183,8 @@ function selftest() {
     check('dotnet format: no project -> skip', plan(cs, { ...opts('dotnet'), formatter: 'dotnet format' }).length === 0, 'expected no steps');
     mk('net/App.csproj', '<Project/>');
     const dn = plan(cs, { ...opts('dotnet'), formatter: 'dotnet format' });
-    check('dotnet format: project found above the file', dn.length === 1 && dn[0].args[0] === 'format' && dn[0].args[1].endsWith('App.csproj') && dn[0].args.at(-1) === cs, first(dn));
+    check('dotnet format: project found above the file', dn.length === 1 && dn[0].args[0] === 'format' && dn[0].args[1].endsWith('App.csproj') && dn[0].args.at(-1) === path.join('src', 'A.cs') && dn[0].cwd === path.join(tmp, 'net'), first(dn));
+    check('timeout is capped below the hook timeout', TIMEOUT_MS <= 25000, String(TIMEOUT_MS));
     check('forced black ignores .js', plan(js, { ...opts('black'), formatter: 'black' }).length === 0, 'expected no steps');
     format({ tool_input: { file_path: path.join(tmp, 'missing.js') } }, { formatter: 'auto' });
     format({ tool_input: { file_path: js }, cwd: tmp }, { formatter: 'auto' });
