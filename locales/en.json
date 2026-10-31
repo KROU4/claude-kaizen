@@ -15,7 +15,7 @@
     "apply_nothing": "Nothing selected to apply.",
     "undo_done": "Reverted {n} change(s) from {id}.",
     "undo_nothing": "Nothing to undo.",
-    "nudge": "Kaizen: {n} new high-impact suggestion(s) found. Run /kaizen to review them.",
+    "nudge": "Kaizen: {n} new high-impact suggestion(s) found. Run /kaizen:start to review them.",
     "unknown_command": "Unknown command: {cmd}. Run `kaizen help`."
   },
   "digest": {

@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { parseArgs } from '../scripts/kaizen.mjs';
-import { loadLocale } from '../scripts/lib/i18n.mjs';
+import { interpolate, loadLocale } from '../scripts/lib/i18n.mjs';
 import { KIT_ROOT, childEnv, cleanupTempDirs, copyTree, makeTempDir, materializeHome, readJson, runCli, snapshotDir, writeJson, writeText } from './helpers.mjs';
 
 const pkg = readJson(path.join(KIT_ROOT, 'package.json'));
@@ -530,7 +530,8 @@ describe('kaizen nudge', () => {
     assert.ok(high > 0);
     const first = cli(home, ['nudge']);
     assert.equal(first.status, 0);
-    assert.equal(JSON.parse(first.stdout).systemMessage, `Kaizen: ${high} new high-impact suggestion(s) found. Run /kaizen to review them.`);
+    assert.equal(JSON.parse(first.stdout).systemMessage, interpolate(loadLocale('en').cli.nudge, { n: high }));
+    assert.match(JSON.parse(first.stdout).systemMessage, new RegExp(`${high} new high-impact`));
     assert.equal(cli(home, ['nudge']).stdout, '');
   });
 
@@ -553,28 +554,60 @@ describe('kaizen nudge', () => {
   });
 });
 
-describe('running from an install path with spaces and non-ASCII characters', () => {
-  /** Copy the parts of the kit the CLI needs into `<tmp>/Kaizen Kit кайдзен` and run its entry point from there. */
-  function copiedKit() {
-    const kit = path.join(makeTempDir('kaizen-kit-'), 'Kaizen Kit кайдзен');
-    for (const dir of ['scripts', 'locales', 'recipes', 'console']) copyTree(path.join(KIT_ROOT, dir), path.join(kit, dir));
-    fs.copyFileSync(path.join(KIT_ROOT, 'package.json'), path.join(kit, 'package.json'));
-    const root = makeTempDir('kaizen-empty-');
-    const env = childEnv({ HOME: root, USERPROFILE: root, CLAUDE_CONFIG_DIR: path.join(root, '.claude'), KAIZEN_STATE_DIR: path.join(root, 'state') });
-    return (args) => {
-      const r = spawnSync(process.execPath, [path.join(kit, 'scripts', 'kaizen.mjs'), ...args], { encoding: 'utf8', env, cwd: root, timeout: 60000, windowsHide: true });
-      return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
-    };
-  }
+/**
+ * Copy the parts of the kit the CLI needs to `<tmp>/<name>/` and return {kit, run(args)} that runs the copy's entry point
+ * with an empty, hermetic home. Used for commands that write into the kit itself and for unusual install paths.
+ */
+function copyKit(name = 'kit') {
+  const kit = path.join(makeTempDir('kaizen-kit-'), name);
+  for (const dir of ['scripts', 'locales', 'recipes', 'console']) copyTree(path.join(KIT_ROOT, dir), path.join(kit, dir));
+  fs.copyFileSync(path.join(KIT_ROOT, 'package.json'), path.join(kit, 'package.json'));
+  const root = makeTempDir('kaizen-empty-');
+  const env = childEnv({ HOME: root, USERPROFILE: root, CLAUDE_CONFIG_DIR: path.join(root, '.claude'), KAIZEN_STATE_DIR: path.join(root, 'state') });
+  const run = (args) => {
+    const r = spawnSync(process.execPath, [path.join(kit, 'scripts', 'kaizen.mjs'), ...args], { encoding: 'utf8', env, cwd: root, timeout: 60000, windowsHide: true });
+    return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
+  };
+  return { kit, run };
+}
 
+describe('running from an install path with spaces and non-ASCII characters', () => {
   it('prints the version (the CLI must recognise that it is the entry point)', () => {
-    const r = copiedKit()(['--version']);
+    const r = copyKit('Kaizen Kit кайдзен').run(['--version']);
     assert.equal(r.stdout.trim(), pkg.version, `no output; stderr: ${r.stderr}`);
   });
 
   it('runs commands: help and doctor', () => {
-    const run = copiedKit();
+    const { run } = copyKit('Kaizen Kit кайдзен');
     assert.match(run(['help']).stdout, /^claude-kaizen /);
     assert.equal(JSON.parse(run(['doctor']).stdout).kitVersion, pkg.version);
+  });
+
+  it('reports errors with a non-zero exit code from there too', () => {
+    const r = copyKit('Kaizen Kit кайдзен').run(['recommend']);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /No measurement found/);
+  });
+});
+
+describe('kaizen docs', () => {
+  it('writes docs/recipes.md into the kit with every recipe and the metric table (run on a copy of the kit)', () => {
+    const { kit, run } = copyKit();
+    const r = run(['docs']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /wrote .*recipes\.md/);
+    const md = fs.readFileSync(path.join(kit, 'docs', 'recipes.md'), 'utf8');
+    const catalog = readJson(path.join(KIT_ROOT, 'recipes', 'catalog.json'));
+    for (const recipe of catalog.recipes) assert.ok(md.includes(`### \`${recipe.id}\``), recipe.id);
+    assert.ok(md.includes('## Metrics recipes can test'));
+    assert.ok(md.includes('| `friction.permissionPrompts` |'));
+  });
+
+  it('is in sync with the committed docs/recipes.md (regenerate with `node scripts/kaizen.mjs docs` after changing the catalog)', () => {
+    const { kit, run } = copyKit();
+    assert.equal(run(['docs']).status, 0);
+    const generated = fs.readFileSync(path.join(kit, 'docs', 'recipes.md'), 'utf8').replace(/\r\n/g, '\n');
+    const committed = fs.readFileSync(path.join(KIT_ROOT, 'docs', 'recipes.md'), 'utf8').replace(/\r\n/g, '\n');
+    assert.equal(generated, committed);
   });
 });

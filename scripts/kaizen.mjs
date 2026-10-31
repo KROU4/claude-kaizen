@@ -455,7 +455,7 @@ function cmdNudge() {
     if (stale && !seen.staleShownAt || (stale && Date.now() - Date.parse(seen.staleShownAt || 0) > weekMs)) {
       writeJsonAtomic(path.join(state, 'nudge-seen.json'), { ...seen, staleShownAt: new Date().toISOString() });
       const lang = cfg.lang || (rec && rec.lang) || 'en';
-      const msg = lang === 'ru' ? 'Kaizen: измерение устарело (старше недели). Запустите /kaizen, чтобы обновить рекомендации.' : 'Kaizen: the last measurement is over a week old. Run /kaizen to refresh recommendations.';
+      const msg = lang === 'ru' ? 'Kaizen: измерение устарело (старше недели). Запустите /kaizen:start, чтобы обновить рекомендации.' : 'Kaizen: the last measurement is over a week old. Run /kaizen:start to refresh recommendations.';
       out(JSON.stringify({ systemMessage: msg }));
       return;
     }
