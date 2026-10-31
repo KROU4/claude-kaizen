@@ -1,0 +1,13 @@
+{
+  "session_id": "11111111-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "underlying_goal": "Deploy the demo service to staging and keep the config clean",
+  "goal_categories": { "deployment": 1, "debugging": 2 },
+  "outcome": "mostly_achieved",
+  "user_satisfaction_counts": { "satisfied": 2, "dissatisfied": 1 },
+  "claude_helpfulness": "very_helpful",
+  "session_type": "multi_task",
+  "friction_counts": { "wrong_approach": 2, "tool_error": 1 },
+  "friction_detail": "Claude put password=hunter2hunter2 into the config file before the user objected, then retried the failing test run twice.",
+  "primary_success": "good_debugging",
+  "brief_summary": "Synthetic facet for fixture session A."
+}

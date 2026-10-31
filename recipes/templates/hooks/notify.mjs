@@ -20,7 +20,7 @@ const CHAT_RAW = '{{telegramChatId}}';
 const MIN_RAW = '{{minTurnSeconds}}';
 const unset = (v) => typeof v !== 'string' || v.startsWith('{' + '{') || v.trim() === '';
 const CFG = {
-  channel: ['os', 'telegram', 'both'].includes(String(CHANNEL_RAW).trim()) ? CHANNEL_RAW.trim() : 'os',
+  channel: ['os', 'telegram', 'both'].find((c) => c === String(CHANNEL_RAW).trim().toLowerCase()) || 'os',
   token: unset(TOKEN_RAW) ? '' : TOKEN_RAW.trim(),
   chat: unset(CHAT_RAW) ? '' : CHAT_RAW.trim(),
   minTurn: unset(MIN_RAW) || Number.isNaN(Number(MIN_RAW)) ? 45 : Math.max(0, Number(MIN_RAW)),

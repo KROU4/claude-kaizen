@@ -1,0 +1,13 @@
+{
+  "session_id": "22222222-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  "underlying_goal": "Refactor the config loader and update the readme",
+  "goal_categories": { "refactoring": 1, "documentation": 1 },
+  "outcome": "fully_achieved",
+  "user_satisfaction_counts": { "frustrated": 1, "likely_satisfied": 1 },
+  "claude_helpfulness": "essential",
+  "session_type": "iterative_refinement",
+  "friction_counts": { "wrong_approach": 1, "excessive_asks": 2 },
+  "friction_detail": "Claude asked for confirmation on every small edit.",
+  "primary_success": "multi_file_changes",
+  "brief_summary": "Synthetic facet for fixture session B."
+}

@@ -91,13 +91,22 @@ function fillDeep(value, ctx) {
   return value;
 }
 
-/** Template files use {{param}} placeholders. Arrays join with commas. */
-export function renderTemplate(text, params) {
+/**
+ * Template files use {{param}} placeholders. Arrays join with commas.
+ * In JavaScript templates the placeholders sit inside single-quoted string
+ * literals, so values are escaped for that context (`\`, `'`, newlines).
+ */
+export function renderTemplate(text, params, { js = false } = {}) {
   return text.replace(/\{\{([a-zA-Z0-9_]+)\}\}/g, (m, k) => {
     const v = params[k];
     if (v === undefined || v === null) return m; // leave unreplaced; scripts fall back to defaults
-    return Array.isArray(v) ? v.join(',') : String(v);
+    const str = Array.isArray(v) ? v.join(',') : String(v);
+    return js ? str.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\r?\n/g, '\\n') : str;
   });
+}
+
+function renderTemplateFile(template, params) {
+  return renderTemplate(fs.readFileSync(path.join(TEMPLATES, template), 'utf8'), params, { js: /\.(mjs|cjs|js)$/.test(template) });
 }
 
 function hookIdentity(h) {
@@ -166,7 +175,7 @@ const handlers = {
 
   file(a, ctx, io) {
     const target = expandHome(fill(a.target, ctx));
-    const content = a.template ? renderTemplate(fs.readFileSync(path.join(TEMPLATES, a.template), 'utf8'), ctx.params) : fill(a.content, ctx);
+    const content = a.template ? renderTemplateFile(a.template, ctx.params) : fill(a.content, ctx);
     return writeManaged(target, content, io, { executable: !!a.executable });
   },
 
@@ -174,7 +183,7 @@ const handlers = {
     const name = fill(a.name, ctx).trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
     if (!name) throw new Error('skill action: empty name');
     if (a.content && paramsUnfilled(a.content, ctx.params)) return { skipped: true, reason: `skill ${name}: text parameter not filled in (ask Claude to draft it, then re-apply)` };
-    let content = a.template ? renderTemplate(fs.readFileSync(path.join(TEMPLATES, a.template), 'utf8'), ctx.params) : fill(a.content, ctx);
+    let content = a.template ? renderTemplateFile(a.template, ctx.params) : fill(a.content, ctx);
     if (!content.trim()) throw new Error(`skill ${name}: empty content`);
     if (!/^---\r?\n/.test(content)) content = `---\nname: ${name}\ndescription: ${name.replace(/-/g, ' ')}\n---\n\n${content}`;
     const target = path.join(ctx.skillsDir, name, 'SKILL.md');
@@ -183,7 +192,7 @@ const handlers = {
 
   agent(a, ctx, io) {
     const name = fill(a.name, ctx).trim();
-    const content = a.template ? renderTemplate(fs.readFileSync(path.join(TEMPLATES, a.template), 'utf8'), ctx.params) : fill(a.content, ctx);
+    const content = a.template ? renderTemplateFile(a.template, ctx.params) : fill(a.content, ctx);
     const target = path.join(ctx.agentsDir, `${name}.md`);
     return writeManaged(target, content, io);
   },
@@ -192,7 +201,7 @@ const handlers = {
     const target = expandHome(fill(a.target || '{claudeMd}', ctx));
     const id = a.id || io.recipeId;
     if (a.content && paramsUnfilled(a.content, ctx.params)) return { skipped: true, reason: 'text parameter not filled in (ask Claude to draft it, then re-apply)', id };
-    const body = (a.template ? renderTemplate(fs.readFileSync(path.join(TEMPLATES, a.template), 'utf8'), ctx.params) : fill(a.content, ctx)).trim();
+    const body = (a.template ? renderTemplateFile(a.template, ctx.params) : fill(a.content, ctx)).trim();
     if (!body) throw new Error(`claude-md.block ${id}: empty content`);
     const start = `<!-- kaizen:start ${id} -->`;
     const end = `<!-- kaizen:end ${id} -->`;

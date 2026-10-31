@@ -147,7 +147,7 @@
       "params": [ { "name": "maxChars", "type": "text", "default": "1500", "label": { "en": "Max characters injected", "ru": "Максимум символов" } }, { "name": "includeGit", "type": "select", "options": ["true", "false"], "default": "true", "label": { "en": "Include git summary", "ru": "Включать сводку git" } } ],
       "actions": [
         { "type": "file", "template": "hooks/session-context.mjs", "target": "{kaizenHome}/hooks/session-context.mjs" },
-        { "type": "settings.hook", "event": "SessionStart", "matcher": "startup|resume|clear|compact", "command": "{node} \"{kaizenHome}/hooks/session-context.mjs\"", "timeout": 10 }
+        { "type": "settings.hook", "event": "SessionStart", "matcher": "startup|resume|clear|compact|fork", "command": "{node} \"{kaizenHome}/hooks/session-context.mjs\"", "timeout": 10 }
       ]
     },
     {
@@ -166,7 +166,7 @@
         { "type": "file", "template": "hooks/precompact-handoff.mjs", "target": "{kaizenHome}/hooks/precompact-handoff.mjs" },
         { "type": "settings.hook", "event": "PreCompact", "matcher": "auto|manual", "command": "{node} \"{kaizenHome}/hooks/precompact-handoff.mjs\"", "timeout": 15 },
         { "type": "file", "template": "hooks/session-context.mjs", "target": "{kaizenHome}/hooks/session-context.mjs" },
-        { "type": "settings.hook", "event": "SessionStart", "matcher": "compact|resume", "command": "{node} \"{kaizenHome}/hooks/session-context.mjs\"", "timeout": 10 }
+        { "type": "settings.hook", "event": "SessionStart", "matcher": "compact|resume|fork", "command": "{node} \"{kaizenHome}/hooks/session-context.mjs\"", "timeout": 10 }
       ],
       "source": "coleam00/claude-memory-compiler PreCompact safety net"
     },
@@ -183,7 +183,7 @@
       "when": { "all": [ { "any": [ { "metric": "tools.slowCommandsTotal", "gte": 20 }, { "metric": "friction.timeouts", "gte": 10 } ] }, { "not": { "metric": "context.hookCommandsText", "includes": "long-command-nudge" } } ] },
       "actions": [
         { "type": "file", "template": "hooks/long-command-nudge.mjs", "target": "{kaizenHome}/hooks/long-command-nudge.mjs" },
-        { "type": "settings.hook", "event": "PreToolUse", "matcher": "Bash", "command": "{node} \"{kaizenHome}/hooks/long-command-nudge.mjs\"", "timeout": 5 }
+        { "type": "settings.hook", "event": "PreToolUse", "matcher": "Bash|PowerShell", "command": "{node} \"{kaizenHome}/hooks/long-command-nudge.mjs\"", "timeout": 5 }
       ]
     },
     {

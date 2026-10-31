@@ -15,7 +15,7 @@ import path from 'node:path';
 const MODE_RAW = '{{mode}}';
 const PATTERN_RAW = '{{testPattern}}';
 const unset = (v) => typeof v !== 'string' || v.startsWith('{' + '{') || v.trim() === '';
-const MODE = !unset(MODE_RAW) && MODE_RAW.trim() === 'remind' ? 'remind' : 'block';
+const MODE = !unset(MODE_RAW) && MODE_RAW.trim().toLowerCase() === 'remind' ? 'remind' : 'block';
 const DEFAULT_RE = /\b(?:pytest|unittest|tox|nox|(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:test|lint|typecheck|check)|vitest|jest|mocha|playwright\s+test|go\s+(?:test|vet)|cargo\s+(?:test|clippy|check)|dotnet\s+test|mvn\s+(?:\S+\s+)*(?:test|verify)|gradlew?\s+(?:test|check)|phpunit|rspec|mix\s+test|make\s+(?:test|check|lint)|node\s+--test|ruff|eslint|tsc|mypy|pyright|flake8|pylint|golangci-lint|biome)\b/i;
 const CODE_EXT = /\.(?:js|jsx|ts|tsx|mjs|cjs|py|go|rs|java|kt|cs|rb|php|swift|c|cpp|h|vue|svelte|sql|sh|ps1)$/i;
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);

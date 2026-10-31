@@ -1,0 +1,12 @@
+{
+  "session_id": "33333333-cccc-4ccc-8ccc-cccccccccccc",
+  "underlying_goal": "Scaffold a Go importer",
+  "goal_categories": { "scaffolding": 1 },
+  "outcome": "fully_achieved",
+  "user_satisfaction_counts": { "satisfied": 1 },
+  "claude_helpfulness": "very_helpful",
+  "session_type": "single_task",
+  "friction_counts": {},
+  "primary_success": "fast_accurate_search",
+  "brief_summary": "Synthetic facet for fixture session C."
+}

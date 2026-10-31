@@ -12,7 +12,7 @@ import { spawnSync } from 'node:child_process';
 const MODE_RAW = '{{mode}}';
 const BRANCHES_RAW = '{{protectedBranches}}';
 const unset = (v) => typeof v !== 'string' || v.startsWith('{' + '{') || v.trim() === '';
-const MODE = !unset(MODE_RAW) && MODE_RAW.trim() === 'ask' ? 'ask' : 'deny';
+const MODE = !unset(MODE_RAW) && MODE_RAW.trim().toLowerCase() === 'ask' ? 'ask' : 'deny';
 const BRANCH_LIST = (unset(BRANCHES_RAW) ? '' : BRANCHES_RAW).split(',').map((s) => s.trim()).filter(Boolean);
 const PROTECTED = BRANCH_LIST.length ? BRANCH_LIST : ['main', 'master', 'production'];
 
