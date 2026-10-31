@@ -62,10 +62,10 @@ function selftest() {
     model: { display_name: 'Opus' }, context_window: { used_percentage: 42 }, cost: { total_cost_usd: 1.234 }, workspace: { current_dir: '/w/p' },
     worktree: { branch: 'feat/login' }, rate_limits: { five_hour: { used_percentage: 31.6 }, seven_day: { used_percentage: 12 } },
   };
-  const line = render(full, on, noGit);
+  const line = render(full, on, noGit, true);
   check('full line', plain(line) === 'Opus │ ctx 42% ████░░░░░░ │ $1.23 │ ⎇ feat/login │ 5h 32% · 7d 12%', plain(line));
   check('single line', !/[\r\n]/.test(line), 'contains a newline');
-  const colorOf = (pct) => render({ context_window: { used_percentage: pct } }, on, () => '').match(/\u001b\[(\d+)m/)?.[1];
+  const colorOf = (pct) => render({ context_window: { used_percentage: pct } }, on, () => '', true).match(/\u001b\[(\d+)m/)?.[1];
   check('colors by threshold', colorOf(49) === '32' && colorOf(50) === '33' && colorOf(79) === '33' && colorOf(80) === '31' && colorOf(100) === '31', [49, 50, 79, 80, 100].map(colorOf).join(','));
   check('NO_COLOR gives plain text', !render(full, on, noGit, false).includes('\u001b'), 'escape codes present');
   check('empty input still prints the model', render({}, on, () => '') === 'Claude', render({}, on, () => ''));

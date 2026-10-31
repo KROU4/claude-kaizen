@@ -37,7 +37,7 @@ Pick the UI (unless `--ui` says otherwise):
 **A. Artifact console** — when the `Artifact` tool exists in this session (Claude desktop app Code tab, claude.ai).
 1. `$KZ console --mode render --transport artifact --out ~/.claude/kaizen/console.html`
 2. Publish that file with the Artifact tool: `capabilities: {"db": {}}`, title "Kaizen console", icon "sliders". Give the user the link and one sentence: tick what you want, adjust parameters, press Apply.
-3. Poll for the answer: `ArtifactData` action `get`, collection `kaizen`, doc_id `choices`, on that artifact's URL. Wait ~20 s between polls (`Bash: sleep 20`), up to 20 minutes. When the document exists, write it verbatim to `~/.claude/kaizen/choices.json` with the Write tool.
+3. Poll for the answer: `ArtifactData` action `get`, collection `kaizen`, doc_id `choices`, on that artifact's URL. Wait ~20 s between polls (`Bash: sleep 20`), up to 20 minutes. When the document exists, write its `data` object (the choices: `version`, `selected`, `discuss`, `notes`) to `~/.claude/kaizen/choices.json` with the Write tool, then delete the document (`ArtifactData` action `delete` with the returned `version` as `if_version`) so a later run starts clean.
 4. If polling times out, ask in chat whether to continue in the terminal (option B/C).
 
 **B. Browser console** — when there is no Artifact tool but a desktop browser is likely (not SSH, `DISPLAY`/Windows/macOS present).

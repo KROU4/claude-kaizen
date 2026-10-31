@@ -62,7 +62,7 @@ function isHuman(o) {
   return Array.isArray(c) && c.some((b) => b && b.type === 'text') && !c.some((b) => b && b.type === 'tool_result');
 }
 
-function collect(lines) {
+function collect(lines, maxPrompts) {
   const prompts = [];
   const edited = new Map();
   const cmds = new Map();
@@ -91,7 +91,7 @@ function collect(lines) {
       }
     }
   }
-  return { prompts: prompts.slice(-MAX_PROMPTS), edited: [...edited.keys()].slice(-30), cmds: [...cmds.keys()].slice(-5), lastText };
+  return { prompts: prompts.slice(-maxPrompts), edited: [...edited.keys()].slice(-30), cmds: [...cmds.keys()].slice(-5), lastText };
 }
 
 function render(payload, d, now) {
@@ -107,7 +107,7 @@ function render(payload, d, now) {
 function save(payload, o = {}) {
   const sid = String(payload.session_id || '').replace(/[^\w-]/g, '');
   if (!sid || typeof payload.transcript_path !== 'string') return null;
-  const data = collect(tailLines(payload.transcript_path, 4 * 1024 * 1024));
+  const data = collect(tailLines(payload.transcript_path, 4 * 1024 * 1024), o.maxPrompts || MAX_PROMPTS);
   if (!data.prompts.length && !data.edited.length && !data.cmds.length && !data.lastText) return null;
   const dir = path.join(o.configDir || configDir(), 'kaizen', 'handoffs');
   fs.mkdirSync(dir, { recursive: true });
@@ -142,7 +142,7 @@ function selftest() {
     fs.mkdirSync(path.dirname(old), { recursive: true });
     fs.writeFileSync(old, 'stale');
     fs.utimesSync(old, new Date(Date.now() - 10 * 864e5), new Date(Date.now() - 10 * 864e5));
-    const file = save({ session_id: 'sess-1', transcript_path: transcript, trigger: 'auto', cwd: '/w/demo' }, { configDir: tmp });
+    const file = save({ session_id: 'sess-1', transcript_path: transcript, trigger: 'auto', cwd: '/w/demo' }, { configDir: tmp, maxPrompts: 5 });
     const text = file ? fs.readFileSync(file, 'utf8') : '';
     check('handoff written to <config>/kaizen/handoffs/<session>.md', file === path.join(tmp, 'kaizen', 'handoffs', 'sess-1.md'), String(file));
     const prompts = text.split('## Last user prompts')[1]?.split('\n\n')[0].split('\n').filter((l) => /^\d+\./.test(l)) || [];

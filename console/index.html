@@ -3,27 +3,24 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="color-scheme" content="light dark">
 <meta name="claude:viewport-fit-sides" content="cover">
 <title>Kaizen console</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230f766e'/%3E%3Cpath d='M7 24h6v-6h6v-6h6' fill='none' stroke='%23fff' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M5 26h7v-7h7v-7h8' fill='none' stroke='%230f766e' stroke-width='4.5' stroke-linejoin='round'/%3E%3C/svg%3E">
 <style>
-/* Kaizen console. Layout: one calm column (max 960px) with a stat header, a control strip,
-   category sections of selectable cards, and a sticky submit bar. Teal accent on cool grays. */
+/* Kaizen console. Layout: one calm column (max 960px): stat header, control strip,
+   category sections of selectable cards, sticky submit bar. Teal accent on cool grays. */
 :root{
   color-scheme:light;
-  --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI Variable Text","Segoe UI",Roboto,"Helvetica Neue",Arial,"Noto Sans",sans-serif;
-  --mono:ui-monospace,"Cascadia Mono","SF Mono","Segoe UI Mono",Menlo,Consolas,"Liberation Mono",monospace;
-  --cjk:"Hiragino Sans","Yu Gothic UI","Yu Gothic","Noto Sans CJK JP","Noto Sans JP",Meiryo,sans-serif;
+  --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,"Noto Sans",sans-serif;
+  --mono:ui-monospace,"Cascadia Mono","SF Mono",Menlo,Consolas,monospace;
+  --cjk:"Hiragino Sans","Yu Gothic UI","Noto Sans CJK JP",Meiryo,sans-serif;
   --bg:#f1f5f4;--surface:#fff;--surface-2:#f5f8f7;--field:#fff;
   --fg:#10201d;--fg-2:#34453f;--muted:#52645f;
   --line:#d8e0dd;--rule:#b9c7c3;--ctl:#74867f;
-  --accent:#0f766e;--accent-hover:#0b625b;--accent-ink:#0a5a53;--accent-soft:#e0f0ec;--accent-line:#86c3ba;--on-accent:#fff;--sel:#eff8f5;--focus:#0f766e;
+  --accent:#0f766e;--accent-hover:#0b625b;--accent-ink:#0a5a53;--accent-soft:#e0f0ec;--accent-line:#86c3ba;--on-accent:#fff;--sel:#eff8f5;
   --warn-fg:#7a4300;--warn-bg:#fdf0d8;--warn-line:#e3bd78;
   --bad-fg:#9a1b11;--bad-bg:#fdecea;--bad-line:#eaa9a2;
-  --chip-n:rgba(255,255,255,.24);
-  --shadow:0 1px 2px rgba(16,40,35,.07),0 2px 6px rgba(16,40,35,.04);
-  --bar-shadow:0 -8px 24px rgba(16,40,35,.09);
+  --sh:rgba(16,40,35,.09);
 }
 @media (prefers-color-scheme:dark){
   :root:not([data-theme="light"]){
@@ -31,12 +28,10 @@
     --bg:#0b1110;--surface:#121a18;--surface-2:#172220;--field:#0e1514;
     --fg:#e4edeb;--fg-2:#c0cecb;--muted:#8fa29d;
     --line:#233330;--rule:#35504a;--ctl:#62807a;
-    --accent:#34b3a2;--accent-hover:#4cc7b6;--accent-ink:#66d6c8;--accent-soft:#12302c;--accent-line:#2b6a62;--on-accent:#03201c;--sel:#10211f;--focus:#4cc7b6;
+    --accent:#34b3a2;--accent-hover:#4cc7b6;--accent-ink:#66d6c8;--accent-soft:#12302c;--accent-line:#2b6a62;--on-accent:#03201c;--sel:#10211f;
     --warn-fg:#efc07a;--warn-bg:#2a2010;--warn-line:#5b4520;
     --bad-fg:#f5a9a1;--bad-bg:#321b18;--bad-line:#6b312b;
-    --chip-n:rgba(0,0,0,.18);
-    --shadow:0 1px 2px rgba(0,0,0,.45);
-    --bar-shadow:0 -8px 24px rgba(0,0,0,.4);
+    --sh:rgba(0,0,0,.45);
   }
 }
 :root[data-theme="dark"]{
@@ -44,28 +39,26 @@
   --bg:#0b1110;--surface:#121a18;--surface-2:#172220;--field:#0e1514;
   --fg:#e4edeb;--fg-2:#c0cecb;--muted:#8fa29d;
   --line:#233330;--rule:#35504a;--ctl:#62807a;
-  --accent:#34b3a2;--accent-hover:#4cc7b6;--accent-ink:#66d6c8;--accent-soft:#12302c;--accent-line:#2b6a62;--on-accent:#03201c;--sel:#10211f;--focus:#4cc7b6;
+  --accent:#34b3a2;--accent-hover:#4cc7b6;--accent-ink:#66d6c8;--accent-soft:#12302c;--accent-line:#2b6a62;--on-accent:#03201c;--sel:#10211f;
   --warn-fg:#efc07a;--warn-bg:#2a2010;--warn-line:#5b4520;
   --bad-fg:#f5a9a1;--bad-bg:#321b18;--bad-line:#6b312b;
-  --chip-n:rgba(0,0,0,.18);
-  --shadow:0 1px 2px rgba(0,0,0,.45);
-  --bar-shadow:0 -8px 24px rgba(0,0,0,.4);
+  --sh:rgba(0,0,0,.45);
 }
 
 *,*::before,*::after{box-sizing:border-box}
 [hidden]{display:none!important}
-html{-webkit-text-size-adjust:100%;text-size-adjust:100%;scroll-padding-bottom:calc(var(--bar-h,96px) + 16px)}
+html{-webkit-text-size-adjust:100%;scroll-padding-bottom:calc(var(--bar-h,96px) + 16px)}
 body{margin:0;min-height:100vh;min-height:100dvh;display:flex;flex-direction:column;background:var(--bg);color:var(--fg);font:.9375rem/1.5 var(--sans)}
-h1,h2,h3,p,ul,dl,blockquote,fieldset{margin:0;padding:0}
-ul{list-style:none}
+h1,h2,h3,p,ul,blockquote,fieldset{margin:0;padding:0}
 fieldset{border:0;min-width:0}
 button,input,select,textarea{font:inherit;color:inherit}
-code{font:.85em/1.2 var(--mono);padding:.12em .38em;border:1px solid var(--line);border-radius:4px;background:var(--surface-2);overflow-wrap:anywhere}
+code{display:inline-block;max-width:100%;padding:.12em .38em;border:1px solid var(--line);border-radius:4px;background:var(--surface-2);font:.85em/1.2 var(--mono);overflow-wrap:anywhere}
 a{color:var(--accent-ink);text-underline-offset:2px}
-:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .sr{position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 .wrap{width:100%;max-width:992px;margin-left:auto;margin-right:auto;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
 .topline{height:3px;background:var(--accent)}
+main{flex:1 0 auto}
 
 /* header */
 .hd{padding-top:24px;padding-bottom:4px}
@@ -74,31 +67,30 @@ a{color:var(--accent-ink);text-underline-offset:2px}
 .demo{margin-left:auto;padding:3px 8px;border:1px dashed var(--ctl);border-radius:5px;color:var(--muted);font:600 .7rem/1.2 var(--mono)}
 h1{max-width:30em;margin-top:16px;font-size:clamp(1.3rem,1.05rem + 1.3vw,1.75rem);font-weight:680;line-height:1.22;letter-spacing:-.012em;text-wrap:balance}
 .sub{max-width:64ch;margin-top:8px;color:var(--fg-2)}
-.stats{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
+.stats{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px;list-style:none}
 .stats li{display:inline-flex;align-items:baseline;gap:8px;padding:5px 10px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--muted);font-size:.78rem}
 .stats b{color:var(--fg);font:600 .875rem/1 var(--mono);font-variant-numeric:tabular-nums}
 
 /* control strip */
-.tool{display:grid;gap:12px;margin-top:18px;padding:12px;border:1px solid var(--line);border-radius:12px;background:var(--surface);box-shadow:var(--shadow)}
+.tool{display:grid;gap:12px;margin-top:18px;padding:12px;border:1px solid var(--line);border-radius:12px;background:var(--surface);box-shadow:0 1px 2px var(--sh)}
 .tool-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px 12px}
 .tool-btns{display:flex;flex-wrap:wrap;gap:8px}
-.search{position:relative;flex:1 1 240px;max-width:360px}
-.search svg{position:absolute;left:11px;top:50%;width:16px;height:16px;margin-top:-8px;color:var(--muted);pointer-events:none}
-.search .in{min-height:38px;padding-left:34px;-webkit-appearance:none;appearance:none}
+.srch{flex:1 1 240px;max-width:360px}
+.srch .in{min-height:38px;-webkit-appearance:none;appearance:none}
 .chips{display:flex;flex-wrap:wrap;gap:8px;padding-top:12px;border-top:1px solid var(--line)}
 .chip{display:inline-flex;align-items:center;gap:7px;min-height:32px;padding:0 6px 0 12px;border:1px solid var(--line);border-radius:999px;background:var(--surface);color:var(--fg-2);font-size:.8125rem;font-weight:560;cursor:pointer;transition:background-color .12s,border-color .12s}
 .chip:hover{border-color:var(--ctl)}
-.chip .n{min-width:22px;padding:2px 6px;border-radius:999px;background:var(--surface-2);color:var(--muted);font:600 .72rem/1.3 var(--mono);text-align:center;font-variant-numeric:tabular-nums}
 .chip[aria-pressed="true"]{border-color:var(--accent);background:var(--accent);color:var(--on-accent)}
-.chip[aria-pressed="true"] .n{background:var(--chip-n);color:inherit}
+.chip[aria-pressed="true"] .n{background:rgba(0,0,0,.18);color:inherit}
+.n{min-width:22px;padding:2px 6px;border-radius:999px;background:var(--surface-2);color:var(--muted);font:600 .72rem/1.3 var(--mono);text-align:center;font-variant-numeric:tabular-nums}
 
 /* buttons and fields */
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:38px;padding:0 14px;border:1px solid var(--ctl);border-radius:8px;background:var(--surface);color:var(--fg);font-size:.875rem;font-weight:620;line-height:1.2;cursor:pointer;transition:background-color .12s,border-color .12s}
 .btn:hover:not(:disabled){border-color:var(--fg-2);background:var(--surface-2)}
 .btn:disabled{opacity:.5;cursor:not-allowed}
-.btn .n{padding:3px 6px;border:1px solid var(--accent-line);border-radius:999px;background:var(--surface);color:var(--accent-ink);font:600 .72rem/1 var(--mono)}
 .btn-accent{border-color:var(--accent-line);background:var(--accent-soft);color:var(--accent-ink)}
 .btn-accent:hover:not(:disabled){border-color:var(--accent);background:var(--accent-soft)}
+.btn-accent .n{border:1px solid var(--accent-line);background:var(--surface);color:var(--accent-ink)}
 .btn-primary{border-color:var(--accent);background:var(--accent);color:var(--on-accent)}
 .btn-primary:hover:not(:disabled){border-color:var(--accent-hover);background:var(--accent-hover)}
 .btn.icon{position:relative;width:40px;padding:0}
@@ -119,11 +111,10 @@ input[type=checkbox]:disabled{cursor:not-allowed}
 .grp{margin-top:28px}
 .grp>h2{display:flex;align-items:center;gap:10px;font-size:1rem;font-weight:660;line-height:1.3}
 .grp>h2::after{content:"";flex:1;height:1px;background:var(--line)}
-.grp>h2 .n{padding:4px 7px;border:1px solid var(--line);border-radius:5px;background:var(--surface);color:var(--muted);font:600 .75rem/1 var(--mono);font-variant-numeric:tabular-nums}
 .cards{display:grid;gap:10px;margin-top:12px}
-.card{padding:14px 16px;border:1px solid var(--line);border-radius:10px;background:var(--surface);box-shadow:var(--shadow);transition:border-color .12s,background-color .12s,box-shadow .12s}
+.card{padding:14px 16px;border:1px solid var(--line);border-radius:10px;background:var(--surface);box-shadow:0 1px 2px var(--sh);transition:border-color .12s,background-color .12s,box-shadow .12s}
 .card:hover{border-color:var(--rule)}
-.card.on{border-color:var(--accent);background:var(--sel);box-shadow:0 0 0 1px var(--accent),var(--shadow)}
+.card.on{border-color:var(--accent);background:var(--sel);box-shadow:0 0 0 1px var(--accent),0 1px 2px var(--sh)}
 .top{display:grid;grid-template-columns:20px minmax(0,1fr) auto;gap:6px 12px;align-items:start}
 .top input{margin-top:1px}
 .ttl{font-size:1.03rem;font-weight:640;line-height:1.35;overflow-wrap:anywhere}
@@ -145,9 +136,7 @@ input[type=checkbox]:disabled{cursor:not-allowed}
 .tg[aria-expanded="true"]::before{transform:rotate(45deg)}
 .tg:hover{text-decoration:underline}
 .dt{display:grid;gap:10px;margin-top:6px;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);font-size:.84rem;overflow-wrap:anywhere}
-.dt ul{display:grid;gap:3px}
-.dt li{position:relative;padding-left:14px}
-.dt li::before{content:"";position:absolute;left:2px;top:.62em;width:5px;height:5px;border-radius:50%;background:var(--rule)}
+.dt ul{padding-left:1.1rem;list-style:disc}
 .cfg{margin-top:12px;padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);transition:opacity .12s}
 .cfg:disabled{border-style:dashed;background:transparent;opacity:.62}
 .cfg-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,230px),1fr));gap:12px 14px}
@@ -159,19 +148,18 @@ input[type=checkbox]:disabled{cursor:not-allowed}
 .opt:has(input:checked){border-color:var(--accent-line);background:var(--accent-soft);color:var(--accent-ink)}
 .opt input{width:16px;height:16px;border-radius:4px}
 .opt input::before{width:9px;height:9px}
-.cfg:disabled .opt{cursor:not-allowed}
 .hint{margin-top:12px;color:var(--muted);font-size:.8125rem}
 .empty{margin-top:28px;padding:20px 16px;border:1px dashed var(--ctl);border-radius:10px;color:var(--muted)}
 
-/* fallback JSON panel */
-.fb-box{display:grid;gap:10px;margin-top:28px;padding:16px;border:1px solid var(--line);border-radius:12px;background:var(--surface);box-shadow:var(--shadow)}
+/* JSON fallback panel */
+.fb-box{display:grid;gap:10px;margin-top:28px;padding:16px;border:1px solid var(--line);border-radius:12px;background:var(--surface);box-shadow:0 1px 2px var(--sh)}
 .fb.warn .fb-hint{padding:8px 12px;border:1px solid var(--warn-line);border-radius:8px;background:var(--warn-bg);color:var(--warn-fg)}
 .json{height:15rem;white-space:pre;overflow:auto;font-size:.78rem}
 .fb-act{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px}
 .ok{color:var(--accent-ink);font-size:.8125rem;font-weight:600}
 
 /* sticky bar */
-.bar{position:sticky;bottom:0;z-index:30;margin-top:32px;border-top:1px solid var(--line);background:var(--surface);box-shadow:var(--bar-shadow)}
+.bar{position:sticky;bottom:0;z-index:30;margin-top:32px;border-top:1px solid var(--line);background:var(--surface);box-shadow:0 -8px 24px var(--sh)}
 .bar-in{display:grid;grid-template-columns:auto minmax(0,1fr) auto;grid-template-areas:"tg cnt act" "nt nt nt";align-items:center;gap:8px 12px;padding-top:10px;padding-bottom:calc(10px + env(safe-area-inset-bottom,0px))}
 .tg-n{grid-area:tg}
 .cnt{grid-area:cnt;min-width:0;color:var(--fg-2);font-size:.875rem}
@@ -187,7 +175,6 @@ input[type=checkbox]:disabled{cursor:not-allowed}
 .done svg{flex:none;width:30px;height:30px;padding:6px;border-radius:50%;background:var(--accent);color:var(--on-accent)}
 .done p{font-weight:620}
 .ft{margin-top:20px;padding-top:4px;padding-bottom:max(28px,env(safe-area-inset-bottom,0px));color:var(--muted);font-size:.78rem}
-main{flex:1 0 auto}
 
 @media (min-width:720px){
   .bar-in{grid-template-columns:minmax(6.5rem,auto) minmax(0,1fr) auto;grid-template-areas:"cnt nt act";align-items:end;gap:12px 20px}
@@ -201,15 +188,15 @@ main{flex:1 0 auto}
 }
 @media (max-width:559px){
   .body{margin-left:0}
+  .chips{gap:6px}
   .tool-btns{flex:1 1 100%}
   .tool-btns .btn{flex:1 1 auto}
-  .search{flex-basis:100%;max-width:none}
+  .srch{flex-basis:100%;max-width:none}
 }
 @media (max-width:719px){
-  .in,.search .in{font-size:16px}
+  .in{font-size:16px}
   .act .btn{white-space:normal}
 }
-@media (pointer:coarse){.tg{min-height:40px}.chip{min-height:38px}}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important}}
 </style>
 </head>
@@ -224,17 +211,14 @@ main{flex:1 0 auto}
   <ul class="stats" id="stats"></ul>
 </header>
 
-<main class="wrap" id="main">
+<main class="wrap">
   <div class="tool" id="tool">
     <div class="tool-row">
       <div class="tool-btns">
         <button type="button" class="btn btn-accent" id="b-high"></button>
         <button type="button" class="btn" id="b-none"></button>
       </div>
-      <div class="search" role="search">
-        <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
-        <input type="search" id="q" class="in" autocomplete="off" spellcheck="false">
-      </div>
+      <div class="srch" role="search"><input type="search" id="q" class="in" autocomplete="off" spellcheck="false"></div>
     </div>
     <div class="chips" id="chips" role="group"></div>
   </div>
@@ -245,8 +229,7 @@ main{flex:1 0 auto}
 <section class="wrap fb" id="fb" hidden>
   <div class="fb-box">
     <p class="fb-hint" id="fb-hint"></p>
-    <label class="sr" for="json" id="json-lbl"></label>
-    <textarea id="json" class="in json" readonly spellcheck="false" wrap="off" aria-describedby="fb-hint"></textarea>
+    <textarea id="json" class="in json" readonly spellcheck="false" wrap="off" aria-label="JSON" aria-describedby="fb-hint"></textarea>
     <div class="fb-act">
       <button type="button" class="btn btn-primary" id="copy"></button>
       <span class="ok" id="copied" role="status" aria-live="polite"></span>
@@ -298,15 +281,14 @@ const EN = {
   cat_permissions: 'Permissions', cat_hooks: 'Hooks', cat_skills: 'Skills', cat_agents: 'Subagents',
   'cat_claude-md': 'Rules (CLAUDE.md)', cat_context: 'Context budget', cat_workflow: 'Workflow', cat_settings: 'Settings',
   cat_mcp: 'MCP servers', cat_statusline: 'Status line', cat_quality: 'Quality gates', cat_advice: 'Advice',
-  filter_all: 'All', search_placeholder: 'Search title or evidence', show_details: 'Show details', hide_details: 'Hide details',
+  filter_all: 'All', search_placeholder: 'Filter recommendations…', show_details: 'Details', hide_details: 'Hide details',
   /* optional keys: the host may leave these out */
   stat_sessions: 'Sessions', stat_days: 'Days', stat_prompts: 'Prompts', stat_recommendations: 'Recommendations',
-  source: 'Source', discuss: 'Tick to discuss this with Claude', json_label: 'Choices as JSON', params: 'Parameters'
+  source: 'Source', discuss: 'Tick to discuss this with Claude'
 };
-const RU = { /* fallbacks used only when lang is ru and the host omitted the key */
-  filter_all: 'Все', search_placeholder: 'Поиск по названию и основанию', show_details: 'Подробнее', hide_details: 'Скрыть подробности',
+const RU = { /* fallbacks for the optional keys, used only when lang is ru */
   stat_sessions: 'Сессии', stat_days: 'Дни', stat_prompts: 'Запросы', stat_recommendations: 'Рекомендации',
-  source: 'Источник', discuss: 'Отметьте, чтобы обсудить это с Claude', json_label: 'Выбор в формате JSON', params: 'Параметры'
+  source: 'Источник', discuss: 'Отметьте, чтобы обсудить это с Claude'
 };
 
 /* ---------- demo dataset: used when the file is opened without data ---------- */
@@ -322,8 +304,7 @@ const DEMO = {
       actionsSummary: ['PreToolUse hook (Bash) in settings.json', 'file ~/.claude/kaizen/hooks/guard-destructive.mjs'],
       params: [
         { name: 'mode', type: 'select', label: 'When a command matches', options: ['deny', 'ask'], value: 'deny' },
-        { name: 'patterns', type: 'textarea', label: 'Extra patterns (one regex per line)', value: 'git clean -fd\nDROP TABLE' }
-      ],
+        { name: 'patterns', type: 'textarea', label: 'Extra patterns (one regex per line)', value: 'git clean -fd\nDROP TABLE' }],
       source: 'inspired by the Claude Code hooks guide (https://docs.claude.com/en/docs/claude-code/hooks-guide)' },
     { id: 'permissions.allow-readonly', category: 'permissions', impact: 'high', risk: 'low', kind: 'recipe',
       title: 'Stop approving read-only commands by hand',
@@ -339,27 +320,24 @@ const DEMO = {
       evidence: '31 edits were followed by a manual `npx prettier --write` within two prompts.',
       scope: 'project', scopes: ['project'],
       actionsSummary: ['PostToolUse hook (Edit, Write) in .claude/settings.json'],
-      params: [{ name: 'command', type: 'text', label: 'Formatter command', value: 'npx prettier --write' }],
-      source: null },
+      params: [{ name: 'command', type: 'text', label: 'Formatter command', value: 'npx prettier --write' }] },
     { id: 'mcp.trim-unused', category: 'mcp', impact: 'medium', risk: 'medium', kind: 'recipe',
       title: 'Turn off MCP servers you never call',
       why: 'Every enabled server adds its tool list to the context of every session, used or not.',
       evidence: '3 of 5 MCP servers had zero calls in 30 days; together they add about 6.8k tokens per session.',
       scope: 'user', scopes: ['user', 'project'],
       actionsSummary: ['disabledMcpjsonServers in settings.json'],
-      params: [{ name: 'servers', type: 'multiselect', label: 'Servers to disable', options: ['figma', 'linear', 'sentry', 'postgres', 'playwright'], value: ['figma', 'linear', 'sentry'] }],
-      source: null },
+      params: [{ name: 'servers', type: 'multiselect', label: 'Servers to disable', options: ['figma', 'linear', 'sentry', 'postgres', 'playwright'], value: ['figma', 'linear', 'sentry'] }] },
     { id: 'workflow.plan-first', category: 'workflow', impact: 'medium', risk: 'low', kind: 'advice',
       title: 'Start multi-file refactors in plan mode',
       why: 'Reviewing a plan before edits is cheaper than reverting a wrong approach after twenty tool calls.',
       evidence: '7 of your 10 longest sessions began without plan mode and ended with a revert or three or more corrections.',
-      scope: 'user', scopes: ['user'], actionsSummary: [], params: [],
-      source: 'Claude Code docs, common workflows (https://docs.claude.com/en/docs/claude-code/common-workflows)' },
+      scope: 'user', source: 'Claude Code docs, common workflows (https://docs.claude.com/en/docs/claude-code/common-workflows)' },
     { id: 'workflow.compact-early', category: 'workflow', impact: 'low', risk: 'low', kind: 'advice',
       title: 'Compact at task boundaries, not at 90% context',
       why: 'Compacting right after a task keeps the summary focused; waiting for the limit drops detail from the middle.',
       evidence: '11 sessions hit auto-compact mid-task, and the next 3 prompts repeated earlier context.',
-      scope: 'user', scopes: ['user'], actionsSummary: [], params: [], source: null }
+      scope: 'user' }
   ]
 };
 
@@ -371,7 +349,7 @@ const I = D.i18n || {};
 const mode = D.mode === 'local' || D.mode === 'artifact' ? D.mode : 'static';
 const stats = D.stats || {};
 const recs = Array.isArray(D.recommendations) ? D.recommendations : [];
-const reduce = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
 document.documentElement.lang = L;
 
 const $ = (id) => document.getElementById(id);
@@ -402,8 +380,8 @@ const h = (tag, a, ...kids) => {
   return e;
 };
 
-/* `code` spans and /slash-commands become <code>; URLs become links */
-const SLASH = /((?<![\w/.~])\/[a-z][\w-]*(?::[\w-]+)?)/;
+/* `code` spans and standalone /slash-commands become <code>; URLs become links */
+const SLASH = /((?<![\w/.~<])\/[a-z][\w-]*(?::[\w-]+)?(?![\w/]))/;
 const rich = (s) => {
   s = str(s);
   let parts = s.split('`');
@@ -420,32 +398,29 @@ const linkify = (s) => str(s).split(/(https?:\/\/[^\s<>"')\]]*[^\s<>"')\].,;:!?]
 
 /* ---------- parameter fields ---------- */
 function makeField(p, id) {
-  const label = p.label || p.name;
   const opts = (Array.isArray(p.options) ? p.options : []).map((o) =>
     o && typeof o === 'object' ? { v: str(o.value), l: str(o.label == null ? o.value : o.label) } : { v: str(o), l: str(o) });
   const multi = p.type === 'multiselect';
+  const label = p.label || p.name;
   const lab = multi ? h('span', { class: 'lb', id: id + '-l', text: label }) : h('label', { class: 'lb', htmlFor: id, text: label });
-  let ctl, get, set, wide = false;
+  let ctl, get, set, wide = multi;
   if (multi) {
-    wide = true;
     const have = new Set((Array.isArray(p.value) ? p.value : []).map(String));
     ctl = h('div', { class: 'opts', role: 'group', 'aria-labelledby': id + '-l' },
       opts.map((o, k) => h('label', { class: 'opt' },
         h('input', { type: 'checkbox', id: id + '-' + k, value: o.v, checked: have.has(o.v) }), h('span', { text: o.l }))));
     get = () => [...ctl.querySelectorAll('input:checked')].map((i) => i.value);
     set = (v) => {
-      if (!Array.isArray(v)) return;
-      const s = new Set(v.map(String));
-      ctl.querySelectorAll('input').forEach((i) => { i.checked = s.has(i.value); });
+      const s = new Set(Array.isArray(v) ? v.map(String) : []);
+      if (Array.isArray(v)) ctl.querySelectorAll('input').forEach((i) => { i.checked = s.has(i.value); });
     };
   } else if (p.type === 'select') {
     ctl = h('select', { id, class: 'in' }, opts.map((o) => h('option', { value: o.v, text: o.l, selected: o.v === str(p.value) })));
     get = () => ctl.value;
     set = (v) => { if (opts.some((o) => o.v === str(v))) ctl.value = str(v); };
   } else {
-    const area = p.type === 'textarea';
-    wide = area;
-    ctl = area
+    wide = p.type === 'textarea';
+    ctl = wide
       ? h('textarea', { id, class: 'in', rows: 4, spellcheck: false, value: str(p.value) })
       : h('input', { id, class: 'in', type: 'text', spellcheck: false, autocomplete: 'off', value: str(p.value) });
     get = () => ctl.value;
@@ -466,6 +441,7 @@ function makeCard(r, n) {
     ['low', 'medium', 'high'].includes(r.risk) && h('span', { class: 'b risk-' + r.risk, text: t('risk_' + r.risk) }),
     advice && h('span', { class: 'b kind', text: t('kind_advice') }));
 
+  /* collapsible details: what gets applied, source, id */
   const acts = (Array.isArray(r.actionsSummary) ? r.actionsSummary : []).filter(Boolean);
   let details = null, toggle = null;
   if (acts.length || r.source) {
@@ -502,7 +478,7 @@ function makeCard(r, n) {
     });
   }
   const cfg = grid.children.length
-    ? h('fieldset', { class: 'cfg', disabled: true }, h('legend', { class: 'sr', text: t('params') + ': ' + (r.title || r.id) }), grid)
+    ? h('fieldset', { class: 'cfg', disabled: true }, h('legend', { class: 'sr', text: r.title || r.id }), grid)
     : null;
 
   const root = h('article', { class: 'card' },
@@ -513,10 +489,7 @@ function makeCard(r, n) {
       toggle, details, cfg,
       advice && h('p', { class: 'hint', text: t('discuss') })));
 
-  const card = {
-    r, root, cb, cfg, scope, fields, advice, cat: r.category || 'advice',
-    hay: (str(r.title) + ' ' + str(r.evidence) + ' ' + str(r.id)).toLowerCase()
-  };
+  const card = { r, root, cb, cfg, scope, fields, advice, cat: r.category || 'advice', hay: (str(r.title) + ' ' + str(r.evidence) + ' ' + str(r.id)).toLowerCase() };
   cb.addEventListener('change', () => setOn(card, cb.checked));
   return card;
 }
@@ -541,34 +514,32 @@ $('demo').hidden = !demo;
   .forEach(([k, v]) => $('stats').append(h('li', {}, h('span', { text: t('stat_' + k) }), h('b', { text: num(v) }))));
 
 const groups = cats.map((cat, gi) => {
-  const num_ = h('span', { class: 'n' });
+  const count = h('span', { class: 'n' });
   const box = h('div', { class: 'cards' });
   cards.filter((c) => c.cat === cat)
     .sort((a, b) => (RANK[a.r.impact] ?? 3) - (RANK[b.r.impact] ?? 3))
     .forEach((c) => box.append(c.root));
-  const sec = h('section', { class: 'grp', 'aria-labelledby': 'g' + gi }, h('h2', { id: 'g' + gi }, tc(cat), num_), box);
+  const sec = h('section', { class: 'grp', 'aria-labelledby': 'g' + gi }, h('h2', { id: 'g' + gi }, tc(cat), count), box);
   $('list').append(sec);
-  return { cat, sec, num: num_ };
+  return { cat, sec, count };
 });
 
 const highN = cards.filter((c) => c.r.impact === 'high').length;
 $('b-high').replaceChildren(t('select_all_high'), h('span', { class: 'n', text: highN }));
 $('b-high').disabled = !highN;
 $('b-none').textContent = t('select_none');
-$('q').placeholder = t('search_placeholder');
-$('q').setAttribute('aria-label', t('search_placeholder'));
+$('q').placeholder = $('q').ariaLabel = t('search_placeholder');
 $('chips').setAttribute('aria-label', t('filter_all'));
 $('empty').textContent = t('empty');
 $('tool').hidden = !recs.length;
 $('notes-lbl').textContent = t('notes_label');
 $('notes').placeholder = t('notes_placeholder');
-$('ntg').setAttribute('aria-label', t('notes_label'));
 $('ntg').title = t('notes_label');
+$('ntg').setAttribute('aria-label', t('notes_label'));
 $('submit').textContent = t('submit');
 $('copy').textContent = t('copy_json');
-$('json-lbl').textContent = t('json_label');
 
-/* ---------- filtering ---------- */
+/* ---------- filtering: category chip + text search ---------- */
 let cat = 'all', q = '';
 const chips = [{ key: 'all', label: t('filter_all') }, ...cats.map((c) => ({ key: c, label: tc(c) }))].map((d) => {
   const n = h('span', { class: 'n' });
@@ -590,7 +561,7 @@ function applyFilter() {
     c.root.hidden = !v;
     if (v) { shown++; vis[c.cat] = (vis[c.cat] || 0) + 1; }
   }
-  groups.forEach((g) => { g.sec.hidden = !vis[g.cat]; g.num.textContent = vis[g.cat] || 0; });
+  groups.forEach((g) => { g.sec.hidden = !vis[g.cat]; g.count.textContent = vis[g.cat] || 0; });
   chips.forEach((x) => { x.n.textContent = x.key === 'all' ? total : byCat[x.key] || 0; });
   $('empty').hidden = shown > 0;
 }
@@ -611,26 +582,22 @@ function collect() {
   };
 }
 
-const hash = (s) => { let x = 2166136261; for (let i = 0; i < s.length; i++) { x ^= s.charCodeAt(i); x = Math.imul(x, 16777619); } return (x >>> 0).toString(36); };
-const KEY = 'kaizen:' + hash(recs.map((r) => r.id).join('|'));
-const store = {
-  get() { try { return JSON.parse(localStorage.getItem(KEY) || 'null'); } catch (e) { return null; } },
-  set(v) { try { localStorage.setItem(KEY, JSON.stringify(v)); } catch (e) { /* storage may be blocked */ } },
-  del() { try { localStorage.removeItem(KEY); } catch (e) { /* ignore */ } }
-};
+/* in-progress selection survives reloads; every storage call is guarded */
+const KEY = 'kaizen:' + (() => { let x = 2166136261; for (const ch of recs.map((r) => r.id).join('|')) { x = Math.imul(x ^ ch.charCodeAt(0), 16777619); } return (x >>> 0).toString(36); })();
+const ls = (fn) => { try { return fn(localStorage); } catch (e) { return null; } };
 function save() {
   const sel = {};
   cards.forEach((c) => { if (c.cb.checked) { const { scope, params } = read(c); sel[c.r.id] = { scope, params }; } });
   const notes = $('notes').value;
-  if (Object.keys(sel).length || notes) store.set({ sel, notes }); else store.del();
+  if (Object.keys(sel).length || notes) ls((s) => s.setItem(KEY, JSON.stringify({ sel, notes }))); else ls((s) => s.removeItem(KEY));
 }
 function restore() {
-  const s = store.get();
+  const s = ls((st) => JSON.parse(st.getItem(KEY)));
   if (!s || typeof s !== 'object') return;
   const sel = s.sel && typeof s.sel === 'object' ? s.sel : {};
   cards.forEach((c) => {
-    if (!Object.hasOwn(sel, c.r.id) || !sel[c.r.id]) return;
-    const v = sel[c.r.id];
+    const v = Object.hasOwn(sel, c.r.id) && sel[c.r.id];
+    if (!v) return;
     setOn(c, true);
     if (c.scope && [...c.scope.options].some((o) => o.value === v.scope)) c.scope.value = v.scope;
     c.fields.forEach((f) => { if (v.params && Object.hasOwn(v.params, f.name)) f.set(v.params[f.name]); });
@@ -645,33 +612,29 @@ function refresh() {
   $('cnt').replaceChildren(parts[0], h('b', { text: n }), parts.slice(1).join('{n}'));
   const hasNotes = !!$('notes').value.trim();
   $('submit').disabled = busy || (n === 0 && !hasNotes);
-  if (hasNotes) $('ntg').setAttribute('data-has', ''); else $('ntg').removeAttribute('data-has');
+  $('ntg').toggleAttribute('data-has', hasNotes);
   save();
   if (!$('fb').hidden) $('json').value = JSON.stringify(collect(), null, 2);
 }
 
 /* ---------- submit ---------- */
 function showJson(choices, failed) {
-  const fb = $('fb');
-  fb.hidden = false;
-  fb.classList.toggle('warn', failed);
+  $('fb').hidden = false;
+  $('fb').classList.toggle('warn', failed);
   $('fb-hint').textContent = t('offline_hint');
   $('copied').textContent = '';
   $('json').value = JSON.stringify(choices, null, 2);
-  fb.scrollIntoView({ block: 'center', behavior: reduce ? 'auto' : 'smooth' });
+  $('fb').scrollIntoView({ block: 'center', behavior: reduce ? 'auto' : 'smooth' });
   $('json').focus({ preventScroll: true });
   $('json').select();
 }
-function lock() {
-  document.querySelectorAll('#list input, #list select, #list textarea, #list fieldset, #b-high, #b-none').forEach((e) => { e.disabled = true; });
-}
 function done() {
-  store.del();
+  ls((s) => s.removeItem(KEY));
   $('fb').hidden = true;
   $('bar-in').hidden = true;
   $('done-msg').textContent = t('submitted');
   $('done').hidden = false;
-  lock();
+  document.querySelectorAll('#list input, #list select, #list textarea, #list fieldset, #b-high, #b-none').forEach((e) => { e.disabled = true; });
   $('done').focus();
 }
 async function submit() {
@@ -691,7 +654,7 @@ async function submit() {
     } else {
       const res = await fetch(D.submitUrl || '/submit', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(choices),
-        signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(15000) : undefined
+        signal: AbortSignal.timeout ? AbortSignal.timeout(15000) : undefined
       });
       if (!res.ok) throw new Error('HTTP ' + res.status);
     }

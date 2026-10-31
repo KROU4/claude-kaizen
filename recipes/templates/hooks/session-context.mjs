@@ -71,7 +71,7 @@ function selftest() {
   const handoffFile = path.join(tmp, 'kaizen', 'handoffs', 'abc-123.md');
   const write = (f, text) => { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, text); };
   const stub = (args) => (args[0] === 'status' ? '## main...origin/main [ahead 1]\n M a.js\n?? b.js\n?? c.js\n?? d.js\n?? e.js\n?? f.js\n' : 'abc1234 first\ndef5678 second\n');
-  const base = { configDir: tmp, includeGit: false };
+  const base = { configDir: tmp, includeGit: false, max: 5000 }; // independent of the installed parameters
   try {
     write(handoffFile, '## Recent prompts\n1. fix the login bug\n');
     const first = build({ session_id: 'abc-123', cwd }, base);
