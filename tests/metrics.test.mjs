@@ -331,7 +331,7 @@ describe('skills and plugins', () => {
   it('lists installed skills by source', () => {
     assert.equal(measure.skills.installed, 4);
     assert.deepEqual(measure.skills.installedBySource, { user: 2, plugin: 2 });
-    assert.deepEqual(measure.skills.installedNames, ['demo-skill', 'idle-skill', 'demo-plugin-skill', 'idle-plugin-skill']);
+    assert.deepEqual(measure.skills.installedNames.slice().sort(), ['demo-plugin-skill', 'demo-skill', 'idle-plugin-skill', 'idle-skill']);
   });
 
   it('counts skill and slash command use', () => {
@@ -687,7 +687,7 @@ describe('insights section', () => {
 
   it('keeps redacted friction samples', () => {
     assert.equal(measure.insights.frictionSamples.length, 2);
-    assert.ok(measure.insights.frictionSamples[0].detail.includes('password=[REDACTED:secret]'));
+    assert.ok(measure.insights.frictionSamples.some((s) => s.detail.includes('password=[REDACTED:secret]')));
   });
 
   it('reports available:false and zeros when /insights data is missing', () => {

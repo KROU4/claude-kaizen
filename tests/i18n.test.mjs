@@ -105,7 +105,10 @@ describe('interpolate', () => {
 describe('translator', () => {
   it('looks up dotted keys and interpolates', () => {
     const t = translator('en');
-    assert.equal(t('cli.apply_done', { n: 2, file: 'f.json' }), 'Applied 2 recipe(s). Journal: f.json');
+    const text = t('cli.apply_done', { n: 2, file: 'f.json' });
+    assert.ok(text.includes('2') && text.includes('f.json'), text);
+    assert.ok(!/\{[a-z]+\}/.test(text), 'every placeholder is filled');
+    assert.equal(text, interpolate(readLocale('en').cli.apply_done, { n: 2, file: 'f.json' }));
   });
 
   it('translates to Russian', () => {

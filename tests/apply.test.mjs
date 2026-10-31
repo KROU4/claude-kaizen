@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadCatalog, recommend } from '../scripts/lib/recipes.mjs';
-import { KIT_ROOT, buildFixtureMeasure, captureOutput, cleanupTempDirs, makeTempDir, materializeHome, readJson, setEnv, snapshotDir, toPosix, writeJson, writeText } from './helpers.mjs';
+import { KIT_ROOT, buildFixtureMeasure, captureOutput, cleanupTempDirs, makeTempDir, materializeHome, prefixOf, readJson, setEnv, snapshotDir, t, toPosix, writeJson, writeText } from './helpers.mjs';
 
 let apply;
 let fixtureMeasure;
@@ -970,7 +970,8 @@ describe('cmdApply', () => {
     assert.ok(s.permissions.deny.includes('Read(./.env)'));
     assert.match(stdout, /✓ .*settings\.json: append to permissions\.deny/);
     assert.match(stdout, /✓ .*set cleanupPeriodDays = 90/);
-    assert.match(stdout, /Applied 2 recipe\(s\)\. Journal: .*manifest\.json/);
+    assert.ok(stdout.includes(prefixOf('cli.apply_done', { n: 2 })), stdout);
+    assert.match(stdout, /manifest\.json/);
     assert.deepEqual(manifest.recipes.map((r) => r.id), ['permissions.deny-secrets', 'settings.cleanup-period']);
   });
 
@@ -1073,7 +1074,9 @@ describe('cmdApply', () => {
     assert.deepEqual(snapshotDir(ctx.root), before);
     assert.ok(!fs.existsSync(appliedDir()));
     assert.match(stdout, /→ .*add PreToolUse hook/);
-    assert.match(stdout, /Dry run: nothing written\. \d+ action\(s\) would be applied\./);
+    const planned = manifest.recipes.reduce((sum, r) => sum + r.actions.length, 0);
+    assert.ok(planned >= 4, 'guard script, hook, deny rules and the MCP removal are planned');
+    assert.ok(stdout.includes(t('cli.apply_dry', { n: planned })), stdout);
     assert.equal(manifest.dry, true);
   });
 
@@ -1128,7 +1131,7 @@ describe('cmdApply', () => {
     writeJson(path.join(ctx.stateDir, 'choices.json'), { version: 1, selected: [], discuss: [], notes: '' });
     const { manifest, stdout } = await runApply({});
     assert.deepEqual(manifest, { applied: 0 });
-    assert.match(stdout, /Nothing selected to apply\./);
+    assert.ok(stdout.includes(t('cli.apply_nothing')), stdout);
     assert.ok(!fs.existsSync(appliedDir()));
   });
 
@@ -1156,7 +1159,8 @@ describe('cmdApply', () => {
   it('prints in the requested language', async () => {
     seedState();
     const { stdout, manifest } = await runApply({ recipe: 'settings.cleanup-period' }, { lang: 'ru' });
-    assert.ok(stdout.includes('Применено рецептов: 1. Журнал: '), stdout);
+    assert.ok(stdout.includes(prefixOf('cli.apply_done', { n: 1 }, 'ru')), stdout);
+    assert.notEqual(prefixOf('cli.apply_done', { n: 1 }, 'ru'), prefixOf('cli.apply_done', { n: 1 }, 'en'));
     assert.equal(manifest.lang, 'ru');
   });
 
@@ -1218,7 +1222,7 @@ describe('cmdUndo', () => {
     assert.equal(result.undone, 1);
     assert.ok(!read(path.join(ctx.configDir, 'CLAUDE.md')).includes('kaizen:start'));
     assert.equal(readSettings().cleanupPeriodDays, 90, 'earlier batches stay applied');
-    assert.match(stdout, /Reverted 1 change\(s\) from /);
+    assert.ok(stdout.includes(t('cli.undo_done', { n: 1, id: ids[2] })), stdout);
     const m = readManifest(ids[2]);
     assert.equal(m.undone, true);
     assert.ok(Number.isFinite(Date.parse(m.undoneAt)));
@@ -1234,7 +1238,7 @@ describe('cmdUndo', () => {
     await runUndo();
     assert.ok(!('cleanupPeriodDays' in readSettings()));
     const { stdout } = await runUndo();
-    assert.match(stdout, /Nothing to undo\./);
+    assert.ok(stdout.includes(t('cli.undo_nothing')), stdout);
   });
 
   it('reverts a specific batch by id', async () => {
@@ -1249,8 +1253,8 @@ describe('cmdUndo', () => {
     const ids = await applyThree();
     const { result, stdout } = await runUndo({ all: true });
     assert.equal(result.undone, 3);
-    const order = [...stdout.matchAll(/Reverted 1 change\(s\) from (\S+)\./g)].map((m) => m[1]);
-    assert.deepEqual(order, [...ids].reverse());
+    const expected = [...ids].reverse().map((id) => t('cli.undo_done', { n: 1, id }));
+    assert.deepEqual(stdout.split(/\r?\n/).filter((line) => expected.includes(line)), expected);
     assert.ok(!('cleanupPeriodDays' in readSettings()));
   });
 
@@ -1265,18 +1269,18 @@ describe('cmdUndo', () => {
 
   it('does nothing when there is nothing to undo, and ignores an unknown id', async () => {
     const empty = await runUndo();
-    assert.match(empty.stdout, /Nothing to undo\./);
+    assert.ok(empty.stdout.includes(t('cli.undo_nothing')), empty.stdout);
     assert.equal(empty.result.undone, 0);
     await applyThree();
     const unknown = await runUndo({}, ['1999-01-01T00-00-00']);
-    assert.match(unknown.stdout, /Nothing to undo\./);
+    assert.ok(unknown.stdout.includes(t('cli.undo_nothing')), unknown.stdout);
   });
 
   it('never reverts a batch twice', async () => {
     const ids = await applyThree();
     await runUndo({}, [ids[2]]);
     const again = await runUndo({}, [ids[2]]);
-    assert.match(again.stdout, /Nothing to undo\./);
+    assert.ok(again.stdout.includes(t('cli.undo_nothing')), again.stdout);
   });
 
   it('reports what it kept: a script the user edited stays, and the line says so', async () => {

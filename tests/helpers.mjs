@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { translator } from '../scripts/lib/i18n.mjs';
 
 export const TESTS_DIR = path.dirname(fileURLToPath(import.meta.url));
 export const KIT_ROOT = path.resolve(TESTS_DIR, '..');
@@ -32,6 +33,23 @@ export const TRANSCRIPTS = {
 };
 
 export const toPosix = (p) => String(p).replace(/\\/g, '/');
+
+/**
+ * The English UI string for a locale key: tests build the messages they look for from locales/en.json (or ru.json)
+ * instead of hard-coding wording, so rewording a message does not break unrelated tests.
+ */
+export const t = (key, vars) => translator('en')(key, vars);
+export const tRu = (key, vars) => translator('ru')(key, vars);
+
+/**
+ * A message up to its first placeholder that was left unfilled: for variables that are not known in advance (paths, ids,
+ * durations) `prefixOf('cli.undo_done', { n: 1 })` is "Reverted 1 change(s) from ".
+ */
+export function prefixOf(key, vars = {}, lang = 'en') {
+  const text = translator(lang)(key, vars);
+  const idx = text.indexOf('{');
+  return idx === -1 ? text : text.slice(0, idx);
+}
 
 // ------------------------------------------------------------------ temp dirs
 

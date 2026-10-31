@@ -146,13 +146,14 @@ describe('inventory of the fixture home', () => {
   });
 
   it('lists user skills and plugin skills with their source', () => {
-    assert.deepEqual(inv.skills.map((s) => [s.name, s.source]), [
-      ['demo-skill', 'user'],
-      ['idle-skill', 'user'],
+    // user skills come in directory-listing order (differs between file systems); plugin skills follow, in plugin order
+    assert.deepEqual(inv.skills.filter((s) => s.source === 'user').map((s) => s.name).sort(), ['demo-skill', 'idle-skill']);
+    assert.deepEqual(inv.skills.filter((s) => s.source.startsWith('plugin:')).map((s) => [s.name, s.source]), [
       ['demo-plugin-skill', 'plugin:demo'],
       ['idle-plugin-skill', 'plugin:idle'],
     ]);
-    const demo = inv.skills[0];
+    assert.ok(inv.skills.slice(0, 2).every((s) => s.source === 'user'), 'user skills are listed before plugin skills');
+    const demo = inv.skills.find((s) => s.name === 'demo-skill');
     assert.equal(demo.userInvocable, true);
     assert.equal(demo.modelInvocable, true);
     assert.ok(demo.descriptionChars > 20 && demo.bodyTokens > 10);

@@ -42,8 +42,8 @@ describe('renderDigest', () => {
 
   it('shows the facts recipes are chosen from: slow hooks, slow commands, allow rules, unused MCP, repeated prompts', () => {
     const md = renderDigest(measure, 'en');
-    assert.ok(md.includes('`x.mjs`: 2 runs, avg 2000 ms, max 2500 ms'));
-    assert.ok(/`docker compose`: 1× , avg 120 s, max 120 s/.test(md));
+    assert.ok(md.includes(`\`x.mjs\`: 2 ${loadLocale('en').digest.runs}, avg 2000 ms, max 2500 ms`));
+    assert.ok(/`docker compose`: 1×\s?, avg 120 s, max 120 s/.test(md));
     assert.ok(/`Bash\(git status[ :]\*\)` \(3\)/.test(md));
     assert.ok(md.includes('**dead-srv**'));
     assert.ok(md.includes('3× “deploy the service to staging and” — Deploy the service to staging and check logs'));

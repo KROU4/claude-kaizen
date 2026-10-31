@@ -196,8 +196,13 @@ describe('platform helpers', () => {
     else assert.equal(found, null);
   });
 
-  it('claudeVersion returns a string or null and never throws', () => {
-    const v = claudeVersion();
-    assert.ok(v === null || (typeof v === 'string' && v.length > 0));
+  it('claudeVersion returns a string or null and never throws (PATH reduced to the Node directory, so no installed claude is run)', () => {
+    const undo = setEnv({ PATH: path.dirname(process.execPath) });
+    try {
+      const v = claudeVersion();
+      assert.ok(v === null || (typeof v === 'string' && v.length > 0));
+    } finally {
+      undo();
+    }
   });
 });

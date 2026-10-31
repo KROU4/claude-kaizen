@@ -39,8 +39,12 @@ describe('readInsights on the fixture usage-data', () => {
 
   it('keeps friction details with their kinds, redacting secrets', () => {
     assert.equal(r.frictionSamples.length, 2);
-    assert.deepEqual(r.frictionSamples[0].kinds.sort(), ['tool_error', 'wrong_approach']);
-    assert.ok(r.frictionSamples[0].detail.includes('password=[REDACTED:secret]'));
+    // the order follows the directory listing, which is not the same on every file system
+    const a = r.frictionSamples.find((s) => s.kinds.includes('tool_error'));
+    const b = r.frictionSamples.find((s) => s.kinds.includes('excessive_asks'));
+    assert.deepEqual(a.kinds.slice().sort(), ['tool_error', 'wrong_approach']);
+    assert.ok(a.detail.includes('password=[REDACTED:secret]'));
+    assert.deepEqual(b.kinds.slice().sort(), ['excessive_asks', 'wrong_approach']);
     assert.ok(!JSON.stringify(r.frictionSamples).includes('hunter2hunter2'));
   });
 
@@ -141,6 +145,24 @@ describe('readInsights: time window (sinceMs)', () => {
     assert.equal(r.sessionMeta, 0);
     assert.equal(r.facets, 0, 'facets of sessions outside the window must not be counted');
     assert.deepEqual(r.friction, {});
+  });
+
+  it('keeps a facet that has no session-meta file at all, because it cannot be dated', () => {
+    const dir = makeTempDir('kaizen-ins-');
+    writeJson(path.join(dir, 'facets', 'undated.json'), { session_id: 'undated', outcome: 'fully_achieved' });
+    const r = readInsights(dir, { sinceMs: Date.parse('2030-01-01T00:00:00Z') });
+    assert.equal(r.facets, 1);
+  });
+
+  it('drops the facet of a session that is outside the window even when other sessions are inside it', () => {
+    const dir = makeTempDir('kaizen-ins-');
+    writeJson(path.join(dir, 'session-meta', 'old.json'), { session_id: 'old', start_time: '2026-01-01T00:00:00Z' });
+    writeJson(path.join(dir, 'session-meta', 'new.json'), { session_id: 'new', start_time: '2026-10-01T00:00:00Z' });
+    writeJson(path.join(dir, 'facets', 'old.json'), { session_id: 'old', outcome: 'not_achieved' });
+    writeJson(path.join(dir, 'facets', 'new.json'), { session_id: 'new', outcome: 'fully_achieved' });
+    const r = readInsights(dir, { sinceMs: Date.parse('2026-06-01T00:00:00Z') });
+    assert.deepEqual(r.outcome, { fully_achieved: 1 });
+    assert.equal(r.sessionMeta, 1);
   });
 
   it('keeps a session whose start_time is missing or unparsable', () => {

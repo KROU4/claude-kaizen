@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseArgs } from '../scripts/kaizen.mjs';
 import { interpolate, loadLocale } from '../scripts/lib/i18n.mjs';
-import { KIT_ROOT, childEnv, cleanupTempDirs, copyTree, makeTempDir, materializeHome, readJson, runCli, snapshotDir, writeJson, writeText } from './helpers.mjs';
+import { KIT_ROOT, childEnv, cleanupTempDirs, copyTree, makeTempDir, materializeHome, prefixOf, readJson, runCli, snapshotDir, t, writeJson, writeText } from './helpers.mjs';
 
 const pkg = readJson(path.join(KIT_ROOT, 'package.json'));
 
@@ -87,7 +87,7 @@ describe('kaizen: basics', () => {
   it('exits with code 2 and a message for an unknown command', () => {
     const r = runCli(['frobnicate']);
     assert.equal(r.status, 2);
-    assert.equal(r.stderr.trim(), 'Unknown command: frobnicate. Run `kaizen help`.');
+    assert.equal(r.stderr.trim(), t('cli.unknown_command', { cmd: 'frobnicate' }));
     assert.equal(r.stdout, '');
   });
 
@@ -183,9 +183,9 @@ describe('kaizen measure', () => {
     const r = cli(home, ['measure', '--all', '--lang', 'en']);
     assert.equal(r.status, 0);
     assert.ok(r.stdout.startsWith('# Kaizen measurement'));
-    assert.match(r.stderr, /Measuring 3650 days of Claude Code activity in /);
-    assert.match(r.stderr, /Scanned 3 transcripts \(0 MB, 0 from cache\)/);
-    assert.match(r.stderr, /Wrote .*measure\.json/);
+    assert.ok(r.stderr.includes(prefixOf('cli.measuring', { days: 3650 })), r.stderr);
+    assert.ok(r.stderr.includes(prefixOf('cli.scanned', { files: 3, mb: 0, cached: 0 })), r.stderr);
+    assert.ok(r.stderr.includes(prefixOf('cli.written')) && /measure\.json/.test(r.stderr), r.stderr);
   });
 
   it('prints the measurement as JSON with --json', () => {
@@ -231,7 +231,7 @@ describe('kaizen measure', () => {
     const home = materializeHome();
     const r = cli(home, ['measure', '--all', '--lang', 'en']);
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stderr, /No transcripts found under .*projects\. Nothing to measure yet\./);
+    assert.ok(r.stderr.includes(prefixOf('cli.no_data')), r.stderr);
     const m = readJson(path.join(home.stateDir, 'measure.json'));
     assert.equal(m.totals.sessions, 0);
     assert.equal(m.env.scanned, 0);
@@ -265,6 +265,47 @@ describe('kaizen measure', () => {
         assert.ok(!text.toLowerCase().includes(leaked.toLowerCase()), `${f} contains ${leaked}`);
       }
     }
+  });
+});
+
+describe('kaizen: language selection', () => {
+  const titleOf = (home) => fs.readFileSync(path.join(home.stateDir, 'measure.md'), 'utf8').split('\n')[0];
+
+  it('uses the language from config.json when no --lang flag is given', () => {
+    const home = materializeHome({ projects: true, usageData: true });
+    writeJson(path.join(home.stateDir, 'config.json'), { lang: 'ru' });
+    cli(home, ['measure', '--all', '--quiet']);
+    assert.equal(titleOf(home), `# ${loadLocale('ru').digest.title}`);
+    assert.deepEqual(json(cli(home, ['status'])).config, { lang: 'ru' });
+  });
+
+  it('lets --lang override config.json', () => {
+    const home = materializeHome({ projects: true, usageData: true });
+    writeJson(path.join(home.stateDir, 'config.json'), { lang: 'ru' });
+    cli(home, ['measure', '--all', '--quiet', '--lang', 'en']);
+    assert.equal(titleOf(home), `# ${loadLocale('en').digest.title}`);
+  });
+
+  it('ignores an unsupported --lang and falls back to config.json', () => {
+    const home = materializeHome({ projects: true, usageData: true });
+    writeJson(path.join(home.stateDir, 'config.json'), { lang: 'ru' });
+    cli(home, ['measure', '--all', '--quiet', '--lang', 'de']);
+    assert.equal(titleOf(home), `# ${loadLocale('ru').digest.title}`);
+  });
+
+  it('falls back to the language detected in the prompts, which is English for the fixtures', () => {
+    const home = materializeHome({ projects: true, usageData: true });
+    cli(home, ['measure', '--all', '--quiet']);
+    assert.equal(titleOf(home), `# ${loadLocale('en').digest.title}`);
+    assert.equal(readJson(path.join(home.stateDir, 'measure.json')).locale.lang, 'en');
+  });
+
+  it('survives a config.json that is not valid JSON', () => {
+    const home = materializeHome({ projects: true, usageData: true });
+    writeText(path.join(home.stateDir, 'config.json'), '{ nope');
+    const r = cli(home, ['measure', '--all', '--quiet']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(json(cli(home, ['status'])).config, {});
   });
 });
 
@@ -355,7 +396,7 @@ describe('kaizen apply (dry run) and undo on a measured home', () => {
     const r = cli(home, ['apply', '--recipe', 'settings.cleanup-period', '--dry-run']);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /→ .*settings\.json: set cleanupPeriodDays = 90/);
-    assert.match(r.stdout, /Dry run: nothing written\. 1 action\(s\) would be applied\./);
+    assert.ok(r.stdout.includes(t('cli.apply_dry', { n: 1 })), r.stdout);
     assert.deepEqual(snapshotDir(home.root), before);
     assert.ok(!fs.existsSync(path.join(home.stateDir, 'applied')));
   });
@@ -378,7 +419,7 @@ describe('kaizen apply (dry run) and undo on a measured home', () => {
     const home = materializeHome();
     const r = cli(home, ['undo']);
     assert.equal(r.status, 0);
-    assert.match(r.stdout, /Nothing to undo\./);
+    assert.ok(r.stdout.includes(t('cli.undo_nothing')), r.stdout);
   });
 
   it('applies several --param values to one recipe (a repeated flag)', () => {
@@ -405,7 +446,7 @@ describe('kaizen end to end: measure, recommend, apply, verify, undo', () => {
 
     const applied = cli(home, ['apply', '--recipe', 'permissions.deny-secrets,hooks.guard-destructive,claude-md.read-before-edit']);
     assert.equal(applied.status, 0, applied.stderr);
-    assert.match(applied.stdout, /Applied 3 recipe\(s\)\. Journal: .*manifest\.json/);
+    assert.ok(applied.stdout.includes(prefixOf('cli.apply_done', { n: 3 })) && /manifest\.json/.test(applied.stdout), applied.stdout);
     const settings = readJson(home.settingsFile);
     assert.ok(settings.permissions.deny.includes('Read(./.env)'));
     assert.ok(settings.hooks.PreToolUse.some((g) => g.hooks.some((h) => h.command.includes('guard-destructive.mjs'))));
@@ -436,12 +477,12 @@ describe('kaizen end to end: measure, recommend, apply, verify, undo', () => {
 
     const undone = cli(home, ['undo']);
     assert.equal(undone.status, 0, undone.stderr);
-    assert.match(undone.stdout, /Reverted 4 change\(s\) from /);
+    assert.ok(undone.stdout.includes(prefixOf('cli.undo_done', { n: 4 })), undone.stdout);
     assert.deepEqual(readJson(home.settingsFile), settingsBefore);
     assert.equal(fs.readFileSync(path.join(home.configDir, 'CLAUDE.md'), 'utf8'), claudeMdBefore);
     assert.ok(!fs.existsSync(script));
     assert.equal(json(cli(home, ['status'])).applied[0].undone, true);
-    assert.match(cli(home, ['undo']).stdout, /Nothing to undo\./);
+    assert.ok(cli(home, ['undo']).stdout.includes(t('cli.undo_nothing')));
   });
 });
 
@@ -451,8 +492,8 @@ describe('kaizen verify', () => {
     const env = { HOME: root, USERPROFILE: root, CLAUDE_CONFIG_DIR: path.join(root, '.claude'), KAIZEN_STATE_DIR: path.join(root, 'state') };
     const r = runCli(['verify'], { env });
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /Kaizen verify/);
-    assert.match(r.stdout, /Nothing installed by Kaizen yet\./);
+    assert.ok(r.stdout.includes(t('verify.header')), r.stdout);
+    assert.ok(r.stdout.includes(t('verify.nothing')), r.stdout);
   });
 
   it('checks that settings.json parses', () => {
@@ -507,14 +548,14 @@ describe('kaizen nudge', () => {
     const first = cli(home, ['nudge']);
     assert.equal(first.status, 0);
     const msg = JSON.parse(first.stdout);
-    assert.match(msg.systemMessage, /measurement is over a week old/);
+    assert.match(msg.systemMessage, /week/);
     assert.equal(cli(home, ['nudge']).stdout, '');
   });
 
   it('speaks Russian when the configured language is ru', () => {
     const home = materializeHome();
     writeJson(path.join(home.stateDir, 'config.json'), { lang: 'ru' });
-    assert.match(JSON.parse(cli(home, ['nudge']).stdout).systemMessage, /измерение устарело/);
+    assert.match(JSON.parse(cli(home, ['nudge']).stdout).systemMessage, /[а-яё]{4,}/i);
   });
 
   it('is silent when the user turned it off', () => {
@@ -540,7 +581,7 @@ describe('kaizen nudge', () => {
     const file = path.join(home.stateDir, 'last-measure.json');
     const last = readJson(file);
     writeJson(file, { ...last, at: new Date(Date.now() - 10 * 86400000).toISOString() });
-    assert.match(JSON.parse(cli(home, ['nudge']).stdout).systemMessage, /over a week old/);
+    assert.match(JSON.parse(cli(home, ['nudge']).stdout).systemMessage, /week/);
     assert.equal(cli(home, ['nudge']).stdout, '', 'but only once a week');
   });
 
