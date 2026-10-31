@@ -47,8 +47,13 @@ const DESTRUCTIVE_RE =
 
 const SHELL_KEYWORDS = new Set(['for', 'while', 'if', 'then', 'else', 'fi', 'do', 'done', 'case', 'esac', 'function', 'export', 'set', 'export', '&&', '||', '{', '}', '(', ')', 'local', 'return', 'exit']);
 
-const CORRECTION_RE =
-  /^\s*(?:no[,.!\s]|nope\b|don'?t\b|do not\b|stop\b|wrong\b|not (?:that|this|what)\b|again\b|still\b|why did you\b|i (?:said|told|asked)\b|never\b|always\b|please (?:don'?t|stop)\b|instead\b|revert\b|undo\b|that'?s not\b|нет[,.!\s]|не надо\b|не нужно\b|не делай\b|не так\b|не то\b|неправильно\b|стоп\b|опять\b|снова\b|я (?:же )?(?:сказал|просил|говорил)\b|никогда\b|всегда\b|перестань\b|хватит\b|зачем ты\b|почему ты\b|верни\b|откати\b|отмени\b)/i;
+// Prompt openings that read like a correction. JS `\b` only knows ASCII word
+// characters, so the boundary is a Unicode-aware lookahead instead.
+const CORRECTION_OPENINGS = [
+  'no[,.!\\s]', 'nope', "don'?t", 'do not', 'stop', 'wrong', 'not (?:that|this|what)', 'again', 'still', 'why did you', 'i (?:said|told|asked)', 'never', 'always', "please (?:don'?t|stop)", 'instead', 'revert', 'undo', "that'?s not",
+  'нет[,.!\\s]', 'не надо', 'не нужно', 'не делай', 'не так', 'не то', 'неправильно', 'стоп', 'опять', 'снова', 'я (?:же )?(?:сказал|просил|говорил)', 'никогда', 'всегда', 'перестань', 'хватит', 'зачем ты', 'почему ты', 'верни', 'откати', 'отмени',
+];
+const CORRECTION_RE = new RegExp(`^\\s*(?:${CORRECTION_OPENINGS.join('|')})(?![\\p{L}\\p{N}_])`, 'iu');
 
 const ERROR_CLASSES = [
   ['user-rejected', /doesn'?t want to proceed|user rejected|rejected the tool|was rejected|permission to use .* denied/i],
@@ -357,7 +362,7 @@ export async function summarizeTranscript(file) {
           verb = commandVerb(cmd);
           if (!sidechain) {
             inc(s.bashVerbs, verb);
-            inc(s.bashCommands, normalizeCommand(cmd));
+            inc(s.bashCommands, normalizeCommand(redact(cmd)));
             if (TEST_CMD_RE.test(cmd)) s.testCommands++;
             const g = cmd.match(GIT_RE);
             if (g) inc(s.git, g[1]);
@@ -474,15 +479,16 @@ export async function summarizeTranscript(file) {
     }
     if (cmd) continue; // slash command invocations are not free-form prompts
     s.promptLengths.push(human.length);
-    if (s.langSample.length < 40) s.langSample.push(human.slice(0, 120));
-    const stem = promptStem(human);
+    const safe = redact(human); // nothing derived from prompt text is stored unscrubbed
+    if (s.langSample.length < 40) s.langSample.push(safe.slice(0, 120));
+    const stem = promptStem(safe);
     if (stem && stem.split(' ').length >= 2) {
       inc(s.promptStems, stem);
-      if (!s.promptSamples[stem]) s.promptSamples[stem] = snippet(redact(human), 160);
+      if (!s.promptSamples[stem]) s.promptSamples[stem] = snippet(safe, 160);
     }
     if (CORRECTION_RE.test(human)) {
       s.corrections++;
-      if (s.correctionSamples.length < 12) s.correctionSamples.push(snippet(redact(human), 200));
+      if (s.correctionSamples.length < 12) s.correctionSamples.push(snippet(safe, 200));
     }
   }
   void lastUserTs;
