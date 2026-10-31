@@ -1484,6 +1484,151 @@ describe('claude-md.block undo respects edits made after apply', () => {
   });
 });
 
+describe('claude-md.block with CRLF text (a --param-file saved on Windows)', () => {
+  const claudeMd = () => path.join(ctx.configDir, 'CLAUDE.md');
+  const action = () => ({ type: 'claude-md.block', id: 'rules', content: '- rule one\r\n- rule two\r\n' });
+  const BLOCK = '<!-- kaizen:start rules -->\n- rule one\n- rule two\n<!-- kaizen:end rules -->';
+
+  it('writes the body with LF line endings and journals the hash of exactly that text', () => {
+    writeText(claudeMd(), 'Top.\n');
+    const { entry } = run('claude-md.block', action());
+    assert.ok(read(claudeMd()).includes(BLOCK), JSON.stringify(read(claudeMd())));
+    assert.ok(!read(claudeMd()).includes('\r'));
+    assert.equal(entry.hash, apply.__test.sha(BLOCK));
+    assert.equal(undoEntry(entry).result, 'ok');
+    assert.equal(read(claudeMd()), 'Top.\n');
+  });
+
+  it('treats a lone CR like a line break too', () => {
+    writeText(claudeMd(), 'Top.\n');
+    run('claude-md.block', { ...action(), content: '- rule one\r- rule two' });
+    assert.ok(read(claudeMd()).includes(BLOCK));
+  });
+
+  it('a re-apply of the same CRLF text is "block unchanged", even when the editor converted the file to CRLF', () => {
+    writeText(claudeMd(), 'Top.\n');
+    run('claude-md.block', action());
+    writeText(claudeMd(), read(claudeMd()).replace(/\n/g, '\r\n'));
+    const { entry } = run('claude-md.block', action());
+    assert.equal(entry.skipped, true);
+    assert.equal(entry.reason, 'block unchanged');
+  });
+
+  it('still undoes a journal whose hash was taken on the raw CRLF block (written before the body was normalised)', () => {
+    const raw = BLOCK.replace(/\n/g, '\r\n');
+    writeText(claudeMd(), `Top.\n\n${raw}\n`);
+    const entry = { type: 'claude-md.block', file: claudeMd(), id: 'rules', existedBefore: true, previousBlock: null, tail: '\n', hash: apply.__test.sha(raw) };
+    assert.equal(undoEntry(entry).result, 'ok');
+    assert.equal(read(claudeMd()), 'Top.\n');
+  });
+
+  it('apply --param-file with CRLF text, then undo --last, removes the block and marks the batch undone', async () => {
+    seedState();
+    const extra = path.join(ctx.root, 'extra.json');
+    writeJson(extra, {
+      recipes: [{
+        id: 'custom.house-rules',
+        category: 'claude-md',
+        impact: 'medium',
+        title: { en: 'House rules', ru: 'Правила' },
+        why: { en: 'w', ru: 'п' },
+        evidence: { en: 'e', ru: 'д' },
+        when: true,
+        params: [{ name: 'rules', type: 'text', default: '', label: { en: 'Rules', ru: 'Правила' } }],
+        actions: [{ type: 'claude-md.block', id: 'house-rules', content: '{params.rules}' }],
+      }],
+    });
+    const rules = path.join(ctx.root, 'rules.txt');
+    fs.writeFileSync(rules, '- rule one\r\n- rule two\r\n', 'utf8');
+    await runApply({ recipe: 'custom.house-rules', add: extra, 'param-file': `custom.house-rules.rules=${rules}` });
+    assert.ok(read(claudeMd()).includes('- rule one\n- rule two\n<!-- kaizen:end house-rules -->'), JSON.stringify(read(claudeMd())));
+    const { stdout } = await runUndo();
+    assert.ok(stdout.includes(prefixOf('cli.undo_done', { n: 1 })), stdout);
+    assert.ok(!fs.existsSync(claudeMd()) || !read(claudeMd()).includes('kaizen:start'));
+    const m = readManifest(manifestIds()[0]);
+    assert.equal(m.undone, true);
+    assert.equal(m.partiallyUndone, undefined);
+  });
+});
+
+describe('cmdUndo: entries that were kept', () => {
+  const hookFile = () => path.join(ctx.stateDir, 'hooks', 'guard-destructive.mjs');
+  const applyAndEditHook = async () => {
+    seedState();
+    await runApply({ recipe: 'hooks.guard-destructive' });
+    fs.appendFileSync(hookFile(), '\n// tuned by hand\n');
+  };
+
+  it('does not mark the batch undone: it stays in the journal for the kept entry and says how to finish', async () => {
+    await applyAndEditHook();
+    const { stdout } = await runUndo();
+    const m = readManifest(manifestIds()[0]);
+    assert.notEqual(m.undone, true);
+    assert.equal(m.partiallyUndone, true);
+    assert.ok(Number.isFinite(Date.parse(m.partiallyUndoneAt)));
+    const entries = m.recipes[0].actions;
+    assert.equal(entries.find((e) => e.type === 'settings.hook').undone, true, 'the reverted entry is marked');
+    assert.equal(entries.find((e) => e.type === 'file').undone, undefined, 'the kept entry stays open');
+    assert.match(stdout, /only partly undone/);
+    assert.match(stdout, /undo \d{4}-[\d-T]+ --force/);
+    assert.ok(stdout.includes(path.join(appliedDir(), manifestIds()[0], 'backups')), stdout);
+  });
+
+  it('a second undo retries only the kept entry and leaves the already reverted ones alone', async () => {
+    await applyAndEditHook();
+    await runUndo();
+    const again = await runUndo();
+    assert.equal(again.result.undone, 0);
+    assert.doesNotMatch(again.stdout, /settings\.hook/, 'the reverted hook entry must not be reported again');
+    assert.match(again.stdout, /file: kept: .*modified since apply/);
+    assert.ok(fs.existsSync(hookFile()));
+    assert.equal(readManifest(manifestIds()[0]).partiallyUndone, true);
+  });
+
+  it('--force reverts the kept entry too, saves the edited file first, and then the batch is undone', async () => {
+    await applyAndEditHook();
+    await runUndo();
+    const edited = read(hookFile());
+    const forced = await runUndo({ force: true });
+    assert.equal(forced.result.undone, 1);
+    assert.ok(!fs.existsSync(hookFile()));
+    const m = readManifest(manifestIds()[0]);
+    assert.equal(m.undone, true);
+    assert.equal(m.partiallyUndone, undefined);
+    assert.doesNotMatch(forced.stdout, /only partly undone/);
+    const saved = path.join(appliedDir(), manifestIds()[0], 'undo', 'backups');
+    assert.ok(fs.readdirSync(saved).some((f) => /guard-destructive\.mjs$/.test(f) && read(path.join(saved, f)) === edited), 'the edited script must be backed up');
+  });
+
+  it('--force also takes a CLAUDE.md block that was edited after apply', async () => {
+    seedState();
+    const claudeMd = path.join(ctx.configDir, 'CLAUDE.md');
+    await runApply({ recipe: 'claude-md.read-before-edit' });
+    writeText(claudeMd, read(claudeMd).replace(/(<!-- kaizen:start read-before-edit -->\n)/, '$1Edited by hand.\n'));
+    const kept = await runUndo();
+    assert.match(kept.stdout, /block "read-before-edit" modified since apply/);
+    assert.ok(read(claudeMd).includes('kaizen:start read-before-edit'));
+    assert.equal(readManifest(manifestIds()[0]).partiallyUndone, true);
+    await runUndo({ force: true });
+    assert.ok(!fs.existsSync(claudeMd) || !read(claudeMd).includes('kaizen:start'));
+    assert.equal(readManifest(manifestIds()[0]).undone, true);
+  });
+
+  it('--dry-run changes nothing in the journal, not even for kept entries', async () => {
+    await applyAndEditHook();
+    await runUndo({ 'dry-run': true });
+    const m = readManifest(manifestIds()[0]);
+    assert.equal(m.partiallyUndone, undefined);
+    assert.equal(m.recipes[0].actions.some((e) => e.undone), false);
+  });
+
+  it('a kept file stays owned by Kaizen while its batch is only partly undone', async () => {
+    await applyAndEditHook();
+    await runUndo();
+    assert.ok(apply.__test.makeIo({ dry: true, force: false, measure: null, batchDir: ctx.root, recipeId: null }).ownedFiles.has(path.resolve(hookFile())));
+  });
+});
+
 describe('backups of a batch', () => {
   it('keep the file as it was before the batch when a second recipe touches the same file', async () => {
     seedState();
@@ -1603,6 +1748,28 @@ describe('cmdApply: extra (custom) recipes', () => {
     const recFile = path.join(ctx.stateDir, 'recommendations.json');
     writeJson(recFile, { ...readJson(recFile), extraFile: customFile() });
     await runApply({ recipe: 'custom.cleanup' });
+    assert.equal(readSettings().cleanupPeriodDays, 14);
+  });
+
+  it('finds the extra file recorded in recommendations.all.json (recommend --all --add) when recommendations.json has none', async () => {
+    seedState();
+    writeJson(customFile(), { recipes: [custom()] });
+    const allFile = path.join(ctx.stateDir, 'recommendations.all.json');
+    writeJson(allFile, { ...readJson(path.join(ctx.stateDir, 'recommendations.json')), extraFile: customFile() });
+    await runApply({ recipe: 'custom.cleanup' });
+    assert.equal(readSettings().cleanupPeriodDays, 14);
+  });
+
+  it('prefers the extra file of recommendations.json over the one of recommendations.all.json', async () => {
+    seedState();
+    writeJson(customFile(), { recipes: [custom()] });
+    const recFile = path.join(ctx.stateDir, 'recommendations.json');
+    writeJson(recFile, { ...readJson(recFile), extraFile: customFile() });
+    const other = path.join(ctx.root, 'other.json');
+    writeJson(other, { recipes: [{ ...custom(), id: 'custom.other' }] });
+    writeJson(path.join(ctx.stateDir, 'recommendations.all.json'), { ...readJson(recFile), extraFile: other });
+    const { stdout } = await runApply({ recipe: 'custom.cleanup,custom.other' });
+    assert.match(stdout, /! unknown recipe custom\.other \(skipped\)/);
     assert.equal(readSettings().cleanupPeriodDays, 14);
   });
 

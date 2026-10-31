@@ -7,7 +7,7 @@
 //   kaizen console   [--mode local|render] [--port N] [--no-open] [--out FILE] [--lang]
 //   kaizen choices   --import FILE|-
 //   kaizen apply     [FILE|--recipe id,id] [--dry-run] [--scope user|project] [--project DIR] [--param r.p=v] [--param-file r.p=PATH] [--add FILE]
-//   kaizen undo      [ID|--last|--all] [--dry-run]
+//   kaizen undo      [ID|--last|--all] [--dry-run] [--force]
 //   kaizen status | doctor | selfcheck | docs | nudge | help | --version
 import fs from 'node:fs';
 import path from 'node:path';
@@ -279,7 +279,7 @@ function cmdStatus() {
     stateDir: state,
     lastMeasure: last,
     recommendations: rec ? { generatedAt: rec.generatedAt, count: rec.recommendations.length, high: rec.recommendations.filter((r) => r.impact === 'high').length } : null,
-    applied: applied.map((a) => ({ id: a.id, at: a.at, recipes: (a.recipes || []).map((r) => r.id), undone: !!a.undone })),
+    applied: applied.map((a) => ({ id: a.id, at: a.at, recipes: (a.recipes || []).map((r) => r.id), undone: !!a.undone, ...(a.partiallyUndone && !a.undone ? { partiallyUndone: true } : {}) })),
     config: readConfig(),
   };
   out(JSON.stringify(status, null, 2));
@@ -544,6 +544,7 @@ Usage: node scripts/kaizen.mjs <command> [options]
              --param recipe.name=value   --param-file recipe.name=PATH (file content, multi-line, becomes the value)
              --add FILE (extra recipes, e.g. custom.*; defaults to the file recorded by recommend --add)
   undo       Revert an applied batch   [ID | --last | --all]   --dry-run
+             --force also reverts what you edited after apply (kept entries otherwise stay undoable)
   status     Show state: last measurement, recommendations, applied batches
   verify     Self-test installed hooks and status line, parse touched settings, check CLAUDE.md markers
              --project DIR   --json

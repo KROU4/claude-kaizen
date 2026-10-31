@@ -2,7 +2,7 @@
 name: recipes
 description: Browse the Kaizen recipe catalog — every hook, rule, skill, subagent, permission and settings change Kaizen can apply, with the evidence that triggers each one. Use when the user asks what Kaizen can do, wants to see all options, or asks why a recipe was (not) recommended.
 argument-hint: "[category | recipe-id]"
-allowed-tools: Bash(node *kaizen.mjs *) Read
+allowed-tools: Bash(node "*kaizen.mjs" *) Read
 ---
 
 # Kaizen recipes

@@ -56,7 +56,7 @@ description: What it does and when to use it (the model matches on this)
 argument-hint: "[what to verify]"
 disable-model-invocation: false   # true = only the user can invoke
 user-invocable: true              # false = hidden from the / menu
-allowed-tools: Bash(git status *) Read   # pre-approved for the invoking turn; space-separated; `*` may sit mid-pattern; never pre-approve a whole interpreter (`Bash(node *)`) - Kaizen's skills allow only `Bash(node *kaizen.mjs *)`, the hook self-tests and `claude plugin validate`
+allowed-tools: Bash(git status *) Read   # pre-approved for the invoking turn; space-separated; `*` may sit mid-pattern; never pre-approve a whole interpreter (`Bash(node *)`) - Kaizen's skills allow only `Bash(node "*kaizen.mjs" *)`, the hook self-tests and `claude plugin validate`. A Bash rule is matched against the literal command text (quotes are not stripped), `*` matches any text including spaces, and a trailing ` *` also matches the bare command; the skills write `node "${CLAUDE_PLUGIN_ROOT}/scripts/kaizen.mjs" <sub> ...`, so the rule carries the quote on both sides of the script path (the earlier `Bash(node *kaizen.mjs *)` needs `kaizen.mjs` followed by a space and never matched the quoted form)
 context: fork                     # optional: run in a subagent
 agent: general-purpose            # subagent type when forked
 model: sonnet                     # optional

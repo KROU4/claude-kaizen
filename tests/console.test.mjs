@@ -167,6 +167,19 @@ describe('console/index.html', () => {
     assert.ok(!/@import|url\(\s*["']?(https?:)?\/\//i.test(html), 'external CSS import');
   });
 
+  it('never persists a secret parameter to localStorage (the field object carries secret: true and save() leaves it out)', () => {
+    // the field exposes the flag ...
+    assert.match(html, /return \{ name: p\.name, secret: !!p\.secret, get, set,/);
+    // ... read() drops flagged fields when asked to persist ...
+    assert.match(html, /c\.fields\.filter\(\(f\) => !\(persist && f\.secret\)\)/);
+    // ... and the only writer of the storage key asks for that
+    const save = html.slice(html.indexOf('function save()'), html.indexOf('function restore()'));
+    assert.match(save, /read\(c, true\)/);
+    assert.doesNotMatch(save, /read\(c\)/);
+    // everything that reaches setItem is built in save()
+    assert.equal([...html.matchAll(/setItem\(/g)].length, 1);
+  });
+
   it('only uses translation keys that the locales or its own fallback table define', () => {
     const used = [...new Set([...html.matchAll(/\bt\('([a-z_]+)'\)/g)].map((m) => m[1]))];
     assert.ok(used.length > 15, 'the page should use many translated labels');

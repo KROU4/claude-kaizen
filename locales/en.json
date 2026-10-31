@@ -15,6 +15,7 @@
     "apply_nothing": "Nothing selected to apply.",
     "undo_done": "Reverted {n} change(s) from {id}.",
     "undo_nothing": "Nothing to undo.",
+    "undo_partial": "  ! {n} change(s) were left in place (see \"kept\"/\"error\" above), so {id} is only partly undone and stays in the journal.\n    Review them, then run `undo {id}` again, or `undo {id} --force` to revert them anyway (their current state is saved in {now}).\n    The files as they were before apply are in {before}.",
     "nudge": "Kaizen: {n} new high-impact suggestion(s) found. Run /kaizen:start to review them.",
     "unknown_command": "Unknown command: {cmd}. Run `kaizen help`."
   },

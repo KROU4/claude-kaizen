@@ -2,7 +2,7 @@
 name: start
 description: Run the full Kaizen cycle for this user — measure how they use Claude Code from local transcripts, show recommendations in an interactive console (artifact, browser or terminal), apply the ones they pick, verify, and explain how to undo. Use when the user asks to optimize, tune, review or improve their Claude Code setup, workflow, hooks, skills or permissions, or says "/insights but fix it".
 argument-hint: "[--days N] [--ui artifact|browser|terminal] [--project]"
-allowed-tools: Bash(node *kaizen.mjs *) Bash(node *hooks*.mjs --selftest) Bash(claude plugin validate *) Read Write Agent AskUserQuestion Artifact ArtifactData
+allowed-tools: Bash(node "*kaizen.mjs" *) Bash(node "*hooks*.mjs" --selftest) Bash(node *hooks*.mjs --selftest) Bash(claude plugin validate *) Read Write Agent AskUserQuestion Artifact ArtifactData
 ---
 
 # Kaizen: measure → choose → apply → verify

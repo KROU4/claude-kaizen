@@ -2,7 +2,7 @@
 name: apply
 description: Apply one or more Kaizen recipes by id (or the saved choices.json) with a dry run first, then verify. Use when the user names recipes to apply, says "apply the hook/rule/permissions recipe", or wants to re-apply after editing choices.
 argument-hint: "<recipe-id[,recipe-id]> [--scope user|project] [--param id.name=value] [--param-file id.name=path] | choices.json"
-allowed-tools: Bash(node *kaizen.mjs *) Bash(node *hooks*.mjs --selftest) Read Write
+allowed-tools: Bash(node "*kaizen.mjs" *) Bash(node "*hooks*.mjs" --selftest) Bash(node *hooks*.mjs --selftest) Read Write
 ---
 
 # Kaizen apply

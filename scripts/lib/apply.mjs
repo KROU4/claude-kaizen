@@ -219,7 +219,8 @@ const handlers = {
     const target = expandHome(fill(a.target || '{claudeMd}', ctx));
     const id = a.id || io.recipeId;
     if (a.content && paramsUnfilled(a.content, ctx.params)) return { skipped: true, reason: 'text parameter not filled in (ask Claude to draft it, then re-apply)', id };
-    const body = (a.template ? renderTemplateFile(a.template, ctx.params) : fill(a.content, ctx)).trim();
+    // LF only: a CRLF body (a --param-file saved on Windows) would be hashed as written but compared LF-normalised by undo
+    const body = (a.template ? renderTemplateFile(a.template, ctx.params) : fill(a.content, ctx)).replace(/\r\n?/g, '\n').trim();
     if (!body) throw new Error(`claude-md.block ${id}: empty content`);
     const start = `<!-- kaizen:start ${id} -->`;
     const end = `<!-- kaizen:end ${id} -->`;
@@ -230,7 +231,7 @@ const handlers = {
     let had = false;
     if (re.test(existing)) {
       had = true;
-      if (existing.match(re)[0] === block) return { skipped: true, reason: 'block unchanged', file: target, id };
+      if (existing.match(re)[0].replace(/\r\n/g, '\n') === block) return { skipped: true, reason: 'block unchanged', file: target, id };
       next = existing.replace(re, () => block); // function form: the text may contain $&, $', $` or $$
     } else {
       next = existing.replace(/\s*$/, '') + (existing.trim() ? '\n\n' : '') + block + '\n';
@@ -399,7 +400,7 @@ function ownedFiles() {
   const set = new Set();
   for (const m of listManifests()) {
     if (m.manifest.undone) continue;
-    for (const r of m.manifest.recipes || []) for (const a of r.actions || []) if (a.type === 'file' && a.file) set.add(path.resolve(a.file));
+    for (const r of m.manifest.recipes || []) for (const a of r.actions || []) if (a.type === 'file' && a.file && !a.undone) set.add(path.resolve(a.file));
   }
   return set;
 }
@@ -509,7 +510,12 @@ export async function cmdApply(args, { loadMeasure, pickLang }) {
   let extraFile = null;
   if (flags.add && flags.add !== true) extraFile = resolveExtraFile(flags.add);
   else if (flags.add === true) throw new Error('--add expects a file');
-  else if (rec && typeof rec.extraFile === 'string' && exists(rec.extraFile)) extraFile = rec.extraFile;
+  else {
+    // `recommend --all --add FILE` records the path only in recommendations.all.json
+    const recAll = readJsonSafe(path.join(stateDir(), 'recommendations.all.json'));
+    const remembered = [rec, recAll].map((x) => x && x.extraFile).find((f) => typeof f === 'string' && exists(f));
+    if (remembered) extraFile = remembered;
+  }
   if (extraFile) {
     const extra = readExtraRecipes(extraFile);
     if (!extra) {
@@ -614,7 +620,7 @@ function undoEntry(e, io) {
     case 'settings.set': {
       const s = io.load(e.file);
       const cur = getPath(s, e.path);
-      if (JSON.stringify(cur) !== JSON.stringify(e.value)) return `kept: ${e.path} changed since apply`;
+      if (JSON.stringify(cur) !== JSON.stringify(e.value) && !io.revertEdited) return `kept: ${e.path} changed since apply`;
       if (e.hadPrevious) setPath(s, e.path, e.previous);
       else deletePath(s, e.path);
       io.describe(`${e.file}: restore ${e.path}`);
@@ -633,7 +639,7 @@ function undoEntry(e, io) {
     case 'file': {
       if (!exists(e.file)) return 'file already removed';
       const cur = fs.readFileSync(e.file, 'utf8');
-      if (sha(cur) !== e.hash) return `kept: ${e.file} modified since apply`;
+      if (sha(cur) !== e.hash && !io.revertEdited) return `kept: ${e.file} modified since apply`;
       io.describe(`${e.file}: delete`);
       if (!io.dry) {
         io.backup(e.file);
@@ -651,8 +657,10 @@ function undoEntry(e, io) {
       if (!m) return 'block already gone';
       // like `file` and `settings.set`: leave alone what the user edited after apply (journals from before the hash was recorded skip this check)
       if (e.hash) {
-        const current = m[0].slice(m[1].length, m[0].length - m[2].length).replace(/\r\n/g, '\n');
-        if (sha(current) !== e.hash) return `kept: ${e.file} block "${e.id}" modified since apply`;
+        const raw = m[0].slice(m[1].length, m[0].length - m[2].length);
+        // LF-normalised (an editor may have converted the line endings); the raw text covers journals written before the body was normalised
+        const untouched = sha(raw.replace(/\r\n/g, '\n')) === e.hash || sha(raw) === e.hash;
+        if (!untouched && !io.revertEdited) return `kept: ${e.file} block "${e.id}" modified since apply`;
       }
       const before = text.slice(0, m.index);
       const after = text.slice(m.index + m[0].length);
@@ -740,14 +748,22 @@ export async function cmdUndo(args, { pickLang }) {
   let total = 0;
   for (const m of targets) {
     const io = makeIo({ dry, force: true, measure: null, batchDir: path.join(m.dir, 'undo'), recipeId: null });
+    // --force: also revert what the user edited after apply (the files as they are now are backed up first)
+    io.revertEdited = !!flags.force;
     const results = [];
+    const pending = []; // entries that were kept or failed: they stay in the journal and can be undone later
     for (const r of [...m.manifest.recipes].reverse()) {
       for (const e of [...(r.actions || [])].reverse()) {
+        if (e.undone) continue; // reverted by an earlier, partial undo of this batch
+        let result;
         try {
-          results.push({ recipe: r.id, type: e.type, result: undoEntry(e, io) });
+          result = undoEntry(e, io);
         } catch (err) {
-          results.push({ recipe: r.id, type: e.type, result: `error: ${err.message}` });
+          result = `error: ${err.message}`;
         }
+        results.push({ recipe: r.id, type: e.type, result });
+        if (/^(kept|error):/.test(result)) pending.push(e);
+        else if (!dry) e.undone = true;
       }
     }
     for (const d of io.described) process.stdout.write(`  ${dry ? '→' : '✓'} ${d}\n`);
@@ -755,12 +771,24 @@ export async function cmdUndo(args, { pickLang }) {
     const n = results.filter((x) => x.result === 'ok').length;
     total += n;
     if (!dry) {
-      m.manifest.undone = true;
-      m.manifest.undoneAt = new Date().toISOString();
+      // Only a batch with nothing left over counts as undone. If something was kept (or failed) the batch stays
+      // undoable for exactly those entries: `undo <id>` retries them, `undo <id> --force` reverts them anyway.
+      if (pending.length) {
+        m.manifest.partiallyUndone = true;
+        m.manifest.partiallyUndoneAt = new Date().toISOString();
+      } else {
+        m.manifest.undone = true;
+        m.manifest.undoneAt = new Date().toISOString();
+        delete m.manifest.partiallyUndone;
+        delete m.manifest.partiallyUndoneAt;
+      }
       m.manifest.undoResults = results;
       writeJsonAtomic(path.join(m.dir, 'manifest.json'), m.manifest);
     }
     process.stdout.write(t('cli.undo_done', { n, id: m.id }) + '\n');
+    if (pending.length && !dry) {
+      process.stdout.write(t('cli.undo_partial', { n: pending.length, id: m.id, now: path.join(m.dir, 'undo', 'backups'), before: path.join(m.dir, 'backups') }) + '\n');
+    }
   }
   return { undone: total };
 }

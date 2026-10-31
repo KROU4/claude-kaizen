@@ -1,7 +1,7 @@
 ---
 name: status
 description: Show Kaizen's state — when the last measurement ran, how many recommendations are open, which batches were applied or undone, and whether the weekly nudge is on. Use when the user asks what Kaizen changed, what is pending, or whether it is time to re-measure.
-allowed-tools: Bash(node *kaizen.mjs *) Read
+allowed-tools: Bash(node "*kaizen.mjs" *) Read
 ---
 
 # Kaizen status

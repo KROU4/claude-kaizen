@@ -2,7 +2,7 @@
 name: measure
 description: Measure how the user works with Claude Code (sessions, tools, friction, context, costs, skills, MCP, habits) from local transcripts and show the digest, without changing anything. Use when the user asks for a report, statistics or insights about their Claude Code usage, or wants to compare before/after a change.
 argument-hint: "[--days N] [--all]"
-allowed-tools: Bash(node *kaizen.mjs *) Read
+allowed-tools: Bash(node "*kaizen.mjs" *) Read
 ---
 
 # Kaizen measure (read-only)

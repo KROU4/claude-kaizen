@@ -2,7 +2,7 @@
 name: undo
 description: Revert changes Kaizen applied — the last batch, a specific batch id, or everything — restoring settings, removing installed hooks, rule blocks, skills and agents. Use when the user wants to roll back, disable or remove something Kaizen set up.
 argument-hint: "[batch-id | --all]"
-allowed-tools: Bash(node *kaizen.mjs *) Read
+allowed-tools: Bash(node "*kaizen.mjs" *) Read
 ---
 
 # Kaizen undo

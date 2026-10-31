@@ -436,7 +436,7 @@ function makeField(p, id) {
     get = () => ctl.value;
     set = (v) => { if (typeof v === 'string') ctl.value = v; };
   }
-  return { name: p.name, get, set, el: h('div', { class: 'fld' + (wide ? ' wide' : '') }, lab, ctl) };
+  return { name: p.name, secret: !!p.secret, get, set, el: h('div', { class: 'fld' + (wide ? ' wide' : '') }, lab, ctl) };
 }
 
 /* cards */
@@ -580,10 +580,11 @@ function applyFilter() {
 }
 
 /* state: collect, persist, count */
-const read = (c) => ({
+const read = (c, persist) => ({
   id: c.r.id,
   scope: c.scope ? c.scope.value : c.r.scope || (c.r.scopes && c.r.scopes[0]) || 'user',
-  params: Object.fromEntries(c.fields.map((f) => [f.name, f.get()]))
+  /* persist = for localStorage: a secret parameter is never stored in the browser, it only goes out with the submission */
+  params: Object.fromEntries(c.fields.filter((f) => !(persist && f.secret)).map((f) => [f.name, f.get()]))
 });
 function collect() {
   const on = cards.filter((c) => c.cb.checked);
@@ -600,7 +601,7 @@ const KEY = 'kaizen:' + (() => { let x = 2166136261; for (const ch of recs.map((
 const ls = (fn) => { try { return fn(localStorage); } catch (e) { return null; } };
 function save() {
   const sel = {};
-  cards.forEach((c) => { if (c.cb.checked) sel[c.r.id] = read(c); });
+  cards.forEach((c) => { if (c.cb.checked) sel[c.r.id] = read(c, true); });
   const notes = $('notes').value;
   if (Object.keys(sel).length || notes) ls((s) => s.setItem(KEY, JSON.stringify({ sel, notes }))); else ls((s) => s.removeItem(KEY));
 }

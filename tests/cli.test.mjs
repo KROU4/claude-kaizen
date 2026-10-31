@@ -484,6 +484,27 @@ describe('kaizen end to end: measure, recommend, apply, verify, undo', () => {
     assert.equal(json(cli(home, ['status'])).applied[0].undone, true);
     assert.ok(cli(home, ['undo']).stdout.includes(t('cli.undo_nothing')));
   });
+
+  it('undo keeps what was edited after apply: the batch shows as partiallyUndone, and undo --force finishes it', () => {
+    const home = measured();
+    assert.equal(cli(home, ['apply', '--recipe', 'hooks.guard-destructive']).status, 0);
+    const script = path.join(home.stateDir, 'hooks', 'guard-destructive.mjs');
+    fs.appendFileSync(script, '\n// tuned by hand\n');
+    const first = cli(home, ['undo']);
+    assert.equal(first.status, 0, first.stderr);
+    assert.match(first.stdout, /kept: .*modified since apply/);
+    assert.match(first.stdout, /only partly undone/);
+    assert.ok(fs.existsSync(script));
+    const partial = json(cli(home, ['status'])).applied[0];
+    assert.equal(partial.undone, false);
+    assert.equal(partial.partiallyUndone, true);
+    const forced = cli(home, ['undo', '--force']);
+    assert.equal(forced.status, 0, forced.stderr);
+    assert.ok(!fs.existsSync(script));
+    const done = json(cli(home, ['status'])).applied[0];
+    assert.equal(done.undone, true);
+    assert.equal(done.partiallyUndone, undefined);
+  });
 });
 
 describe('kaizen verify', () => {
@@ -762,6 +783,34 @@ describe('kaizen: custom recipes, --add and --param-file', () => {
     assert.ok(!r.stdout.includes('unknown recipe'), r.stdout);
     const md = fs.readFileSync(path.join(home.configDir, 'CLAUDE.md'), 'utf8');
     assert.ok(md.includes('Always run the tests.\n\nNever commit to main.'), md);
+  });
+
+  it('recommend --all --add records the extraFile too, so apply finds the custom recipe afterwards without --add', () => {
+    const { home, extra } = withExtra();
+    const payload = json(cli(home, ['recommend', '--all', '--json', '--add', extra]));
+    assert.equal(payload.extraFile, path.resolve(extra));
+    assert.equal(fs.existsSync(path.join(home.stateDir, 'recommendations.json')), false, '--all must not write recommendations.json');
+    const rules = path.join(home.root, 'rules.md');
+    writeText(rules, 'Listed with --all.\n');
+    const r = cli(home, ['apply', '--recipe', 'custom.house-rules', '--param-file', `custom.house-rules.rules=${rules}`]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(!r.stdout.includes('unknown recipe'), r.stdout);
+    assert.ok(fs.readFileSync(path.join(home.configDir, 'CLAUDE.md'), 'utf8').includes('Listed with --all.'));
+  });
+
+  it('a CRLF --param-file is applied with LF line endings and undo --last removes the block', () => {
+    const { home, extra } = withExtra();
+    json(cli(home, ['recommend', '--json', '--add', extra]));
+    const rules = path.join(home.root, 'rules.txt');
+    fs.writeFileSync(rules, '- rule one\r\n- rule two\r\n', 'utf8');
+    assert.equal(cli(home, ['apply', '--recipe', 'custom.house-rules', '--param-file', `custom.house-rules.rules=${rules}`]).status, 0);
+    const claudeMd = path.join(home.configDir, 'CLAUDE.md');
+    assert.ok(!fs.readFileSync(claudeMd, 'utf8').includes('\r'));
+    const undone = cli(home, ['undo', '--last']);
+    assert.equal(undone.status, 0, undone.stderr);
+    assert.ok(!undone.stdout.includes('kept:'), undone.stdout);
+    assert.ok(!fs.existsSync(claudeMd) || !fs.readFileSync(claudeMd, 'utf8').includes('kaizen:start'));
+    assert.equal(json(cli(home, ['status'])).applied[0].undone, true);
   });
 
   it('a plain recommend (no --add) does not claim an extra file', () => {
