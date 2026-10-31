@@ -15,6 +15,17 @@ before(async () => {
   measure = fixture.measure;
 });
 
+describe('renderDigest: units follow the language', () => {
+  it('writes avg/max/ms/s/min/h in Russian in Russian mode, with no English unit left over', () => {
+    const md = renderDigest(measure, 'ru');
+    const d = loadLocale('ru').digest;
+    assert.ok(md.includes(`\`x.mjs\`: 2 ${d.runs}, ${d.avg} 2000 ${d.unit_ms}, ${d.max} 2500 ${d.unit_ms}`), md);
+    assert.ok(md.includes(`\`docker compose\`: 1×, ${d.avg} 120 ${d.unit_s}, ${d.max} 120 ${d.unit_s}`), md);
+    assert.doesNotMatch(md, /\bavg \d|\bmax \d|\d ms\b|\bmedian \d|\d min\./);
+    assert.ok(md.includes(`${d.unit_s}.`), 'the reply gap carries the Russian unit');
+  });
+});
+
 describe('renderDigest', () => {
   it('starts with the localized title as a level-1 heading', () => {
     assert.equal(renderDigest(measure, 'en').split('\n')[0], `# ${loadLocale('en').digest.title}`);
@@ -43,7 +54,7 @@ describe('renderDigest', () => {
   it('shows the facts recipes are chosen from: slow hooks, slow commands, allow rules, unused MCP, repeated prompts', () => {
     const md = renderDigest(measure, 'en');
     assert.ok(md.includes(`\`x.mjs\`: 2 ${loadLocale('en').digest.runs}, avg 2000 ms, max 2500 ms`));
-    assert.ok(/`docker compose`: 1×\s?, avg 120 s, max 120 s/.test(md));
+    assert.ok(md.includes('`docker compose`: 1×, avg 120 s, max 120 s'), 'no stray space before the comma');
     assert.ok(/`Bash\(git status[ :]\*\)` \(3\)/.test(md));
     assert.ok(md.includes('**dead-srv**'));
     assert.ok(md.includes('3× “deploy the service to staging and” — Deploy the service to staging and check logs'));

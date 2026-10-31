@@ -37,6 +37,18 @@ export function translator(lang) {
   };
 }
 
+/**
+ * An expected failure caused by what the user typed or by a missing step (unknown id, bad flag, no measurement yet).
+ * The CLI prints just its (already localized) message and exits 1; the stack is shown only with KAIZEN_DEBUG=1.
+ */
+export class UserError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'UserError';
+    this.expected = true;
+  }
+}
+
 /** Pick a localized value from {en: .., ru: ..} objects used in the recipe catalog. */
 export function pick(localized, lang) {
   if (localized == null) return '';

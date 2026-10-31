@@ -19,9 +19,9 @@ import { inventory } from './lib/inventory.mjs';
 import { readInsights } from './lib/insights.mjs';
 import { buildMeasure, METRIC_DOCS } from './lib/metrics.mjs';
 import { renderDigest } from './lib/digest.mjs';
-import { translator, SUPPORTED } from './lib/i18n.mjs';
+import { translator, SUPPORTED, UserError } from './lib/i18n.mjs';
 import { claudeVersion, platformSummary } from './lib/platform.mjs';
-import { addExtraRecipes, loadCatalog, readExtraRecipes, recommend, resolveExtraFile, validateCatalog } from './lib/recipes.mjs';
+import { addExtraRecipes, loadCatalog, readExtraRecipes, recommend, rememberedExtraFile, resolveExtraFile, validateCatalog } from './lib/recipes.mjs';
 
 const VERSION = JSON.parse(fs.readFileSync(path.join(kitRoot(), 'package.json'), 'utf8')).version;
 
@@ -74,18 +74,43 @@ function readConfig() {
   return readJsonSafe(path.join(stateDir(), 'config.json'), {}) || {};
 }
 
-function pickLang(flags, measure) {
-  if (flags.lang && SUPPORTED.includes(flags.lang)) return flags.lang;
-  const cfg = readConfig();
-  if (cfg.lang && SUPPORTED.includes(cfg.lang)) return cfg.lang;
-  if (measure && measure.locale && measure.locale.lang) return measure.locale.lang;
-  return 'en';
+function validLang(l) {
+  return typeof l === 'string' && SUPPORTED.includes(l) ? l : null;
 }
+
+/**
+ * The language the user last asked for with --lang. `measure` and `recommend` record it (uiLang) in measure.json and
+ * recommendations.json; when both carry one, the file written last wins. Null when --lang was never given.
+ */
+function storedUiLang(measure) {
+  const m = measure || readJsonSafe(path.join(stateDir(), 'measure.json'));
+  const rec = readJsonSafe(path.join(stateDir(), 'recommendations.json'));
+  const found = [m, rec]
+    .filter((x) => x && validLang(x.uiLang))
+    .map((x) => ({ at: Date.parse(x.generatedAt) || 0, lang: x.uiLang }))
+    .sort((a, b) => b.at - a.at);
+  return found.length ? found[0].lang : null;
+}
+
+/** --lang, then config.json, then the language chosen earlier with --lang (measure/recommend), then the detected one. */
+function pickLang(flags, measure) {
+  const fromFlag = validLang(flags && flags.lang);
+  if (fromFlag) return fromFlag;
+  const fromConfig = validLang(readConfig().lang);
+  if (fromConfig) return fromConfig;
+  const stored = storedUiLang(measure);
+  if (stored) return stored;
+  const m = measure || readJsonSafe(path.join(stateDir(), 'measure.json'));
+  return (m && m.locale && validLang(m.locale.lang)) || 'en';
+}
+
+// the flags of the running command, so that errors raised deep inside (no measurement yet ...) honour --lang
+let cliFlags = {};
 
 function loadMeasure() {
   const file = path.join(stateDir(), 'measure.json');
   const m = readJsonSafe(file);
-  if (!m) throw new Error(`No measurement found at ${file}. Run \`kaizen measure\` first.`);
+  if (!m) throw new UserError(translator(pickLang(cliFlags, null))('err.no_measure', { file }));
   return m;
 }
 
@@ -105,12 +130,14 @@ function appliedIds() {
 // ---------------------------------------------------------------- measure
 async function cmdMeasure(flags) {
   const quiet = !!flags.quiet;
-  const windowDays = flags.all ? 3650 : Number(flags.days || 30);
+  const t = translator(pickLang(flags, null));
+  const windowDays = flags.all ? 3650 : flags.days === undefined ? 30 : Number(flags.days);
+  // checked before the (slow) scan: a typo like --days abc must not run it and then crash on an invalid date
+  if (!Number.isFinite(windowDays) || windowDays <= 0) throw new UserError(t('err.bad_days', { value: Array.isArray(flags.days) ? flags.days.join(',') : String(flags.days) }));
   const since = new Date(Date.now() - windowDays * 86400000);
   const cfg = configDir();
   const state = ensureDir(stateDir());
   const projectDir = flags.project ? path.resolve(expandHome(String(flags.project))) : process.env.CLAUDE_PROJECT_DIR || null;
-  const t = translator(pickLang(flags, null));
   if (!quiet) err(t('cli.measuring', { days: windowDays, dir: cfg }));
   const t0 = Date.now();
   const scan = await scanTranscripts({
@@ -151,6 +178,9 @@ async function cmdMeasure(flags) {
   for (const m of Object.values(models)) m.share = total ? m.messages / total : 0;
   measure.models = Object.fromEntries(Object.entries(models).sort((a, b) => b[1].messages - a[1].messages));
 
+  // Remember an explicit --lang (or the one chosen earlier) so that console, apply, undo, verify and status speak it too
+  const uiLang = validLang(flags.lang) || storedUiLang(null);
+  if (uiLang) measure.uiLang = uiLang;
   const lang = pickLang(flags, measure);
   // keep the previous measurement so this digest can show what moved
   const prevJson = path.join(state, 'measure.json');
@@ -182,7 +212,7 @@ function cmdRecommend(flags) {
   const catalog = loadCatalog();
   const extraFile = flags.add && flags.add !== true ? resolveExtraFile(flags.add) : null;
   const extra = extraFile ? readExtraRecipes(extraFile) : null;
-  if (flags.add && !extra) throw new Error(`--add: cannot read ${flags.add}`);
+  if (flags.add && !extra) throw new UserError(translator(lang)('err.add_unreadable', { file: flags.add }));
   addExtraRecipes(catalog, extra);
   const res = recommend(catalog, measure, { lang, applied: appliedIds(), includeAll: !!flags.all });
   if (extra && extra.paramDefaults && typeof extra.paramDefaults === 'object') {
@@ -198,6 +228,8 @@ function cmdRecommend(flags) {
   const payload = {
     generatedAt: new Date().toISOString(),
     lang,
+    // the language the user explicitly asked for (here or earlier); console, apply, undo, verify and status follow it
+    ...(validLang(flags.lang) || storedUiLang(measure) ? { uiLang: validLang(flags.lang) || storedUiLang(measure) } : {}),
     measureGeneratedAt: measure.generatedAt,
     windowDays: measure.windowDays,
     sessions: measure.totals.sessions,
@@ -222,13 +254,13 @@ function cmdRecommend(flags) {
   out(t('cli.recommend_header', { n: list.length, high: list.filter((r) => r.impact === 'high').length }));
   out('');
   for (const r of list) {
-    out(`[${r.impact[0].toUpperCase()}] ${r.id} — ${r.title}${r.kind === 'advice' ? ' (advice)' : ''}`);
+    out(`[${r.impact[0].toUpperCase()}] ${r.id} — ${r.title}${r.kind === 'advice' ? ` (${t('cli.advice_tag')})` : ''}`);
     out(`    ${r.evidence}`);
     if (r.actionsSummary.length) out(`    → ${r.actionsSummary.join('; ')}`);
   }
   if (res.alreadyApplied.length) {
     out('');
-    out(`Already applied: ${res.alreadyApplied.map((a) => a.id).join(', ')}`);
+    out(t('cli.already_applied', { ids: res.alreadyApplied.map((a) => a.id).join(', ') }));
   }
   return payload;
 }
@@ -240,8 +272,9 @@ function cmdRecommend(flags) {
  */
 async function cmdChoices(args) {
   const src = args.flags.import;
+  const t = translator(pickLang(args.flags, null));
   if (!src || src === true) {
-    err('kaizen choices: usage: choices --import <FILE|->');
+    err(t('cli.choices_usage'));
     process.exitCode = 2;
     return null;
   }
@@ -252,16 +285,23 @@ async function cmdChoices(args) {
     try {
       doc = JSON.parse(raw.replace(/^﻿/, ''));
     } catch (e) {
-      throw new Error(`not valid JSON (${e.message})`);
+      throw new Error(t('cli.choices_bad_json', { detail: e.message }));
     }
     const choices = validateChoices(doc);
+    // ids that no recipe in the catalog (or in the --add / remembered extra-recipes file) answers to: `apply` would skip them
+    const catalog = loadCatalog();
+    const addFile = args.flags.add && args.flags.add !== true ? resolveExtraFile(args.flags.add) : rememberedExtraFile(stateDir());
+    addExtraRecipes(catalog, addFile ? readExtraRecipes(addFile) : null);
+    const known = new Set(catalog.recipes.map((r) => r.id));
+    const unknown = [...new Set(choices.selected.map((s) => s.id).filter((id) => !known.has(id)))];
     const file = path.join(ensureDir(stateDir()), 'choices.json');
     writeJsonAtomic(file, choices);
-    const summary = { ok: true, file, selected: choices.selected.length, discuss: choices.discuss.length, notes: choices.notes.length > 0 };
+    if (unknown.length) err(t('cli.choices_unknown', { ids: unknown.join(', ') }));
+    const summary = { ok: true, file, selected: choices.selected.length, discuss: choices.discuss.length, notes: choices.notes.length > 0, ...(unknown.length ? { unknown } : {}) };
     out(JSON.stringify(summary));
     return summary;
   } catch (e) {
-    err(`kaizen choices --import: ${e.message}`);
+    err(t('cli.choices_failed', { detail: e.message }));
     process.exitCode = 1;
     return null;
   }
@@ -277,6 +317,7 @@ function cmdStatus() {
   const status = {
     kitVersion: VERSION,
     stateDir: state,
+    lang: pickLang({}, null),
     lastMeasure: last,
     recommendations: rec ? { generatedAt: rec.generatedAt, count: rec.recommendations.length, high: rec.recommendations.filter((r) => r.impact === 'high').length } : null,
     applied: applied.map((a) => ({ id: a.id, at: a.at, recipes: (a.recipes || []).map((r) => r.id), undone: !!a.undone, ...(a.partiallyUndone && !a.undone ? { partiallyUndone: true } : {}) })),
@@ -409,6 +450,43 @@ function cmdDocs() {
 }
 
 // ---------------------------------------------------------------- verify
+/** The `.mjs` script paths a hook / status line command runs (quoted or bare). */
+function commandScripts(command) {
+  const found = new Set();
+  for (const m of String(command).matchAll(/"([^"]+\.mjs)"|'([^']+\.mjs)'|(\S+\.mjs)/g)) found.add(m[1] || m[2] || m[3]);
+  return [...found];
+}
+
+/**
+ * A predicate that tells whether a script path belongs to Kaizen, wherever the state directory is (KAIZEN_STATE_DIR can
+ * point anywhere): anything inside the current state dir, a file the journal recorded (hook scripts, status line), or the
+ * default `.../kaizen/hooks|statusline` layout.
+ */
+function kaizenScriptMatcher(state) {
+  const norm = (p) => {
+    const s = String(p).replace(/\\/g, '/');
+    return process.platform === 'win32' ? s.toLowerCase() : s;
+  };
+  const root = `${norm(path.resolve(state)).replace(/\/+$/, '')}/`;
+  const journaled = new Set();
+  const dir = path.join(state, 'applied');
+  if (exists(dir)) {
+    for (const d of fs.readdirSync(dir)) {
+      const man = readJsonSafe(path.join(dir, d, 'manifest.json'));
+      for (const r of (man && man.recipes) || []) {
+        for (const a of r.actions || []) {
+          if (a.type === 'file' && typeof a.file === 'string') journaled.add(norm(a.file));
+          if (a.type === 'settings.hook' && typeof a.identity === 'string') for (const s of commandScripts(a.identity.split('|').slice(1).join('|'))) journaled.add(norm(s));
+        }
+      }
+    }
+  }
+  return (script) => {
+    const n = norm(script);
+    return n.startsWith(root) || journaled.has(n) || /kaizen\/(hooks|statusline)/.test(n);
+  };
+}
+
 function cmdVerify(flags) {
   const state = stateDir();
   let measure = null;
@@ -442,17 +520,18 @@ function cmdVerify(flags) {
   }
   // 3. settings files parse and reference existing hook files
   const projectDir = flags.project ? path.resolve(expandHome(String(flags.project))) : process.env.CLAUDE_PROJECT_DIR || null;
+  const isKaizenScript = kaizenScriptMatcher(state);
   for (const { file } of settingsFiles(projectDir)) {
     if (!exists(file)) continue;
     try {
       const s = JSON.parse(fs.readFileSync(file, 'utf8'));
       const cmds = [];
       for (const groups of Object.values(s.hooks || {})) for (const g of groups || []) for (const h of g.hooks || []) if (typeof h.command === 'string') cmds.push(h.command);
-      const ours = cmds.filter((c) => /kaizen[\\/](hooks|statusline)/i.test(c));
+      if (s.statusLine && typeof s.statusLine.command === 'string') cmds.push(s.statusLine.command);
+      const ours = cmds.map((c) => ({ c, scripts: commandScripts(c).filter(isKaizenScript) })).filter((x) => x.scripts.length);
       add(true, t('verify.settings_ok', { file, hooks: ours.length }));
-      for (const c of ours) {
-        const m = c.match(/"([^"]*kaizen[\\/][^"]*\.mjs)"/i) || c.match(/(\S*kaizen[\\/]\S*\.mjs)/i);
-        if (m && !exists(m[1])) add(false, t('verify.hook_missing', { file, path: m[1] }));
+      for (const { c, scripts } of ours) {
+        for (const script of scripts) if (!exists(script)) add(false, t('verify.hook_missing', { file, path: script }));
         // the interpreter is pinned by absolute path too; a node that moved (version manager, upgrade) breaks every hook
         const exe = c.match(/^\s*"([^"]+)"/) || c.match(/^\s*(\S+)/);
         if (exe && path.isAbsolute(exe[1]) && !exists(exe[1])) add(false, t('verify.hook_missing', { file, path: exe[1] }));
@@ -525,7 +604,8 @@ function cmdNudge() {
   }
 }
 
-function help() {
+function help(flags = {}) {
+  const t = translator(pickLang(flags, null));
   out(`claude-kaizen ${VERSION}
 
 Usage: node scripts/kaizen.mjs <command> [options]
@@ -553,11 +633,14 @@ Usage: node scripts/kaizen.mjs <command> [options]
   docs       Regenerate docs/recipes.md from the catalog
   nudge      SessionStart hook: one-line reminder when a re-measure is due
 
+${t('cli.help_note')}
+
 State lives in ${stateDir()} (override with KAIZEN_STATE_DIR).`);
 }
 
 export async function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv);
+  cliFlags = args.flags;
   const cmd = args._[0];
   if (args.flags.version || cmd === 'version') {
     out(VERSION);
@@ -567,7 +650,7 @@ export async function main(argv = process.argv.slice(2)) {
     case undefined:
     case 'help':
     case '--help':
-      return help();
+      return help(args.flags);
     case 'measure':
       return cmdMeasure(args.flags);
     case 'recommend':
@@ -626,7 +709,18 @@ function isEntryPoint() {
 
 if (isEntryPoint()) {
   main().catch((e) => {
-    err(`kaizen: ${e && e.stack ? e.stack : e}`);
+    // A mistake of the user (unknown id, bad flag, a step run out of order) is one clean line; the stack is for KAIZEN_DEBUG=1
+    if (process.env.KAIZEN_DEBUG === '1') err(`kaizen: ${e && e.stack ? e.stack : e}`);
+    else {
+      err(`kaizen: ${e && e.message ? e.message : e}`);
+      if (!(e && e.expected)) {
+        try {
+          err(translator(pickLang({}, null))('err.debug_hint'));
+        } catch {
+          /* the hint is a courtesy */
+        }
+      }
+    }
     process.exitCode = 1;
   });
 }

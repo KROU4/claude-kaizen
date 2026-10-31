@@ -239,6 +239,13 @@ describe('renderText', () => {
     assert.equal(renderText('{none}', hm), '—');
   });
 
+  it('prints the units of a hook entry in the requested language', () => {
+    const hm = { slow: [{ hook: 'fmt.mjs', runs: 4, avgMs: 2300, maxMs: 9100 }], killed: [{ hook: 'push-guard.mjs', timeouts: 12, limitMs: 5000 }] };
+    assert.equal(renderText('{slow}', hm, {}, 'ru'), 'fmt.mjs (сред. 2300 мс, макс. 9100 мс)');
+    assert.equal(renderText('{killed}', hm, {}, 'ru'), 'push-guard.mjs (12× > 5 с)');
+    assert.equal(renderText('{slow}', hm, {}, 'en'), 'fmt.mjs (avg 2300 ms, max 9100 ms)');
+  });
+
   it('|pct rounds a fraction to a percentage', () => {
     assert.equal(renderText('{a.ratio|pct}', m), '26%');
   });
@@ -671,6 +678,20 @@ describe('recommend on the real catalog with the fixture measurement', () => {
 
   it('recommends denying secret files because no deny rule exists', () => {
     assert.ok(ids().includes('permissions.deny-secrets'));
+  });
+
+  it('deny-secrets evidence does not claim there are no deny rules when there are some that miss .env', () => {
+    const withRules = (rules) => ({ ...measure, inventory: { ...measure.inventory, permissions: { ...measure.inventory.permissions, deny: rules.length } }, context: { ...measure.context, denyRulesText: rules.join('\n').toLowerCase() } });
+    for (const lang of ['en', 'ru']) {
+      const none = recommend(loadCatalog(), withRules([]), { lang }).recommended.find((r) => r.id === 'permissions.deny-secrets');
+      const some = recommend(loadCatalog(), withRules(['Bash(rm -rf:*)', 'Read(./secrets/**)']), { lang }).recommended.find((r) => r.id === 'permissions.deny-secrets');
+      assert.ok(none && some, 'it fires with no rules and with rules that do not cover .env');
+      assert.doesNotMatch(some.evidence, /No deny rules are configured|Deny-правил нет/);
+      assert.ok(some.evidence.includes('2'), some.evidence);
+      assert.ok(none.evidence.includes('0'), none.evidence);
+      assert.ok(!/filesEdited|затронуто/.test(some.evidence), 'the unrelated edited-files count is gone');
+    }
+    assert.equal(recommend(loadCatalog(), withRules(['Read(./.env)']), {}).recommended.some((r) => r.id === 'permissions.deny-secrets'), false);
   });
 
   it('recommends a status line because none is configured', () => {

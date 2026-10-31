@@ -6,8 +6,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { configDir, ensureDir, exists, expandHome, homeDir, kitRoot, readJsonSafe, settingsFiles, stateDir, toPosix, writeJsonAtomic } from './paths.mjs';
 import { nodeCommand } from './platform.mjs';
-import { actionApplies, addExtraRecipes, loadCatalog, readExtraRecipes, resolveExtraFile, resolvePath } from './recipes.mjs';
-import { translator } from './i18n.mjs';
+import { actionApplies, addExtraRecipes, closeMatches, loadCatalog, readExtraRecipes, rememberedExtraFile, resolveExtraFile, resolvePath } from './recipes.mjs';
+import { UserError, translator } from './i18n.mjs';
 import { validateChoices } from './console.mjs';
 
 const SCOPES = ['user', 'project'];
@@ -60,7 +60,7 @@ export function buildContext({ scope = 'user', projectDir = null, params = {} })
   const cfg = configDir();
   const home = stateDir();
   const proj = projectDir ? path.resolve(projectDir) : null;
-  if (scope === 'project' && !proj) throw new Error('project scope requested but no project directory given (use --project DIR or run inside the project)');
+  if (scope === 'project' && !proj) throw new UserError(translator('en')('err.project_scope'));
   const ctx = {
     scope,
     node: nodeCommand().replace(/\\/g, '/'),
@@ -145,10 +145,10 @@ const handlers = {
     if (a.async) entry.async = true;
     if (a.if) entry.if = a.if;
     const id = hookIdentity(entry);
-    for (const group of list) for (const h of group.hooks || []) if (hookIdentity(h) === id) return { skipped: true, reason: 'hook already present', file, event: a.event, command: entry.command };
+    for (const group of list) for (const h of group.hooks || []) if (hookIdentity(h) === id) return { skipped: true, reason: io.t('apply.skip.hook_present'), file, event: a.event, command: entry.command };
     const group = { hooks: [entry] };
     if (a.matcher) group.matcher = a.matcher;
-    io.describe(`${file}: add ${a.event} hook${a.matcher ? ` [${a.matcher}]` : ''} → ${entry.command}`);
+    io.describe(io.t('apply.plan.hook_add', { file, event: a.event, matcher: a.matcher ? ` [${a.matcher}]` : '', command: entry.command }));
     if (!io.dry) {
       list.push(group);
       io.save(file, settings);
@@ -161,8 +161,8 @@ const handlers = {
     const settings = io.load(file);
     const value = fillDeep(a.value, ctx);
     const prev = getPath(settings, a.path);
-    if (JSON.stringify(prev) === JSON.stringify(value)) return { skipped: true, reason: 'already set', file, path: a.path };
-    io.describe(`${file}: set ${a.path} = ${JSON.stringify(value)}${prev !== undefined ? ` (was ${JSON.stringify(prev)})` : ''}`);
+    if (JSON.stringify(prev) === JSON.stringify(value)) return { skipped: true, reason: io.t('apply.skip.already_set'), file, path: a.path };
+    io.describe(io.t(prev !== undefined ? 'apply.plan.set_was' : 'apply.plan.set', { file, path: a.path, value: JSON.stringify(value), prev: JSON.stringify(prev) }));
     if (!io.dry) {
       setPath(settings, a.path, value);
       io.save(file, settings);
@@ -182,8 +182,8 @@ const handlers = {
     const current = getPath(settings, a.path);
     const arr = Array.isArray(current) ? current : [];
     const added = values.filter((v) => !arr.includes(v));
-    if (!added.length) return { skipped: true, reason: 'nothing new to add', file, path: a.path };
-    io.describe(`${file}: append to ${a.path}: ${added.join(', ')}`);
+    if (!added.length) return { skipped: true, reason: io.t('apply.skip.nothing_new'), file, path: a.path };
+    io.describe(io.t('apply.plan.append', { file, path: a.path, items: added.join(', ') }));
     if (!io.dry) {
       setPath(settings, a.path, arr.concat(added));
       io.save(file, settings);
@@ -200,7 +200,7 @@ const handlers = {
   skill(a, ctx, io) {
     const name = fill(a.name, ctx).trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
     if (!name) throw new Error('skill action: empty name');
-    if (a.content && paramsUnfilled(a.content, ctx.params)) return { skipped: true, reason: `skill ${name}: text parameter not filled in (ask Claude to draft it, then re-apply)` };
+    if (a.content && paramsUnfilled(a.content, ctx.params)) return { skipped: true, reason: io.t('apply.skip.skill_unfilled', { name }) };
     let content = a.template ? renderTemplateFile(a.template, ctx.params) : fill(a.content, ctx);
     if (!content.trim()) throw new Error(`skill ${name}: empty content`);
     if (!/^---\r?\n/.test(content)) content = `---\nname: ${name}\ndescription: ${name.replace(/-/g, ' ')}\n---\n\n${content}`;
@@ -218,7 +218,7 @@ const handlers = {
   'claude-md.block'(a, ctx, io) {
     const target = expandHome(fill(a.target || '{claudeMd}', ctx));
     const id = a.id || io.recipeId;
-    if (a.content && paramsUnfilled(a.content, ctx.params)) return { skipped: true, reason: 'text parameter not filled in (ask Claude to draft it, then re-apply)', id };
+    if (a.content && paramsUnfilled(a.content, ctx.params)) return { skipped: true, reason: io.t('apply.skip.unfilled'), id };
     // LF only: a CRLF body (a --param-file saved on Windows) would be hashed as written but compared LF-normalised by undo
     const body = (a.template ? renderTemplateFile(a.template, ctx.params) : fill(a.content, ctx)).replace(/\r\n?/g, '\n').trim();
     if (!body) throw new Error(`claude-md.block ${id}: empty content`);
@@ -231,12 +231,12 @@ const handlers = {
     let had = false;
     if (re.test(existing)) {
       had = true;
-      if (existing.match(re)[0].replace(/\r\n/g, '\n') === block) return { skipped: true, reason: 'block unchanged', file: target, id };
+      if (existing.match(re)[0].replace(/\r\n/g, '\n') === block) return { skipped: true, reason: io.t('apply.skip.block_unchanged'), file: target, id };
       next = existing.replace(re, () => block); // function form: the text may contain $&, $', $` or $$
     } else {
       next = existing.replace(/\s*$/, '') + (existing.trim() ? '\n\n' : '') + block + '\n';
     }
-    io.describe(`${target}: ${had ? 'update' : 'add'} rules block "${id}" (${body.split('\n').length} lines)`);
+    io.describe(io.t(had ? 'apply.plan.block_update' : 'apply.plan.block_add', { target, id, lines: body.split('\n').length }));
     if (!io.dry) {
       io.backup(target);
       ensureDir(path.dirname(target));
@@ -249,7 +249,7 @@ const handlers = {
 
   'mcp.disable'(a, ctx, io) {
     const servers = listParam(a.servers, ctx, /[,\n]/);
-    if (!servers.length) return { skipped: true, reason: 'no servers selected' };
+    if (!servers.length) return { skipped: true, reason: io.t('apply.skip.no_servers') };
     const file = ctx.globalConfig;
     const cfg = io.load(file);
     // Servers can live in three places: user scope (mcpServers), local scope (projects[<dir>].mcpServers, the default of
@@ -273,20 +273,20 @@ const handlers = {
         inProjectFile.push(name);
       } else notFound.push(name);
     }
-    if (inProjectFile.length) io.note(`not removed (defined in the shared ${projectFile}, which Kaizen does not edit; use \`claude mcp remove\` or disable it for this project): ${inProjectFile.join(', ')}`);
+    if (inProjectFile.length) io.note(io.t('apply.note.mcp_project_file', { file: projectFile, names: inProjectFile.join(', ') }));
     if (!removed.length) {
-      const why = [...notFound, ...inProjectFile.map((n) => `${n} (project .mcp.json)`)];
-      return { skipped: true, reason: `servers not found in ~/.claude.json mcpServers (user scope or this project's local scope): ${why.join(', ')}`, file };
+      const why = [...notFound, ...inProjectFile.map((name) => io.t('apply.skip.in_project_mcp', { name }))];
+      return { skipped: true, reason: io.t('apply.skip.servers_not_found', { why: why.join(', ') }), file };
     }
-    if (notFound.length) io.note(`not removed (not found in ~/.claude.json, user or local scope): ${notFound.join(', ')}`);
-    io.describe(`${file}: remove MCP servers ${removed.map((r) => (r.where === 'local' ? `${r.name} (local scope)` : r.name)).join(', ')} (definitions kept in the journal)`);
+    if (notFound.length) io.note(io.t('apply.note.mcp_not_found', { names: notFound.join(', ') }));
+    io.describe(io.t('apply.plan.mcp_remove', { file, names: removed.map((r) => (r.where === 'local' ? io.t('apply.plan.local_scope', { name: r.name }) : r.name)).join(', ') }));
     if (!io.dry) io.save(file, cfg);
     return { type: 'mcp.disable', file, removed };
   },
 
   'settings.hook.remove'(a, ctx, io) {
     const commands = listParam(a.commands, ctx, /\r?\n/);
-    if (!commands.length) return { skipped: true, reason: 'no hooks selected' };
+    if (!commands.length) return { skipped: true, reason: io.t('apply.skip.no_hooks') };
     const norm = (c) => String(c).replace(/\s+/g, ' ').trim();
     const wanted = new Set(commands.map(norm));
     const removed = [];
@@ -310,17 +310,18 @@ const handlers = {
         if (!settings.hooks[event].length) delete settings.hooks[event];
       }
       if (changed) {
-        io.describe(`${file}: remove ${removed.filter((r) => r.file === file).length} failing hook entr${removed.filter((r) => r.file === file).length === 1 ? 'y' : 'ies'}`);
+        const n = removed.filter((r) => r.file === file).length;
+        io.describe(io.t(n === 1 ? 'apply.plan.hook_remove_one' : 'apply.plan.hook_remove_many', { file, n }));
         if (!io.dry) io.save(file, settings);
       }
     }
-    if (!removed.length) return { skipped: true, reason: 'selected hook commands not found in settings files' };
+    if (!removed.length) return { skipped: true, reason: io.t('apply.skip.hooks_not_found') };
     return { type: 'settings.hook.remove', removed };
   },
 
   'plugins.disable'(a, ctx, io) {
     const plugins = listParam(a.plugins, ctx, /[,\n]/);
-    if (!plugins.length) return { skipped: true, reason: 'no plugins selected' };
+    if (!plugins.length) return { skipped: true, reason: io.t('apply.skip.no_plugins') };
     const file = path.join(configDir(), 'settings.json');
     const settings = io.load(file);
     settings.enabledPlugins ||= {};
@@ -330,8 +331,8 @@ const handlers = {
       changed.push({ plugin: p, previous: settings.enabledPlugins[p] === undefined ? null : settings.enabledPlugins[p] });
       if (!io.dry) settings.enabledPlugins[p] = false;
     }
-    if (!changed.length) return { skipped: true, reason: 'already disabled', file };
-    io.describe(`${file}: disable plugins ${changed.map((c) => c.plugin).join(', ')}`);
+    if (!changed.length) return { skipped: true, reason: io.t('apply.skip.already_disabled'), file };
+    io.describe(io.t('apply.plan.plugins_disable', { file, names: changed.map((c) => c.plugin).join(', ') }));
     if (!io.dry) io.save(file, settings);
     return { type: 'plugins.disable', file, changed };
   },
@@ -365,12 +366,12 @@ function paramsUnfilled(content, params) {
 function writeManaged(target, content, io, extra = {}) {
   const existed = exists(target);
   const current = existed ? fs.readFileSync(target, 'utf8') : null;
-  if (existed && current === content) return { skipped: true, reason: 'identical file exists', file: target };
+  if (existed && current === content) return { skipped: true, reason: io.t('apply.skip.identical_file'), file: target };
   const ours = io.ownedFiles.has(path.resolve(target));
   if (existed && !ours && !io.force && !target.replace(/\\/g, '/').includes(toPosix(stateDir()))) {
-    return { skipped: true, reason: 'file exists and was not created by Kaizen (use --force to overwrite)', file: target };
+    return { skipped: true, reason: io.t('apply.skip.not_ours'), file: target };
   }
-  io.describe(`${target}: ${existed ? 'overwrite' : 'create'} (${content.length} chars)`);
+  io.describe(io.t(existed ? 'apply.plan.file_overwrite' : 'apply.plan.file_create', { target, chars: content.length }));
   if (!io.dry) {
     if (existed) io.backup(target);
     ensureDir(path.dirname(target));
@@ -405,7 +406,7 @@ function ownedFiles() {
   return set;
 }
 
-function makeIo({ dry, force, measure, batchDir, recipeId }) {
+function makeIo({ dry, force, measure, batchDir, recipeId, t = translator('en') }) {
   const cache = new Map();
   const described = [];
   const notes = [];
@@ -415,6 +416,7 @@ function makeIo({ dry, force, measure, batchDir, recipeId }) {
     force,
     measure,
     recipeId,
+    t,
     ownedFiles: ownedFiles(),
     described,
     notes,
@@ -449,7 +451,7 @@ function makeIo({ dry, force, measure, batchDir, recipeId }) {
 
 // ------------------------------------------------------------- apply
 
-export function loadChoices(args) {
+export function loadChoices(args, t = translator('en')) {
   const state = stateDir();
   const file = args._[1] ? path.resolve(expandHome(args._[1])) : path.join(state, 'choices.json');
   if (args.flags.recipe) {
@@ -465,34 +467,54 @@ export function loadChoices(args) {
     return { version: 1, source: 'cli', selected, discuss: [], notes: '' };
   }
   const choices = readJsonSafe(file);
-  if (!choices) throw new Error(`No choices file at ${file}. Run \`kaizen console\` or pass --recipe id[,id].`);
+  if (!choices) throw new UserError(t('err.no_choices', { file }));
   // the file may come from a browser page or an artifact database: same checks as `choices --import`
   return { ...validateChoices(choices), ...(choices.source ? { source: String(choices.source) } : {}) };
 }
 
-function applyParamOverrides(selected, flags) {
+/**
+ * The recipe a --param / --param-file spec names must be among the selected ones and must declare that parameter;
+ * otherwise the recipe would silently run with its defaults.
+ */
+function declaredParam(spec, id, name, selected, catalog, t) {
+  const sel = selected.find((s) => s.id === id);
+  const recipe = catalog.recipes.find((r) => r.id === id);
+  if (!sel || !recipe) throw new UserError(t('err.param_unknown_recipe', { spec, id, selected: selected.map((s) => s.id).join(', ') }));
+  const declared = recipe.params || [];
+  const param = declared.find((p) => p.name === name);
+  if (!param) throw new UserError(declared.length ? t('err.param_unknown_name', { spec, id, name, valid: declared.map((p) => p.name).join(', ') }) : t('err.param_no_params', { spec, id }));
+  return { sel, param };
+}
+
+function applyParamOverrides(selected, flags, catalog, t) {
   const list = Array.isArray(flags.param) ? flags.param : flags.param ? [flags.param] : [];
   for (const spec of list) {
     const m = String(spec).match(/^([a-z0-9.-]+)\.([a-zA-Z0-9_]+)=([\s\S]*)$/);
-    if (!m) throw new Error(`--param expects recipe.id.param=value, got: ${spec}`);
-    const sel = selected.find((s) => s.id === m[1]);
-    if (sel) sel.params = { ...(sel.params || {}), [m[2]]: m[3].includes(',') ? m[3].split(',') : m[3] };
+    if (!m) throw new UserError(t('err.param_shape', { spec }));
+    const { sel, param } = declaredParam(spec, m[1], m[2], selected, catalog, t);
+    // a select with a fixed option list takes only those values (a dynamic list, optionsFrom, is not known here)
+    if ((param.type === 'select' || param.type === 'multiselect') && Array.isArray(param.options) && param.options.length && !param.optionsFrom) {
+      const bad = m[3].split(param.type === 'multiselect' ? ',' : '\u0000').filter((v) => !param.options.includes(v));
+      if (bad.length) throw new UserError(t('err.param_bad_value', { spec, value: bad.join(', '), id: m[1], name: m[2], options: param.options.join(', ') }));
+    }
+    sel.params = { ...(sel.params || {}), [m[2]]: m[3].includes(',') ? m[3].split(',') : m[3] };
   }
   // --param-file recipe.id.param=PATH : the UTF-8 content of the file is the value as it is (multi-line text, commas
   // included), which is how a drafted rules block or skill body reaches a recipe without shell quoting
   const files = Array.isArray(flags['param-file']) ? flags['param-file'] : flags['param-file'] ? [flags['param-file']] : [];
   for (const spec of files) {
     const m = String(spec).match(/^([a-z0-9.-]+)\.([a-zA-Z0-9_]+)=([\s\S]+)$/);
-    if (!m) throw new Error(`--param-file expects recipe.id.param=PATH, got: ${spec}`);
+    if (!m) throw new UserError(t('err.param_file_shape', { spec }));
     const file = path.resolve(expandHome(m[3]));
     let text;
     try {
       text = fs.readFileSync(file, 'utf8');
     } catch (err) {
-      throw new Error(`--param-file ${m[1]}.${m[2]}: cannot read ${file} (${err.code || err.message})`);
+      throw new UserError(t('err.param_file_read', { id: m[1], name: m[2], file, code: err.code || err.message }));
     }
     const sel = selected.find((s) => s.id === m[1]);
-    if (!sel) throw new Error(`--param-file ${m[1]}.${m[2]}: recipe ${m[1]} is not among the selected recipes`);
+    if (!sel) throw new UserError(t('err.param_file_unselected', { id: m[1], name: m[2] }));
+    declaredParam(spec, m[1], m[2], selected, catalog, t);
     sel.params = { ...(sel.params || {}), [m[2]]: text.replace(/^﻿/, '') };
   }
 }
@@ -509,21 +531,26 @@ export async function cmdApply(args, { loadMeasure, pickLang }) {
   // else the one `recommend --add` recorded in recommendations.json (when it is still there).
   let extraFile = null;
   if (flags.add && flags.add !== true) extraFile = resolveExtraFile(flags.add);
-  else if (flags.add === true) throw new Error('--add expects a file');
-  else {
-    // `recommend --all --add FILE` records the path only in recommendations.all.json
-    const recAll = readJsonSafe(path.join(stateDir(), 'recommendations.all.json'));
-    const remembered = [rec, recAll].map((x) => x && x.extraFile).find((f) => typeof f === 'string' && exists(f));
-    if (remembered) extraFile = remembered;
-  }
+  else if (flags.add === true) throw new UserError(t('err.add_expects_file'));
+  else extraFile = rememberedExtraFile(stateDir()); // `recommend --all --add FILE` records the path only in recommendations.all.json
   if (extraFile) {
     const extra = readExtraRecipes(extraFile);
     if (!extra) {
-      if (flags.add) throw new Error(`--add: cannot read ${flags.add}`);
+      if (flags.add) throw new UserError(t('err.add_unreadable', { file: flags.add }));
     } else addExtraRecipes(catalog, extra);
   }
-  const choices = loadChoices(args);
-  applyParamOverrides(choices.selected || [], flags);
+  const choices = loadChoices(args, t);
+  const selectedIds = (choices.selected || []).map((s) => s.id);
+  // Ids that are not in the catalog (or in the --add file) are skipped with a warning when other recipes are selected too;
+  // when nothing selected is known the run is a mistake (usually a typo): fail before anything is written.
+  const knownIds = new Set(catalog.recipes.map((r) => r.id));
+  const unknownIds = selectedIds.filter((id) => !knownIds.has(id));
+  if (selectedIds.length && unknownIds.length === selectedIds.length) {
+    const close = [...new Set(unknownIds.flatMap((id) => closeMatches(id, knownIds)))];
+    const hint = (close.length ? t('err.did_you_mean', { suggestions: close.join(', ') }) : '') + (unknownIds.some((id) => /^custom\./.test(id)) ? t('err.custom_hint') : '');
+    throw new UserError(t('err.apply_unknown', { ids: unknownIds.join(', '), hint }));
+  }
+  applyParamOverrides(choices.selected || [], flags, catalog, t);
   const projectDir = flags.project ? path.resolve(expandHome(String(flags.project))) : process.env.CLAUDE_PROJECT_DIR || measure.env.projectDir || process.cwd();
   if (!choices.selected || !choices.selected.length) {
     process.stdout.write(t('cli.apply_nothing') + '\n');
@@ -533,7 +560,7 @@ export async function cmdApply(args, { loadMeasure, pickLang }) {
   const scopeOf = (sel, recipe) => flags.scope || sel.scope || (recipe && recipe.defaultScope) || 'user';
   for (const sel of choices.selected) {
     const scope = scopeOf(sel, catalog.recipes.find((r) => r.id === sel.id));
-    if (!SCOPES.includes(scope)) throw new Error(`bad scope ${JSON.stringify(scope)}${sel && sel.id ? ` for ${sel.id}` : ''}: expected ${SCOPES.join(' or ')}`);
+    if (!SCOPES.includes(scope)) throw new UserError(t(sel && sel.id ? 'err.bad_scope' : 'err.bad_scope_plain', { scope: JSON.stringify(scope), id: sel && sel.id, allowed: SCOPES.join(' or ') }));
   }
   // One journal directory per apply. The id has a resolution of one second, so a second apply in the same second
   // gets a numeric suffix instead of overwriting (and losing) the first batch's manifest and backups.
@@ -546,7 +573,7 @@ export async function cmdApply(args, { loadMeasure, pickLang }) {
   for (const sel of choices.selected) {
     const recipe = catalog.recipes.find((r) => r.id === sel.id);
     if (!recipe) {
-      lines.push(`! unknown recipe ${sel.id} (skipped)${/^custom\./.test(sel.id) ? ' - custom recipes need --add FILE (the extra-recipes file given to recommend --add)' : ''}`);
+      lines.push(t('apply.unknown_recipe', { id: sel.id }) + (/^custom\./.test(sel.id) ? t('apply.unknown_custom_hint') : ''));
       continue;
     }
     const recommended = rec && rec.recommendations.find((r) => r.id === sel.id);
@@ -556,18 +583,18 @@ export async function cmdApply(args, { loadMeasure, pickLang }) {
     Object.assign(params, sel.params || {});
     const scope = scopeOf(sel, recipe);
     const allowed = Array.isArray(recipe.scope) ? recipe.scope : [recipe.scope || recipe.defaultScope || 'user'];
-    if (!allowed.includes(scope)) lines.push(`! ${recipe.id}: scope ${scope} is not one of the scopes this recipe lists (${allowed.join(', ')}); applying anyway`);
+    if (!allowed.includes(scope)) lines.push(t('apply.scope_warn', { id: recipe.id, scope, allowed: allowed.join(', ') }));
     const ctx = buildContext({ scope, projectDir, params });
-    const io = makeIo({ dry, force: !!flags.force, measure, batchDir, recipeId: recipe.id });
+    const io = makeIo({ dry, force: !!flags.force, measure, batchDir, recipeId: recipe.id, t });
     const entries = [];
     for (const action of recipe.actions || []) {
       if (!actionApplies(action, measure)) {
-        lines.push(`  · ${recipe.id}: ${action.type} skipped (condition not met)`);
+        lines.push(t('apply.condition_skipped', { id: recipe.id, type: action.type }));
         continue;
       }
       const handler = handlers[action.type];
       if (!handler) {
-        lines.push(`! ${recipe.id}: unsupported action ${action.type}`);
+        lines.push(t('apply.unsupported', { id: recipe.id, type: action.type }));
         continue;
       }
       try {
@@ -582,7 +609,7 @@ export async function cmdApply(args, { loadMeasure, pickLang }) {
     for (const n of io.notes) lines.push(`  · ${recipe.id}: ${n}`);
     manifest.recipes.push({ id: recipe.id, scope, params, actions: entries, advice: !(recipe.actions && recipe.actions.length) });
   }
-  if (!dry) {
+  if (!dry && manifest.recipes.length) {
     ensureDir(batchDir);
     writeJsonAtomic(path.join(batchDir, 'manifest.json'), manifest);
     // only recipes that changed something (or are advice) count as applied; the rest stay open for a re-apply
@@ -613,7 +640,7 @@ function undoEntry(e, io) {
       s.hooks[e.event] = list.filter((g) => g.hooks && g.hooks.length);
       if (!s.hooks[e.event].length) delete s.hooks[e.event];
       if (!Object.keys(s.hooks).length) delete s.hooks;
-      io.describe(`${e.file}: remove ${e.event} hook ${e.identity.split('|')[1]}`);
+      io.describe(io.t('undo.plan.hook_remove', { file: e.file, event: e.event, command: e.identity.split('|')[1] }));
       if (!io.dry) io.save(e.file, s);
       return removed ? 'ok' : 'hook was already gone';
     }
@@ -623,7 +650,7 @@ function undoEntry(e, io) {
       if (JSON.stringify(cur) !== JSON.stringify(e.value) && !io.revertEdited) return `kept: ${e.path} changed since apply`;
       if (e.hadPrevious) setPath(s, e.path, e.previous);
       else deletePath(s, e.path);
-      io.describe(`${e.file}: restore ${e.path}`);
+      io.describe(io.t('undo.plan.restore', { file: e.file, path: e.path }));
       if (!io.dry) io.save(e.file, s);
       return 'ok';
     }
@@ -632,7 +659,7 @@ function undoEntry(e, io) {
       const arr = getPath(s, e.path);
       if (!Array.isArray(arr)) return 'list missing';
       setPath(s, e.path, arr.filter((v) => !e.added.includes(v)));
-      io.describe(`${e.file}: remove ${e.added.length} item(s) from ${e.path}`);
+      io.describe(io.t('undo.plan.remove_items', { file: e.file, n: e.added.length, path: e.path }));
       if (!io.dry) io.save(e.file, s);
       return 'ok';
     }
@@ -640,7 +667,7 @@ function undoEntry(e, io) {
       if (!exists(e.file)) return 'file already removed';
       const cur = fs.readFileSync(e.file, 'utf8');
       if (sha(cur) !== e.hash && !io.revertEdited) return `kept: ${e.file} modified since apply`;
-      io.describe(`${e.file}: delete`);
+      io.describe(io.t('undo.plan.delete', { file: e.file }));
       if (!io.dry) {
         io.backup(e.file);
         fs.unlinkSync(e.file);
@@ -668,7 +695,7 @@ function undoEntry(e, io) {
       // an in-place update gets its previous text back between the same newlines; an append gives back the
       // whitespace that was trimmed from the end of the file (older journals without it assume one newline).
       const next = e.previousBlock ? before + m[1] + e.previousBlock + m[2] + after : before + (typeof e.tail === 'string' ? e.tail : before ? '\n' : '') + after;
-      io.describe(`${e.file}: remove rules block "${e.id}"`);
+      io.describe(io.t('undo.plan.remove_block', { file: e.file, id: e.id }));
       if (!io.dry) {
         io.backup(e.file);
         if (!e.existedBefore && !next.trim()) fs.unlinkSync(e.file); // the file was created by apply and nothing else is in it
@@ -692,7 +719,7 @@ function undoEntry(e, io) {
           restored++;
         }
       }
-      io.describe(`${e.file}: restore MCP servers ${e.removed.map((r) => r.name).join(', ')}`);
+      io.describe(io.t('undo.plan.restore_mcp', { file: e.file, names: e.removed.map((r) => r.name).join(', ') }));
       if (!io.dry) io.save(e.file, cfg);
       return restored ? 'ok' : 'servers already present';
     }
@@ -708,7 +735,7 @@ function undoEntry(e, io) {
         if (r.matcher) group.matcher = r.matcher;
         list.push(group);
         restored++;
-        io.describe(`${r.file}: restore ${r.event} hook ${hookIdentity(r.hook).split('|')[1]}`);
+        io.describe(io.t('undo.plan.restore_hook', { file: r.file, event: r.event, command: hookIdentity(r.hook).split('|')[1] }));
         if (!io.dry) io.save(r.file, s);
       }
       return restored ? 'ok' : 'hooks already present';
@@ -720,13 +747,39 @@ function undoEntry(e, io) {
         if (c.previous === null) delete s.enabledPlugins[c.plugin];
         else s.enabledPlugins[c.plugin] = c.previous;
       }
-      io.describe(`${e.file}: re-enable plugins ${e.changed.map((c) => c.plugin).join(', ')}`);
+      io.describe(io.t('undo.plan.reenable_plugins', { file: e.file, names: e.changed.map((c) => c.plugin).join(', ') }));
       if (!io.dry) io.save(e.file, s);
       return 'ok';
     }
     default:
       return `unknown action type ${e.type}`;
   }
+}
+
+// undoEntry() reports in fixed English strings (they are compared, stored in the journal and asserted on); they are
+// translated only when printed.
+const RESULT_KEYS = [
+  [/^hook list missing$/, 'hook_list_missing', []],
+  [/^hook was already gone$/, 'hook_gone', []],
+  [/^kept: (.+) block "(.*)" modified since apply$/, 'kept_block', ['file', 'id']],
+  [/^kept: (.+) changed since apply$/, 'kept_changed', ['path']],
+  [/^kept: (.+) modified since apply$/, 'kept_modified', ['file']],
+  [/^list missing$/, 'list_missing', []],
+  [/^file already removed$/, 'file_gone', []],
+  [/^file missing$/, 'file_missing', []],
+  [/^block already gone$/, 'block_gone', []],
+  [/^servers already present$/, 'servers_present', []],
+  [/^hooks already present$/, 'hooks_present', []],
+  [/^unknown action type (.+)$/, 'unknown_type', ['type']],
+  [/^error: ([\s\S]*)$/, 'error', ['detail']],
+];
+
+function localizeResult(result, t) {
+  for (const [re, key, names] of RESULT_KEYS) {
+    const m = re.exec(result);
+    if (m) return t(`undo.res.${key}`, Object.fromEntries(names.map((n, i) => [n, m[i + 1]])));
+  }
+  return result;
 }
 
 export async function cmdUndo(args, { pickLang }) {
@@ -747,7 +800,12 @@ export async function cmdUndo(args, { pickLang }) {
   }
   let total = 0;
   for (const m of targets) {
-    const io = makeIo({ dry, force: true, measure: null, batchDir: path.join(m.dir, 'undo'), recipeId: null });
+    // Every undo run keeps its own backups folder: a file the first (partial) run already saved must not stop a later
+    // `--force` run from saving the state it is about to overwrite.
+    const runStamp = new Date().toISOString().replace(/[:.]/g, '-');
+    let runId = runStamp;
+    for (let n = 2; exists(path.join(m.dir, 'undo', runId)); n++) runId = `${runStamp}-${String(n).padStart(2, '0')}`;
+    const io = makeIo({ dry, force: true, measure: null, batchDir: path.join(m.dir, 'undo', runId), recipeId: null, t });
     // --force: also revert what the user edited after apply (the files as they are now are backed up first)
     io.revertEdited = !!flags.force;
     const results = [];
@@ -767,7 +825,7 @@ export async function cmdUndo(args, { pickLang }) {
       }
     }
     for (const d of io.described) process.stdout.write(`  ${dry ? '→' : '✓'} ${d}\n`);
-    for (const r of results.filter((x) => x.result !== 'ok')) process.stdout.write(`  · ${r.recipe} ${r.type}: ${r.result}\n`);
+    for (const r of results.filter((x) => x.result !== 'ok')) process.stdout.write(`  · ${r.recipe} ${r.type}: ${localizeResult(r.result, t)}\n`);
     const n = results.filter((x) => x.result === 'ok').length;
     total += n;
     if (!dry) {
@@ -787,7 +845,10 @@ export async function cmdUndo(args, { pickLang }) {
     }
     process.stdout.write(t('cli.undo_done', { n, id: m.id }) + '\n');
     if (pending.length && !dry) {
-      process.stdout.write(t('cli.undo_partial', { n: pending.length, id: m.id, now: path.join(m.dir, 'undo', 'backups'), before: path.join(m.dir, 'backups') }) + '\n');
+      process.stdout.write(t('cli.undo_partial', { n: pending.length, id: m.id, dir: path.join(m.dir, 'undo') }) + '\n');
+      // apply only copies files that existed before it; a batch that created everything has no such folder
+      const before = path.join(m.dir, 'backups');
+      if (exists(before)) process.stdout.write(t('cli.undo_partial_before', { before }) + '\n');
     }
   }
   return { undone: total };

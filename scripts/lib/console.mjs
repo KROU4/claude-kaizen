@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { ensureDir, expandHome, kitRoot, readJsonSafe, stateDir, writeJsonAtomic } from './paths.mjs';
-import { loadLocale, translator } from './i18n.mjs';
+import { UserError, loadLocale, translator } from './i18n.mjs';
 import { openInBrowser } from './platform.mjs';
 
 const PLACEHOLDER = '/*__KAIZEN_DATA__*/null/*__END__*/';
@@ -78,7 +78,6 @@ export function isLoopbackOrigin(origin, port) {
 export async function cmdConsole(flags, { loadMeasure, pickLang }) {
   const state = ensureDir(stateDir());
   const rec = readJsonSafe(path.join(state, 'recommendations.json'));
-  if (!rec) throw new Error(`No recommendations at ${path.join(state, 'recommendations.json')}. Run \`kaizen recommend\` first.`);
   let measure = null;
   try {
     measure = loadMeasure();
@@ -87,6 +86,7 @@ export async function cmdConsole(flags, { loadMeasure, pickLang }) {
   }
   const lang = pickLang(flags, measure);
   const t = translator(lang);
+  if (!rec) throw new UserError(t('err.no_recs', { file: path.join(state, 'recommendations.json') }));
   const mode = flags.mode || 'local';
   const transport = flags.transport || (mode === 'render' ? 'artifact' : 'local');
 
@@ -177,7 +177,7 @@ export async function cmdConsole(flags, { loadMeasure, pickLang }) {
     });
     const timer = setTimeout(() => {
       if (done) return;
-      process.stderr.write('kaizen console: timed out waiting for choices\n');
+      process.stderr.write(t('cli.console_timeout') + '\n');
       process.exitCode = 3;
       server.close();
       resolve({ file: null, timedOut: true });

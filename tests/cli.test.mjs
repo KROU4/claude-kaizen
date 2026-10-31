@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseArgs } from '../scripts/kaizen.mjs';
 import { interpolate, loadLocale } from '../scripts/lib/i18n.mjs';
-import { KIT_ROOT, childEnv, cleanupTempDirs, copyTree, makeTempDir, materializeHome, prefixOf, readJson, runCli, snapshotDir, t, writeJson, writeText } from './helpers.mjs';
+import { KIT_ROOT, childEnv, cleanupTempDirs, copyTree, makeTempDir, materializeHome, prefixOf, readJson, runCli, snapshotDir, t, tRu, writeJson, writeText } from './helpers.mjs';
 
 const pkg = readJson(path.join(KIT_ROOT, 'package.json'));
 
@@ -825,8 +825,11 @@ describe('kaizen: custom recipes, --add and --param-file', () => {
     const rules = path.join(home.root, 'rules.md');
     writeText(rules, 'One rule.');
     const unknown = cli(home, ['apply', '--recipe', 'custom.house-rules', '--dry-run']);
-    assert.equal(unknown.status, 0, unknown.stderr);
-    assert.match(unknown.stdout, /! unknown recipe custom\.house-rules \(skipped\)/);
+    assert.equal(unknown.status, 1, unknown.stdout);
+    assert.match(unknown.stderr, /Unknown recipe id\(s\): custom\.house-rules\. Nothing was applied\. Custom recipes need --add FILE/);
+    const mixed = cli(home, ['apply', '--recipe', 'custom.house-rules,settings.cleanup-period', '--dry-run']);
+    assert.equal(mixed.status, 0, mixed.stderr);
+    assert.match(mixed.stdout, /! unknown recipe custom\.house-rules \(skipped\)/);
     const known = cli(home, ['apply', '--recipe', 'custom.house-rules', '--add', extra, '--param-file', `custom.house-rules.rules=${rules}`]);
     assert.equal(known.status, 0, known.stderr);
     assert.ok(fs.readFileSync(path.join(home.configDir, 'CLAUDE.md'), 'utf8').includes('One rule.'));
@@ -966,5 +969,214 @@ describe('kaizen verify: the interpreter of a hook', () => {
     settings.hooks.PreToolUse = [{ matcher: 'Bash', hooks: [{ type: 'command', command: `"${posix(process.execPath)}" "${posix(home.stateDir)}/hooks/ok.mjs"` }] }];
     writeJson(home.settingsFile, settings);
     assert.equal(json(cli(home, ['verify', '--json'])).ok, true);
+  });
+});
+
+describe('kaizen: the language chosen with --lang is remembered', () => {
+  const rec = (home) => readJson(path.join(home.stateDir, 'recommendations.json'));
+
+  it('after measure --lang ru and recommend --lang ru, console, verify, apply, undo and status are Russian without --lang', () => {
+    const home = materializeHome({ projects: true, usageData: true });
+    assert.equal(cli(home, ['measure', '--all', '--quiet', '--lang', 'ru']).status, 0);
+    assert.equal(readJson(path.join(home.stateDir, 'measure.json')).uiLang, 'ru');
+    const recs = json(cli(home, ['recommend', '--lang', 'ru', '--json']));
+    assert.equal(recs.lang, 'ru');
+    assert.equal(recs.uiLang, 'ru');
+
+    const consoleRun = cli(home, ['console', '--mode', 'render', '--transport', 'static']);
+    assert.equal(consoleRun.status, 0, consoleRun.stderr);
+    const html = fs.readFileSync(consoleRun.stdout.trim(), 'utf8');
+    assert.match(html, /const KAIZEN = \{"lang":"ru"/);
+    assert.ok(html.includes(loadLocale('ru').console.submit), 'the page buttons are Russian');
+
+    assert.ok(cli(home, ['verify']).stdout.includes(tRu('verify.header')));
+    assert.ok(cli(home, ['apply', '--recipe', 'settings.cleanup-period', '--dry-run']).stdout.includes(tRu('cli.apply_dry', { n: 1 })));
+    assert.ok(cli(home, ['undo']).stdout.includes(tRu('cli.undo_nothing')));
+    assert.equal(json(cli(home, ['status'])).lang, 'ru');
+    assert.ok(cli(home, ['help']).stdout.includes(tRu('cli.help_note')));
+  });
+
+  it('recommend without --lang keeps the language measure was given, and an explicit --lang still wins', () => {
+    const home = materializeHome({ projects: true, usageData: true });
+    assert.equal(cli(home, ['measure', '--all', '--quiet', '--lang', 'ru']).status, 0);
+    assert.equal(json(cli(home, ['recommend', '--json'])).lang, 'ru');
+    assert.ok(cli(home, ['verify', '--lang', 'en']).stdout.includes(t('verify.header')));
+    assert.ok(cli(home, ['verify']).stdout.includes(tRu('verify.header')), 'a one-off --lang does not change the stored choice');
+    // the latest explicit choice wins
+    assert.equal(json(cli(home, ['recommend', '--lang', 'en', '--json'])).lang, 'en');
+    assert.ok(cli(home, ['verify']).stdout.includes(t('verify.header')));
+    assert.equal(cli(home, ['measure', '--all', '--quiet', '--lang', 'ru']).status, 0);
+    assert.ok(cli(home, ['verify']).stdout.includes(tRu('verify.header')));
+  });
+
+  it('a re-measure without --lang keeps the earlier choice; config.json lang beats it', () => {
+    const home = materializeHome({ projects: true, usageData: true });
+    cli(home, ['measure', '--all', '--quiet', '--lang', 'ru']);
+    cli(home, ['recommend', '--json']);
+    assert.equal(cli(home, ['measure', '--all', '--quiet']).status, 0);
+    assert.equal(readJson(path.join(home.stateDir, 'measure.json')).uiLang, 'ru');
+    assert.equal(json(cli(home, ['status'])).lang, 'ru');
+    writeJson(path.join(home.stateDir, 'config.json'), { lang: 'en' });
+    assert.equal(json(cli(home, ['status'])).lang, 'en');
+  });
+
+  it('without any --lang nothing is stored and the detected language is used', () => {
+    const home = measured();
+    assert.equal(readJson(path.join(home.stateDir, 'measure.json')).uiLang, undefined);
+    json(cli(home, ['recommend', '--json']));
+    assert.equal(rec(home).uiLang, undefined);
+  });
+
+  it('recommend prints the "already applied" line and the advice tag in the chosen language', () => {
+    const home = measured();
+    assert.equal(cli(home, ['apply', '--recipe', 'settings.cleanup-period']).status, 0);
+    const ru = cli(home, ['recommend', '--lang', 'ru', '--all']).stdout;
+    assert.match(ru, /Уже применено: .*settings\.cleanup-period/);
+    assert.match(ru, /\(совет\)/);
+    assert.doesNotMatch(ru, /\(advice\)|Already applied/);
+    const en = cli(home, ['recommend', '--lang', 'en', '--all']).stdout;
+    assert.match(en, /Already applied: .*settings\.cleanup-period/);
+    assert.match(en, /\(advice\)/);
+  });
+});
+
+describe('kaizen: expected errors are one clean line', () => {
+  const lines = (s) => s.trim().split(/\r?\n/);
+
+  it('a step run out of order prints a single localized line, and the stack only with KAIZEN_DEBUG=1', () => {
+    const home = materializeHome();
+    const file = path.join(home.stateDir, 'measure.json');
+    const en = cli(home, ['recommend']);
+    assert.equal(en.status, 1);
+    assert.deepEqual(lines(en.stderr), [`kaizen: ${t('err.no_measure', { file })}`]);
+    const ru = cli(home, ['recommend', '--lang', 'ru']);
+    assert.equal(ru.status, 1);
+    assert.deepEqual(lines(ru.stderr), [`kaizen: ${tRu('err.no_measure', { file })}`]);
+    const debug = cli(home, ['recommend'], { env: { ...home.env, KAIZEN_DEBUG: '1' } });
+    assert.equal(debug.status, 1);
+    assert.match(debug.stderr, /\n\s+at /);
+  });
+
+  it('apply with no choices, a malformed --param and console without recommendations are single lines too', () => {
+    const home = measured();
+    for (const args of [['apply'], ['apply', '--recipe', 'hooks.guard-destructive', '--param', 'mode=ask', '--dry-run'], ['console', '--mode', 'render']]) {
+      const r = cli(home, args);
+      assert.equal(r.status, 1, args.join(' '));
+      assert.equal(lines(r.stderr).length, 1, r.stderr);
+      assert.doesNotMatch(r.stderr, /\n\s+at /);
+    }
+    assert.match(cli(home, ['apply', '--recipe', 'hooks.guard-destructive', '--param', 'mode=ask', '--lang', 'ru']).stderr, /--param ожидает вид recipe\.id\.param=value, получено: mode=ask/);
+  });
+
+  it('a bad --days is refused before the scan runs', () => {
+    const home = materializeHome({ projects: true });
+    for (const bad of ['abc', '0', '-3', 'Infinity']) {
+      const r = cli(home, ['measure', '--days', bad, '--quiet']);
+      assert.equal(r.status, 1, bad);
+      assert.deepEqual(lines(r.stderr), [`kaizen: ${t('err.bad_days', { value: bad })}`]);
+    }
+    assert.ok(!fs.existsSync(path.join(home.stateDir, 'measure.json')));
+    assert.match(cli(home, ['measure', '--days', 'abc', '--lang', 'ru']).stderr, /--days ожидает положительное число, получено: abc/);
+    assert.equal(cli(home, ['measure', '--days', '7', '--quiet']).status, 0);
+  });
+});
+
+describe('kaizen: unknown recipe ids and mistyped --param', () => {
+  it('apply with only unknown ids exits 1 with a suggestion and leaves the journal and last-apply.json alone', () => {
+    const home = measured();
+    assert.equal(cli(home, ['apply', '--recipe', 'settings.cleanup-period']).status, 0);
+    const last = path.join(home.stateDir, 'last-apply.json');
+    const before = fs.readFileSync(last, 'utf8');
+    const batches = fs.readdirSync(path.join(home.stateDir, 'applied'));
+    const r = cli(home, ['apply', '--recipe', 'hooks.guard-destruct']);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /Unknown recipe id\(s\): hooks\.guard-destruct\. Nothing was applied\. Did you mean: hooks\.guard-destructive\?/);
+    assert.equal(r.stdout, '');
+    assert.equal(fs.readFileSync(last, 'utf8'), before);
+    assert.deepEqual(fs.readdirSync(path.join(home.stateDir, 'applied')), batches);
+    const ru = cli(home, ['apply', '--recipe', 'hooks.guard-destruct', '--lang', 'ru']);
+    assert.equal(ru.status, 1);
+    assert.match(ru.stderr, /Неизвестные id рецептов: hooks\.guard-destruct\. Ничего не применено\./);
+  });
+
+  it('choices --import warns about ids unknown to the catalog and the extra recipes, but still stores the file', () => {
+    const home = measured();
+    const file = path.join(home.root, 'choices-in.json');
+    const extra = path.join(home.root, 'extra.json');
+    writeJson(extra, { recipes: [{ id: 'custom.mine' }] });
+    writeJson(file, { selected: [{ id: 'hooks.nope' }, { id: 'settings.cleanup-period' }, { id: 'custom.mine' }] });
+    const r = cli(home, ['choices', '--import', file, '--add', extra]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stderr.trim(), t('cli.choices_unknown', { ids: 'hooks.nope' }));
+    const summary = JSON.parse(r.stdout);
+    assert.equal(summary.ok, true);
+    assert.deepEqual(summary.unknown, ['hooks.nope']);
+    assert.equal(readJson(path.join(home.stateDir, 'choices.json')).selected.length, 3);
+    // without the extra file the custom id is unknown too
+    assert.deepEqual(JSON.parse(cli(home, ['choices', '--import', file]).stdout).unknown, ['hooks.nope', 'custom.mine']);
+    // known ids only: no warning, no "unknown" key
+    writeJson(file, { selected: [{ id: 'settings.cleanup-period' }] });
+    const clean = cli(home, ['choices', '--import', file]);
+    assert.equal(clean.stderr, '');
+    assert.equal(JSON.parse(clean.stdout).unknown, undefined);
+  });
+
+  it('a --param for a mistyped recipe or parameter is an error that lists what is valid', () => {
+    const home = measured();
+    const typo = cli(home, ['apply', '--recipe', 'hooks.guard-destructive', '--param', 'hooks.guard-destructive.moed=ask', '--dry-run']);
+    assert.equal(typo.status, 1);
+    assert.match(typo.stderr, /recipe hooks\.guard-destructive has no parameter moed\. Valid parameters: mode, protectedBranches\./);
+    const typoRu = cli(home, ['apply', '--recipe', 'hooks.guard-destructive', '--param', 'hooks.guard-destructiv.mode=ask', '--dry-run', '--lang', 'ru']);
+    assert.equal(typoRu.status, 1);
+    assert.match(typoRu.stderr, /не входит в выбранные \(hooks\.guard-destructive\)/);
+    assert.equal(cli(home, ['apply', '--recipe', 'hooks.guard-destructive', '--param', 'hooks.guard-destructive.mode=block', '--dry-run']).status, 1);
+    assert.equal(cli(home, ['apply', '--recipe', 'hooks.guard-destructive', '--param', 'hooks.guard-destructive.mode=ask', '--dry-run']).status, 0);
+    assert.ok(!fs.existsSync(path.join(home.stateDir, 'applied')));
+  });
+});
+
+describe('kaizen verify: Kaizen hooks are recognised wherever the state directory is', () => {
+  const posix = (p) => p.replace(/\\/g, '/');
+
+  it('reports a deleted hook script when KAIZEN_STATE_DIR is not called "kaizen"', () => {
+    const home = measured(); // state dir: <root>/state
+    assert.ok(!/kaizen[\\/]?$/i.test(home.stateDir));
+    assert.equal(cli(home, ['apply', '--recipe', 'hooks.guard-destructive']).status, 0);
+    const ok = json(cli(home, ['verify', '--json']));
+    assert.ok(ok.checks.some((c) => c.ok && /settings\.json: valid JSON \(1 Kaizen hook\(s\)\)/.test(c.text)), JSON.stringify(ok.checks));
+    fs.rmSync(path.join(home.stateDir, 'hooks', 'guard-destructive.mjs'));
+    const r = cli(home, ['verify', '--json']);
+    assert.equal(r.status, 1, r.stdout);
+    assert.ok(JSON.parse(r.stdout).checks.some((c) => !c.ok && c.text.includes('guard-destructive.mjs')), r.stdout);
+    const plain = cli(home, ['verify', '--lang', 'ru']);
+    assert.equal(plain.status, 1);
+    assert.match(plain.stdout, /✗ файл хука, указанный в .*settings\.json, отсутствует: .*guard-destructive\.mjs/);
+  });
+
+  it('checks the status line script too', () => {
+    const home = materializeHome({ defaultState: false });
+    const settings = readJson(home.settingsFile);
+    settings.statusLine = { type: 'command', command: `node "${posix(home.stateDir)}/statusline.mjs"` };
+    writeJson(home.settingsFile, settings);
+    const r = cli(home, ['verify', '--json']);
+    assert.equal(r.status, 1, r.stdout);
+    assert.ok(JSON.parse(r.stdout).checks.some((c) => !c.ok && c.text.includes('statusline.mjs')), r.stdout);
+    writeText(path.join(home.stateDir, 'statusline.mjs'), "console.log('Kaizen check');\n");
+    const ok = JSON.parse(cli(home, ['verify', '--json']).stdout);
+    assert.ok(ok.checks.some((c) => /\(1 Kaizen hook\(s\)\)/.test(c.text)), JSON.stringify(ok.checks));
+  });
+
+  it('knows a script the journal recorded even outside the state directory', () => {
+    const home = materializeHome();
+    const elsewhere = path.join(home.root, 'elsewhere', 'tools', 'x-hook.mjs');
+    const settings = readJson(home.settingsFile);
+    settings.hooks.PreToolUse = [{ matcher: 'Bash', hooks: [{ type: 'command', command: `node "${posix(elsewhere)}"` }] }];
+    writeJson(home.settingsFile, settings);
+    // not ours as long as nobody recorded it
+    assert.equal(json(cli(home, ['verify', '--json'])).ok, true);
+    writeJson(path.join(home.stateDir, 'applied', '2026-10-31T10-00-00', 'manifest.json'), { id: '2026-10-31T10-00-00', recipes: [{ id: 'x', actions: [{ type: 'file', file: elsewhere }] }] });
+    const r = cli(home, ['verify', '--json']);
+    assert.equal(r.status, 1, r.stdout);
+    assert.ok(JSON.parse(r.stdout).checks.some((c) => !c.ok && c.text.includes('x-hook.mjs')), r.stdout);
   });
 });

@@ -145,12 +145,12 @@ export function renderDigest(m, lang = m.locale?.lang || 'en', previous = null) 
   if (F.slowHooks.length) {
     L.push('');
     L.push(`${t('f.slow_hooks')}:`);
-    for (const h of F.slowHooks) L.push(`- \`${h.hook}\`: ${h.runs} ${t('digest.runs')}, avg ${h.avgMs} ms, max ${h.maxMs} ms`);
+    for (const h of F.slowHooks) L.push(`- \`${h.hook}\`: ${h.runs} ${t('digest.runs')}, ${t('digest.avg')} ${h.avgMs} ${t('digest.unit_ms')}, ${t('digest.max')} ${h.maxMs} ${t('digest.unit_ms')}`);
   }
   if ((F.hookTimeouts || []).length) {
     L.push('');
     L.push(`${t('f.hook_timeouts')}:`);
-    for (const h of F.hookTimeouts) L.push(`- \`${h.hook}\`: ${t('f.timed_out', { n: h.timeouts, limit: h.limitMs ? `${h.limitMs / 1000} s` : '?' })}`);
+    for (const h of F.hookTimeouts) L.push(`- \`${h.hook}\`: ${t('f.timed_out', { n: h.timeouts, limit: h.limitMs ? `${h.limitMs / 1000} ${t('digest.unit_s')}` : '?' })}`);
   }
   if (F.hookErrorSamples.length) {
     L.push('');
@@ -174,8 +174,8 @@ export function renderDigest(m, lang = m.locale?.lang || 'en', previous = null) 
   L.push(`${t('tl.bash_verbs')}: ${kv(m.tools.bashVerbs, 20)}`);
   if (m.tools.slowBashCommands.length) {
     L.push('');
-    L.push(`${t('tl.slow_commands')} (≥30 s):`);
-    for (const c of m.tools.slowBashCommands.slice(0, 10)) L.push(`- \`${c.verb}\`: ${c.count}× , avg ${c.avgSec} s, max ${c.maxSec} s`);
+    L.push(`${t('tl.slow_commands')} (≥30 ${t('digest.unit_s')}):`);
+    for (const c of m.tools.slowBashCommands.slice(0, 10)) L.push(`- \`${c.verb}\`: ${c.count}×, ${t('digest.avg')} ${c.avgSec} ${t('digest.unit_s')}, ${t('digest.max')} ${c.maxSec} ${t('digest.unit_s')}`);
   }
   if (m.tools.repeatedBashCommands.length) {
     L.push('');
@@ -216,7 +216,7 @@ export function renderDigest(m, lang = m.locale?.lang || 'en', previous = null) 
   L.push('');
   L.push(`${t('c.claude_md')}: ${m.context.claudeMdTokens} ${t('c.tokens')} (${m.context.claudeMdFiles.map((f) => `${f.scope} ${f.tokens}`).join(', ') || t('digest.none')}); ${t('c.skill_descriptions')}: ~${m.context.skillDescriptionTokens} ${t('c.tokens')}.`);
   L.push(`${t('c.hooks')}: ${m.context.hooksCount} (${kv(m.context.hookEvents) || '—'}); ${t('c.status_line')}: ${m.context.statusLine ? t('digest.yes') : t('digest.no')}; ${t('c.agents')}: ${m.context.agentsInstalled}; ${t('c.plugins')}: ${m.context.installedPlugins}.`);
-  L.push(`${t('c.peak_context')}: max ${Math.round(m.context.peakTokensMax / 1000)}k, median ${Math.round(m.context.peakTokensMedian / 1000)}k; ${t('c.sessions_over')} 150k: ${m.context.sessionsOver150k}, 400k: ${m.context.sessionsOver400k}. ${t('c.thinking')}: ${m.context.thinkingMinutes} min.`);
+  L.push(`${t('c.peak_context')}: ${t('digest.max')} ${Math.round(m.context.peakTokensMax / 1000)}k, ${t('digest.median')} ${Math.round(m.context.peakTokensMedian / 1000)}k; ${t('c.sessions_over')} 150k: ${m.context.sessionsOver150k}, 400k: ${m.context.sessionsOver400k}. ${t('c.thinking')}: ${m.context.thinkingMinutes} ${t('digest.unit_min')}.`);
   L.push(`${t('c.models')}: ${Object.entries(m.totals.tokens).length ? Object.entries(mModels(m)).map(([k, v]) => `${k} ${pct(v.share)}`).join(', ') : '—'}.`);
   if (m.inventory.hooks.length) {
     L.push('');
@@ -238,8 +238,8 @@ export function renderDigest(m, lang = m.locale?.lang || 'en', previous = null) 
   const H = m.habits;
   L.push(`## ${t('digest.habits')}`);
   L.push('');
-  L.push(`${t('h.hours')} (0–23): \`${hourBar(H.hours)}\` ${t('h.peak')}: ${H.peakHours.join(', ')}h; ${t('h.night')}: ${pct(H.nightShare)}; ${t('h.weekend')}: ${pct(H.weekendShare)}.`);
-  L.push(`${t('h.prompt_len')}: median ${H.promptMedianChars}, p90 ${H.promptP90Chars} ${t('h.chars')}; ${t('h.short_prompts')}: ${pct(H.shortPromptsShare)}; ${t('h.response_gap')}: ${H.responseGapMedianSec} s.`);
+  L.push(`${t('h.hours')} (0–23): \`${hourBar(H.hours)}\` ${t('h.peak')}: ${H.peakHours.join(', ')}${t('digest.unit_h')}; ${t('h.night')}: ${pct(H.nightShare)}; ${t('h.weekend')}: ${pct(H.weekendShare)}.`);
+  L.push(`${t('h.prompt_len')}: ${t('digest.median')} ${H.promptMedianChars}, p90 ${H.promptP90Chars} ${t('h.chars')}; ${t('h.short_prompts')}: ${pct(H.shortPromptsShare)}; ${t('h.response_gap')}: ${H.responseGapMedianSec} ${t('digest.unit_s')}.`);
   if (H.repeatedStems.length) {
     L.push('');
     L.push(`${t('h.repeated_prompts')}:`);

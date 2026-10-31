@@ -9,8 +9,8 @@
 // works on arrays, strings and plain objects (key count).
 import fs from 'node:fs';
 import path from 'node:path';
-import { expandHome, kitRoot, readJsonSafe } from './paths.mjs';
-import { interpolate, pick } from './i18n.mjs';
+import { exists, expandHome, kitRoot, readJsonSafe } from './paths.mjs';
+import { interpolate, pick, translator } from './i18n.mjs';
 
 export const IMPACT_WEIGHT = { high: 3, medium: 2, low: 1 };
 export const RISK_PENALTY = { low: 0, medium: 0.5, high: 1 };
@@ -39,6 +39,36 @@ export function readExtraRecipes(file) {
 export function addExtraRecipes(catalog, extra) {
   if (extra && Array.isArray(extra.recipes)) catalog.recipes.push(...extra.recipes);
   return catalog;
+}
+
+/**
+ * The extra-recipes file that `recommend --add` recorded in <state>/recommendations.json (or recommendations.all.json),
+ * when it is still there. `apply` and `choices --import` use it when they are not given --add.
+ */
+export function rememberedExtraFile(stateDirectory) {
+  const recs = ['recommendations.json', 'recommendations.all.json'].map((n) => readJsonSafe(path.join(stateDirectory, n)));
+  return recs.map((x) => x && x.extraFile).find((f) => typeof f === 'string' && exists(f)) || null;
+}
+
+function editDistance(a, b) {
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+/** Known ids that look like a mistyped `id` (small edit distance, or one contains the other), best first, at most three. */
+export function closeMatches(id, known) {
+  const want = String(id).toLowerCase();
+  return [...known]
+    .map((k) => ({ k, d: editDistance(want, String(k).toLowerCase()) }))
+    .filter(({ k, d }) => d <= Math.max(2, Math.floor(want.length / 4)) || k.includes(want) || want.includes(k))
+    .sort((a, b) => a.d - b.d || a.k.localeCompare(b.k))
+    .slice(0, 3)
+    .map(({ k }) => k);
 }
 
 export function resolvePath(obj, dotted) {
@@ -93,25 +123,26 @@ function templateVars(measure) {
 }
 
 // One list element in evidence text: a hook entry reads "hook (avg 2300 ms)" or "hook (12× > 5 s)", never raw JSON.
-function fmtItem(x) {
+function fmtItem(x, t) {
   if (!x || typeof x !== 'object') return String(x);
-  if (x.hook && typeof x.timeouts === 'number') return `${x.hook} (${x.timeouts}× > ${x.limitMs ? x.limitMs / 1000 : '?'} s)`;
-  if (x.hook && typeof x.avgMs === 'number') return `${x.hook} (avg ${x.avgMs} ms, max ${x.maxMs} ms)`;
+  if (x.hook && typeof x.timeouts === 'number') return `${x.hook} (${x.timeouts}× > ${x.limitMs ? x.limitMs / 1000 : '?'} ${t('digest.unit_s')})`;
+  if (x.hook && typeof x.avgMs === 'number') return `${x.hook} (${t('digest.avg')} ${x.avgMs} ${t('digest.unit_ms')}, ${t('digest.max')} ${x.maxMs} ${t('digest.unit_ms')})`;
   return x.name || x.server || x.command || x.hook || x.id || JSON.stringify(x);
 }
 
-function fmt(v) {
+function fmt(v, t) {
   if (typeof v === 'number') return Number.isInteger(v) ? String(v) : v.toFixed(2);
   if (Array.isArray(v)) {
     if (!v.length) return '—';
-    return v.slice(0, 5).map(fmtItem).join(', ');
+    return v.slice(0, 5).map((x) => fmtItem(x, t)).join(', ');
   }
   if (v && typeof v === 'object') return Object.keys(v).slice(0, 5).join(', ');
   return v === undefined || v === null ? '?' : String(v);
 }
 
-export function renderText(template, measure, params = {}) {
+export function renderText(template, measure, params = {}, lang = 'en') {
   if (!template) return '';
+  const t = translator(lang);
   return String(template).replace(/\{([a-zA-Z0-9_.]+)(?:\|([a-z]+))?\}/g, (m, key, filter) => {
     let v = key.startsWith('params.') ? resolvePath(params, key.slice(7)) : resolvePath(measure, key);
     if (v === undefined || v === null) {
@@ -125,7 +156,7 @@ export function renderText(template, measure, params = {}) {
     if (filter === 'int') return String(Math.round(Number(v)));
     if (filter === 'k') return `${(Number(v) / 1000).toFixed(1)}k`;
     if (filter === 'len') return String(Array.isArray(v) ? v.length : v && typeof v === 'object' ? Object.keys(v).length : String(v).length);
-    return fmt(v);
+    return fmt(v, t);
   });
 }
 
@@ -186,9 +217,9 @@ export function recommend(catalog, measure, { lang = 'en', applied = new Set(), 
       risk: r.risk || 'low',
       scope: r.defaultScope || (Array.isArray(r.scope) ? r.scope[0] : r.scope) || 'user',
       scopes: Array.isArray(r.scope) ? r.scope : [r.scope || 'user'],
-      title: renderText(pick(r.title, lang), templateVars(measure), params),
-      why: renderText(pick(r.why, lang), templateVars(measure), params),
-      evidence: renderText(pick(r.evidence, lang), templateVars(measure), params),
+      title: renderText(pick(r.title, lang), templateVars(measure), params, lang),
+      why: renderText(pick(r.why, lang), templateVars(measure), params, lang),
+      evidence: renderText(pick(r.evidence, lang), templateVars(measure), params, lang),
       matched,
       score: score(r, measure),
       params: (r.params || []).map((p) => {

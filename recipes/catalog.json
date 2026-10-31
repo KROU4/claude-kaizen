@@ -26,7 +26,7 @@
       "defaultScope": "user",
       "title": { "en": "Deny reads of .env files, keys and credentials", "ru": "Запретить чтение .env, ключей и учётных данных" },
       "why": { "en": "Secrets read into the context end up in transcripts on disk and in model inputs. Deny rules block the Read/Edit tools and common shell readers on those paths.", "ru": "Секреты, попавшие в контекст, остаются в транскриптах на диске и уходят модели. Deny-правила блокируют Read/Edit и обычные shell-команды чтения на этих путях." },
-      "evidence": { "en": "No deny rules are configured ({inventory.permissions.deny} today) while {totals.filesEdited} files were touched in the window.", "ru": "Deny-правил нет ({inventory.permissions.deny} сейчас), при этом за период затронуто {totals.filesEdited} файлов." },
+      "evidence": { "en": "None of your deny rules (configured today: {inventory.permissions.deny}) covers .env files, keys or credentials.", "ru": "Ни одно из ваших deny-правил (сейчас настроено: {inventory.permissions.deny}) не закрывает .env, ключи и учётные данные." },
       "when": { "not": { "metric": "context.denyRulesText", "includes": ".env" } },
       "actions": [ { "type": "settings.append", "path": "permissions.deny", "values": ["Read(./.env)", "Read(./.env.*)", "Read(./**/.env)", "Read(./**/*.pem)", "Read(./**/*.key)", "Read(~/.ssh/**)", "Read(~/.aws/credentials)"] } ],
       "source": "dwarvesf/claude-guardrails deny set; Claude Code permissions docs"

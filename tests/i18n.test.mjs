@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { SUPPORTED, detectLang, interpolate, loadLocale, pick, translator } from '../scripts/lib/i18n.mjs';
+import { SUPPORTED, UserError, detectLang, interpolate, loadLocale, pick, translator } from '../scripts/lib/i18n.mjs';
 import { KIT_ROOT } from './helpers.mjs';
 
 const readLocale = (lang) => JSON.parse(fs.readFileSync(path.join(KIT_ROOT, 'locales', `${lang}.json`), 'utf8'));
@@ -190,5 +190,35 @@ describe('pick', () => {
 
   it('keeps an empty translation (does not fall back past it)', () => {
     assert.equal(pick({ en: 'a', ru: '' }, 'ru'), '');
+  });
+});
+
+describe('UserError', () => {
+  it('is an expected failure: the CLI prints its message only', () => {
+    const e = new UserError('bad input');
+    assert.ok(e instanceof Error);
+    assert.equal(e.expected, true);
+    assert.equal(e.name, 'UserError');
+    assert.equal(e.message, 'bad input');
+  });
+});
+
+describe('locale keys for the apply / undo output', () => {
+  it('every plan line, skip reason, note, undo result and error exists in both languages with the same placeholders', () => {
+    const en = flatten(readLocale('en'));
+    const ru = flatten(readLocale('ru'));
+    const wanted = [...en.keys()].filter((k) => /^(apply|undo|err)\./.test(k) || /^cli\.(advice_tag|already_applied|help_note|choices_|console_timeout|undo_partial)/.test(k));
+    assert.ok(wanted.length > 50, `${wanted.length} keys`);
+    for (const key of wanted) {
+      assert.ok(ru.has(key), `ru is missing ${key}`);
+      assert.deepEqual(placeholders(ru.get(key)), placeholders(en.get(key)), key);
+      assert.notEqual(ru.get(key), en.get(key), `${key} is not translated`);
+    }
+  });
+
+  it('the Russian undo results do not keep the English kept/error markers', () => {
+    const ru = translator('ru');
+    assert.match(ru('undo.res.kept_changed', { path: 'x' }), /^оставлено:/);
+    assert.match(ru('undo.res.error', { detail: 'boom' }), /^ошибка:/);
   });
 });

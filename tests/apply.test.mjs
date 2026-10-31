@@ -1037,11 +1037,43 @@ describe('cmdApply', () => {
     assert.ok(read(path.join(ctx.stateDir, 'hooks', 'guard-destructive.mjs')).includes("const MODE_RAW = 'ask';"));
   });
 
-  it('--param for a recipe that is not selected is ignored; a malformed --param is an error', async () => {
+  it('a malformed --param is an error', async () => {
     seedState();
-    await runApply({ recipe: 'settings.cleanup-period', param: 'hooks.guard-destructive.mode=ask' });
-    assert.ok(!fs.existsSync(path.join(ctx.stateDir, 'hooks', 'guard-destructive.mjs')));
     await assert.rejects(() => runApply({ recipe: 'settings.cleanup-period', param: 'garbage' }), /--param expects recipe\.id\.param=value/);
+  });
+
+  it('--param for a recipe that is not selected is an error that names the selected recipes, and nothing is written', async () => {
+    seedState();
+    await assert.rejects(() => runApply({ recipe: 'settings.cleanup-period', param: 'hooks.guard-destructive.mode=ask' }), (e) => {
+      assert.equal(e.name, 'UserError');
+      assert.ok(e.message.includes('hooks.guard-destructive'), e.message);
+      assert.ok(e.message.includes('settings.cleanup-period'), e.message);
+      return true;
+    });
+    assert.ok(!fs.existsSync(path.join(ctx.stateDir, 'hooks', 'guard-destructive.mjs')));
+    assert.deepEqual(manifestIds(), []);
+  });
+
+  it('--param with a mistyped recipe id or parameter name is an error listing the valid parameter names', async () => {
+    seedState();
+    await assert.rejects(() => runApply({ recipe: 'hooks.guard-destructive', param: 'hooks.guard-destructiv.mode=ask' }), /not among the selected recipes \(hooks\.guard-destructive\)/);
+    await assert.rejects(() => runApply({ recipe: 'hooks.guard-destructive', param: 'hooks.guard-destructive.moed=ask' }), /no parameter moed\. Valid parameters: mode/);
+    await assert.rejects(() => runApply({ recipe: 'settings.cleanup-period', param: 'settings.cleanup-period.days=7' }), /takes no parameters/);
+    assert.deepEqual(manifestIds(), []);
+    assert.ok(!fs.existsSync(path.join(ctx.stateDir, 'last-apply.json')));
+  });
+
+  it('--param with a value outside the options of a select is an error; a dynamic list is not checked', async () => {
+    seedState();
+    await assert.rejects(() => runApply({ recipe: 'hooks.guard-destructive', param: 'hooks.guard-destructive.mode=block' }), /block is not one of the allowed values for hooks\.guard-destructive\.mode: deny, ask/);
+    await runApply({ recipe: 'context.mcp-unused', param: 'context.mcp-unused.servers=dead-srv' });
+  });
+
+  it('--param-file for a parameter the recipe does not declare is an error', async () => {
+    seedState();
+    const file = path.join(ctx.root, 'v.txt');
+    writeText(file, 'x');
+    await assert.rejects(() => runApply({ recipe: 'hooks.guard-destructive', 'param-file': `hooks.guard-destructive.nope=${file}` }), /no parameter nope\. Valid parameters: mode/);
   });
 
   it('installs a hook script and registers it in settings.json', async () => {
@@ -1596,8 +1628,12 @@ describe('cmdUndo: entries that were kept', () => {
     assert.equal(m.undone, true);
     assert.equal(m.partiallyUndone, undefined);
     assert.doesNotMatch(forced.stdout, /only partly undone/);
-    const saved = path.join(appliedDir(), manifestIds()[0], 'undo', 'backups');
-    assert.ok(fs.readdirSync(saved).some((f) => /guard-destructive\.mjs$/.test(f) && read(path.join(saved, f)) === edited), 'the edited script must be backed up');
+    const undoDir = path.join(appliedDir(), manifestIds()[0], 'undo');
+    // every undo run has its own folder of backups
+    const runs = fs.readdirSync(undoDir);
+    assert.equal(runs.length, 2, 'the partial run and the --force run each have a folder');
+    const saved = runs.map((r) => path.join(undoDir, r, 'backups')).filter((d) => fs.existsSync(d));
+    assert.ok(saved.some((dir) => fs.readdirSync(dir).some((f) => /guard-destructive\.mjs$/.test(f) && read(path.join(dir, f)) === edited)), 'the edited script must be backed up');
   });
 
   it('--force also takes a CLAUDE.md block that was edited after apply', async () => {
@@ -1799,5 +1835,128 @@ describe('loadChoices reads recommendations.all.json for ids the normal file doe
     writeJson(path.join(ctx.stateDir, 'recommendations.all.json'), { ...rec, recommendations: [{ ...hidden, scope: 'project', params: [{ name: 'days', value: 7 }] }] });
     const choices = apply.loadChoices({ _: ['apply'], flags: { recipe: 'settings.cleanup-period' } });
     assert.deepEqual(choices.selected[0].params, { days: 7 });
+  });
+});
+
+describe('cmdApply: unknown recipe ids', () => {
+  const lastApply = () => path.join(ctx.stateDir, 'last-apply.json');
+
+  it('fails when every selected id is unknown: no journal batch, last-apply.json untouched, close matches suggested', async () => {
+    seedState();
+    await runApply({ recipe: 'settings.cleanup-period' });
+    const before = read(lastApply());
+    const ids = manifestIds();
+    await assert.rejects(() => runApply({ recipe: 'hooks.guard-destruct' }), (e) => {
+      assert.equal(e.name, 'UserError');
+      assert.ok(e.message.includes('hooks.guard-destruct'), e.message);
+      assert.ok(e.message.includes('hooks.guard-destructive'), `suggests the close match: ${e.message}`);
+      return true;
+    });
+    assert.deepEqual(manifestIds(), ids);
+    assert.equal(read(lastApply()), before);
+  });
+
+  it('also fails on --dry-run, and the message is localized', async () => {
+    seedState();
+    await assert.rejects(() => runApply({ recipe: 'no.such-recipe', 'dry-run': true }, { lang: 'ru' }), /Неизвестные id рецептов: no\.such-recipe\. Ничего не применено\./);
+    assert.deepEqual(manifestIds(), []);
+    assert.ok(!fs.existsSync(lastApply()));
+  });
+
+  it('a mixed list still skips the unknown id with a warning', async () => {
+    seedState();
+    const { stdout, manifest } = await runApply({ recipe: 'no.such-recipe,settings.cleanup-period' });
+    assert.ok(stdout.includes(t('apply.unknown_recipe', { id: 'no.such-recipe' })), stdout);
+    assert.equal(manifest.recipes.length, 1);
+    assert.equal(manifestIds().length, 1);
+  });
+});
+
+describe('cmdApply and cmdUndo speak the chosen language', () => {
+  const undoIn = async (lang, flags = {}, positional = []) => {
+    const out = await captureOutput(() => apply.cmdUndo({ _: ['undo', ...positional], flags }, { pickLang: () => lang }));
+    return out.stdout;
+  };
+
+  it('prints the plan lines of apply --dry-run and the skip reasons in Russian', async () => {
+    seedState();
+    const dry = await runApply({ recipe: 'permissions.deny-secrets', 'dry-run': true }, { lang: 'ru' });
+    assert.match(dry.stdout, /→ .*settings\.json: дополнить permissions\.deny: Read\(\.\/\.env\)/);
+    assert.doesNotMatch(dry.stdout, /append to/);
+    await runApply({ recipe: 'settings.cleanup-period' });
+    const again = await runApply({ recipe: 'settings.cleanup-period' }, { lang: 'ru' });
+    assert.match(again.stdout, /settings\.cleanup-period: уже задано/);
+  });
+
+  it('prints file plan lines and the unknown-recipe warning in Russian', async () => {
+    seedState();
+    const { stdout } = await runApply({ recipe: 'no.such,hooks.guard-destructive' }, { lang: 'ru' });
+    assert.match(stdout, /! неизвестный рецепт no\.such \(пропущен\)/);
+    assert.match(stdout, /guard-destructive\.mjs: создать \(\d+ симв\.\)/);
+    assert.match(stdout, /добавить хук PreToolUse/);
+  });
+
+  it('prints the undo plan and the kept results in Russian, and english stays english', async () => {
+    seedState();
+    await runApply({ recipe: 'hooks.guard-destructive' });
+    const hook = path.join(ctx.stateDir, 'hooks', 'guard-destructive.mjs');
+    writeText(hook, read(hook) + '\n// edited\n');
+    const ru = await undoIn('ru');
+    assert.match(ru, /✓ .*settings\.json: убрать хук PreToolUse/);
+    assert.match(ru, /file: оставлено: .* изменён после apply/);
+    assert.match(ru, /Изменений оставлено на месте: 1 \(см\. «оставлено»\/«ошибка» выше\)/);
+    const en = await undoIn('en');
+    assert.match(en, /file: kept: .*modified since apply/);
+    const gone = await undoIn('ru', { force: true });
+    assert.match(gone, /guard-destructive\.mjs: удалить/);
+  });
+});
+
+describe('cmdUndo: the backups the partial-undo message talks about', () => {
+  const undoDirOf = (id) => path.join(appliedDir(), id, 'undo');
+
+  it('names the undo folder without claiming a backups folder that does not exist', async () => {
+    seedState();
+    await runApply({ recipe: 'settings.cleanup-period' });
+    writeSettings({ ...readSettings(), cleanupPeriodDays: 7 });
+    const id = manifestIds()[0];
+    const { stdout } = await runUndo();
+    assert.match(stdout, /changed since apply/);
+    assert.ok(!fs.existsSync(path.join(undoDirOf(id), 'backups')), 'nothing was backed up by this run');
+    assert.ok(!stdout.includes(path.join(undoDirOf(id), 'backups')), stdout);
+    assert.ok(stdout.includes(`backed up first, in a new folder under ${undoDirOf(id)}`), stdout);
+    // the "before apply" line points at a folder that does exist (settings.json was copied there by apply)
+    assert.ok(fs.existsSync(path.join(appliedDir(), id, 'backups')));
+    assert.ok(stdout.includes(t('cli.undo_partial_before', { before: path.join(appliedDir(), id, 'backups') })), stdout);
+  });
+
+  it('does not print the "before apply" line when apply backed nothing up', async () => {
+    seedState();
+    await runApply({ recipe: 'hooks.guard-destructive' });
+    const id = manifestIds()[0];
+    fs.rmSync(path.join(appliedDir(), id, 'backups'), { recursive: true, force: true });
+    const hook = path.join(ctx.stateDir, 'hooks', 'guard-destructive.mjs');
+    writeText(hook, read(hook) + '\n// edited\n');
+    const { stdout } = await runUndo();
+    assert.match(stdout, /only partly undone/);
+    assert.ok(!stdout.includes(prefixOf('cli.undo_partial_before', {})), stdout);
+  });
+
+  it('a --force run after a partial undo saves the edits made in between (every run has its own backups)', async () => {
+    seedState();
+    await runApply({ recipe: 'settings.cleanup-period,permissions.accept-edits', scope: 'user' });
+    const id = manifestIds()[0];
+    writeSettings({ ...readSettings(), cleanupPeriodDays: 11 });
+    await runUndo(); // accept-edits is reverted (settings.json is saved), cleanupPeriodDays is kept
+    assert.equal(readSettings().cleanupPeriodDays, 11);
+    writeSettings({ ...readSettings(), cleanupPeriodDays: 22 });
+    await runUndo({ force: true }, [id]);
+    assert.ok(!('cleanupPeriodDays' in readSettings()));
+    const saved = fs.readdirSync(undoDirOf(id)).flatMap((run) => {
+      const dir = path.join(undoDirOf(id), run, 'backups');
+      return fs.existsSync(dir) ? fs.readdirSync(dir).map((f) => readJson(path.join(dir, f))) : [];
+    });
+    assert.ok(saved.some((s) => s.cleanupPeriodDays === 11), 'the state before the partial undo is kept');
+    assert.ok(saved.some((s) => s.cleanupPeriodDays === 22), 'the state before the --force run is kept too');
   });
 });
