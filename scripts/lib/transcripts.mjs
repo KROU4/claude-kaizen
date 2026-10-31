@@ -12,7 +12,7 @@ import { readJsonl } from './jsonl.mjs';
 import { redact, snippet } from './redact.mjs';
 import { ensureDir, readJsonSafe, writeJsonAtomic } from './paths.mjs';
 
-export const SUMMARY_VERSION = 20;
+export const SUMMARY_VERSION = 21;
 
 const INTERRUPT_RE = /\[Request interrupted by user/;
 const COMPACT_RE = /^This session is being continued from a previous conversation/;
@@ -54,7 +54,7 @@ const TEST_CMD_RE =
 const GIT_RE = /\bgit\s+(commit|push|pull|rebase|merge|checkout|switch|stash|reset|cherry-pick|worktree)\b/;
 const FORCE_PUSH_RE = /\bgit\s+push\b[^|;&]*(\s--force\b|\s-f\b|\s--force-with-lease\b|\s\+[^\s]+)/;
 const DESTRUCTIVE_RE =
-  /\brm\s+-[a-zA-Z]*r[a-zA-Z]*f|\brm\s+-[a-zA-Z]*f[a-zA-Z]*r|\bgit\s+reset\s+--hard|\bgit\s+clean\s+-[a-zA-Z]*f|\bgit\s+checkout\s+--\s|\bdrop\s+(table|database|schema)\b|\btruncate\s+table\b|\bdel\s+\/[sq]|\brmdir\s+\/s|\bformat\s+[a-z]:|\bmkfs\b|\bdd\s+if=|\b(?:remove-item|ri|rm|del|erase|rmdir|rd)\b(?=[^|;&\n]*\s-r(?:e\w*)?(?=\s|$))(?=[^|;&\n]*\s-fo\w*(?=\s|$))/i;
+  /\brm\s+-[a-zA-Z]*r[a-zA-Z]*f|\brm\s+-[a-zA-Z]*f[a-zA-Z]*r|\bgit\s+reset\s+--hard|\bgit\s+clean\s+-[a-zA-Z]*f|\bgit\s+checkout\s+--\s|\bdrop\s+(table|database|schema)\b|\btruncate\s+table\b|\bdel\s+\/[sq]|\brmdir\s+\/s|\bformat\s+[a-z]:|\bmkfs\b|\bdd\s+if=|(?:^|[;|&\n({]|\s-c(?:ommand)?\s+["'])\s*(?:remove-item|ri|rm|del|erase|rmdir|rd)(?=\s)(?=[^|;&\n]*\s-r(?:e\w*)?(?::\$true)?(?=[\s"')}]|$))(?=[^|;&\n]*\s-fo\w*(?::\$true)?(?=[\s"')}]|$))/i;
 
 const SHELL_KEYWORDS = new Set(['for', 'while', 'if', 'then', 'else', 'fi', 'do', 'done', 'case', 'esac', 'function', 'export', 'set', 'export', '&&', '||', '{', '}', '(', ')', 'local', 'return', 'exit']);
 
@@ -171,6 +171,27 @@ export function commandVerb(cmd) {
   return twoWord.has(first) && second ? `${first} ${second}` : first;
 }
 
+/**
+ * Verb of a PowerShell command line. PowerShell syntax puts things in front of the command that a POSIX shell does not:
+ * the call operator (`& "C:\Program Files\nodejs\npm.cmd" test`), `$env:X=1;` assignments and `Set-Location x;` prefixes.
+ * Whatever is left that does not look like a command name is "(script)" rather than a garbage verb.
+ */
+export function powershellVerb(cmd) {
+  let c = String(cmd).trim();
+  for (let i = 0; i < 8; i++) {
+    const before = c;
+    c = c.replace(/^\$[\w:.]+\s*=\s*[^;\n]*(?:;|\n)\s*/, '');
+    c = c.replace(/^(?:cd|sl|set-location|push-location|pushd)\s+(?:"[^"]*"|'[^']*'|[^;&|\n]+?)\s*(?:;|&&|\n)\s*/i, '');
+    c = c.replace(/^&\s*/, '');
+    if (c === before) break;
+  }
+  const q = c.match(/^(["'])([^"']*)\1\s*([\s\S]*)$/);
+  if (q) c = `${q[2].replace(/^.*[\\/]/, '')} ${q[3]}`;
+  c = c.replace(/^(\S+?)\.(?:exe|cmd|bat)(?=\s|$)/i, '$1');
+  const verb = commandVerb(c);
+  return /^[\w.@-]+(?: [\w.:@-]+)?$/.test(verb) ? verb : '(script)';
+}
+
 export function newSessionSummary(file) {
   return {
     v: SUMMARY_VERSION,
@@ -211,7 +232,8 @@ export function newSessionSummary(file) {
     skills: {},
     slashCommands: {},
     mcp: {}, // server -> {calls, tools: {}}
-    bashVerbs: {},
+    bashVerbs: {}, // Bash tool only: the allow-rule suggestions are built from it, and a PowerShell verb is not a Bash(...) rule
+    powershellVerbs: {}, // PowerShell tool
     bashCommands: {}, // normalised -> count (trimmed to top N at the end)
     testCommands: 0, // test runs of the main session plus those run by subagents
     sidechainTestCommands: 0, // the part of testCommands that a subagent ran (Kaizen's test-runner, Task/Agent helpers)
@@ -230,7 +252,9 @@ export function newSessionSummary(file) {
     costUSD: null,
     linesAdded: 0,
     linesRemoved: 0,
-    hooks: { summaries: 0, hookRuns: 0, errors: 0, events: {}, durations: {}, timeouts: {}, nonBlockingErrors: 0, errorSamples: [], errorsByCommand: {} },
+    // runsByCommand uses the key of errorsByCommand (`event|command`), so a failure rate divides by the runs of that very hook;
+    // durations/timeouts are keyed by hookKey() (script name), which two hooks or two events can share.
+    hooks: { summaries: 0, hookRuns: 0, errors: 0, events: {}, durations: {}, timeouts: {}, nonBlockingErrors: 0, errorSamples: [], errorsByCommand: {}, runsByCommand: {} },
     attachments: {},
     toolTimeouts: 0,
     toolInterrupted: 0,
@@ -255,6 +279,10 @@ function finalize(s) {
   s.bashCommands = topN(s.bashCommands, 60);
   s.promptStems = topN(s.promptStems, 80);
   s.hooks.errorsByCommand = topN(s.hooks.errorsByCommand, 20);
+  // keep the busiest hooks plus every hook that has an error entry (its failure rate needs its own run count)
+  const runs = topN(s.hooks.runsByCommand, 100);
+  for (const k of Object.keys(s.hooks.errorsByCommand)) if (s.hooks.runsByCommand[k]) runs[k] = s.hooks.runsByCommand[k];
+  s.hooks.runsByCommand = runs;
   for (const k of Object.keys(s.promptSamples)) if (!(k in s.promptStems)) delete s.promptSamples[k];
   s.slowCommands.sort((a, b) => b.ms - a.ms);
   s.slowCommandCount = s.slowCommands.length;
@@ -279,6 +307,11 @@ function uuidKey(uuid) {
   return crypto.createHash('sha1').update(String(uuid)).digest('hex').slice(0, 12);
 }
 
+/** Identity of one configured hook in the counters: `event|command`. Errors and runs share it, so a rate divides like by like. */
+function hookRunKey(event, command) {
+  return `${event || '?'}|${String(command).slice(0, 300)}`;
+}
+
 async function* readSources(sources) {
   for (const src of sources) for await (const o of readJsonl(src.file)) yield { o, sub: src.sub };
 }
@@ -286,7 +319,7 @@ async function* readSources(sources) {
 /**
  * Scan one transcript file into a session summary.
  *
- * opts.subagents   paths of the session's subagent transcripts (<session>/subagents/*.jsonl). Current Claude Code writes
+ * opts.subagents   paths of the session's subagent transcripts (<session>/subagents/**.jsonl, see listTranscripts). Current Claude Code writes
  *                  subagent traffic only there, not as isSidechain lines of the parent; every line of these files is
  *                  treated as sidechain and merged into this summary. A line that an older version mirrored in both
  *                  places is counted once (uuid).
@@ -354,8 +387,11 @@ export async function summarizeTranscript(file, opts = {}) {
         s.hooks.errors += errs;
         inc(s.hooks.events, o.subtype);
         if (Array.isArray(o.hookInfos)) {
+          // the summary line has no event of its own: it is the Stop (or SubagentStop) run
+          const summaryEvent = o.hookEvent || (/subagent/i.test(o.subtype) ? 'SubagentStop' : /stop/i.test(o.subtype) ? 'Stop' : null);
           for (const h of o.hookInfos) {
             if (!h || typeof h.command !== 'string') continue;
+            inc(s.hooks.runsByCommand, hookRunKey(summaryEvent, h.command));
             const key = hookKey(h.command);
             const d = (s.hooks.durations[key] ||= { n: 0, ms: 0, max: 0 });
             d.n++;
@@ -383,9 +419,13 @@ export async function summarizeTranscript(file, opts = {}) {
           tk.n++;
           if (typeof a.timeoutMs === 'number' && a.timeoutMs > tk.limitMs) tk.limitMs = a.timeoutMs;
         }
-        if (!stopEvent) s.hooks.hookRuns++;
+        if (!stopEvent) {
+          s.hooks.hookRuns++;
+          inc(s.hooks.runsByCommand, hookRunKey(a.hookEvent || a.hookName, a.command));
+        }
       } else if (typeof a.type === 'string' && a.type.startsWith('hook_') && typeof a.command === 'string' && !stopEvent) {
         s.hooks.hookRuns++;
+        inc(s.hooks.runsByCommand, hookRunKey(a.hookEvent || a.hookName, a.command));
         const d = (s.hooks.durations[hookKey(a.command)] ||= { n: 0, ms: 0, max: 0 });
         d.n++;
         if (typeof a.durationMs === 'number') {
@@ -395,7 +435,7 @@ export async function summarizeTranscript(file, opts = {}) {
       }
       if (a.type === 'hook_non_blocking_error' || a.type === 'hook_blocking_error' || a.type === 'hook_error') {
         s.hooks.nonBlockingErrors++;
-        if (typeof a.command === 'string') inc(s.hooks.errorsByCommand, `${a.hookEvent || a.hookName || '?'}|${a.command.slice(0, 300)}`);
+        if (typeof a.command === 'string') inc(s.hooks.errorsByCommand, hookRunKey(a.hookEvent || a.hookName, a.command));
         if (s.hooks.errorSamples.length < 10) {
           const sample = {};
           for (const [k, v] of Object.entries(a)) {
@@ -457,9 +497,9 @@ export async function summarizeTranscript(file, opts = {}) {
         const isShell = name === 'Bash' || name === 'PowerShell';
         if (isShell && typeof input.command === 'string') {
           const cmd = input.command;
-          verb = commandVerb(cmd);
+          verb = name === 'PowerShell' ? powershellVerb(cmd) : commandVerb(cmd);
           if (!sidechain) {
-            inc(s.bashVerbs, verb);
+            inc(name === 'PowerShell' ? s.powershellVerbs : s.bashVerbs, verb);
             inc(s.bashCommands, normalizeCommand(redact(cmd)));
             if (TEST_CMD_RE.test(cmd)) s.testCommands++;
             const g = cmd.match(GIT_RE);
@@ -511,14 +551,16 @@ export async function summarizeTranscript(file, opts = {}) {
     }
 
     // ---- user line ----
-    if (o.permissionMode) inc(s.permissionModes, o.permissionMode);
+    // Counters that describe the main session (modes, tool outcomes) skip sidechain lines; permission decisions and denials
+    // are things the user was asked or told, wherever the tool ran, so they are counted for subagents too.
+    if (o.permissionMode && !sidechain) inc(s.permissionModes, o.permissionMode);
     if (o.permissionDecision) {
       const pd = o.permissionDecision;
       inc(s.permissionDecisions, typeof pd === 'object' ? `${pd.decision || '?'}/${pd.reasonType || '?'}/${pd.source || '?'}` : String(pd));
     }
     if (o.toolDenialKind) inc(s.denialKinds, String(o.toolDenialKind));
     const tur = o.toolUseResult;
-    if (tur && typeof tur === 'object' && !Array.isArray(tur)) {
+    if (!sidechain && tur && typeof tur === 'object' && !Array.isArray(tur)) {
       if (typeof tur.timedOutAfterMs === 'number') s.toolTimeouts++;
       if (tur.interrupted === true) s.toolInterrupted++;
       if (tur.backgroundTaskId) s.backgroundTasks++;
@@ -532,6 +574,8 @@ export async function summarizeTranscript(file, opts = {}) {
     if (results.length) {
       for (const r of results) {
         const pend = pendingTools.get(r.tool_use_id);
+        // a result whose tool_use is not known (before the window, another file) belongs to the side its own line is on
+        const resultSidechain = pend ? pend.sidechain : sidechain;
         if (pend) {
           pendingTools.delete(r.tool_use_id);
           if (!Number.isNaN(ts) && !Number.isNaN(pend.ts) && !pend.sidechain) {
@@ -543,7 +587,7 @@ export async function summarizeTranscript(file, opts = {}) {
             if (pend.isShell && ms >= 30000 && !waitedForUser) s.slowCommands.push({ verb: pend.verb, ms });
           }
         }
-        if (r.is_error === true && (!pend || !pend.sidechain)) {
+        if (r.is_error === true && !resultSidechain) {
           const text = typeof r.content === 'string' ? r.content : textOf(r.content);
           if (INTERRUPT_RE.test(text)) {
             // Esc during a tool call is an interruption, not a tool failure
@@ -657,7 +701,7 @@ function sha1(text) {
 }
 
 function cacheKey(file, st, subs = []) {
-  const subPart = subs.map((x) => `${path.basename(x.file)}:${x.size}:${Math.round(x.mtimeMs)}`).join(',');
+  const subPart = subs.map((x) => `${x.rel || path.basename(x.file)}:${x.size}:${Math.round(x.mtimeMs)}`).join(',');
   return sha1(`${file}|${st.size}|${Math.round(st.mtimeMs)}|${SUMMARY_VERSION}|${subPart}`);
 }
 
@@ -672,33 +716,45 @@ function coversWindow(c, winStart) {
   return !c.windowCut;
 }
 
+/** How many directory levels below <session>/subagents/ are searched (workflows/<run>/ is two). */
+const MAX_SUBAGENT_DEPTH = 4;
+
 function listSubagentTranscripts(dir, sessionName) {
-  const subDir = path.join(dir, sessionName, 'subagents');
-  let entries;
-  try {
-    entries = fs.readdirSync(subDir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
+  const root = path.join(dir, sessionName, 'subagents');
   const out = [];
-  for (const e of entries) {
-    if (!e.isFile() || !e.name.endsWith('.jsonl')) continue;
-    const file = path.join(subDir, e.name);
+  const walk = (d, depth) => {
+    let entries;
     try {
-      const st = fs.statSync(file);
-      if (st.size > 0) out.push({ file, size: st.size, mtimeMs: st.mtimeMs });
+      entries = fs.readdirSync(d, { withFileTypes: true });
     } catch {
-      /* vanished while listing */
+      return;
     }
-  }
-  out.sort((a, b) => a.file.localeCompare(b.file));
+    for (const e of entries) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) {
+        if (depth < MAX_SUBAGENT_DEPTH) walk(p, depth + 1);
+        continue;
+      }
+      if (!e.isFile() || !e.name.endsWith('.jsonl')) continue;
+      try {
+        const st = fs.statSync(p);
+        // `rel` (forward slashes) tells apart files with the same name in different run directories
+        if (st.size > 0) out.push({ file: p, rel: path.relative(root, p).split(path.sep).join('/'), size: st.size, mtimeMs: st.mtimeMs });
+      } catch {
+        /* vanished while listing */
+      }
+    }
+  };
+  walk(root, 0);
+  out.sort((x, y) => (x.rel < y.rel ? -1 : x.rel > y.rel ? 1 : 0));
   return out;
 }
 
 /**
  * Enumerate transcript files under projectsDir modified after `sinceMs`.
- * Current Claude Code writes subagent traffic only to <project>/<session>/subagents/*.jsonl (older versions also
- * mirrored it as isSidechain lines of the parent), so each entry carries the `subagents` files of its session.
+ * Current Claude Code writes subagent traffic only to <project>/<session>/subagents/**.jsonl (agent-*.jsonl, and
+ * workflows/<run>/agent-*.jsonl for workflow agents; older versions also mirrored it as isSidechain lines of the parent),
+ * so each entry carries the `subagents` files of its session, found to a bounded depth.
  * A session is listed when the main file or any of its subagent files was modified after `sinceMs`;
  * which lines count is decided later by their own timestamps.
  */

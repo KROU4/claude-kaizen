@@ -238,9 +238,9 @@ describe('tools', () => {
 });
 
 describe('friction', () => {
-  it('counts permission prompts only for decisions made by the user (source user_*)', () => {
-    assert.equal(measure.friction.permissionPrompts, 5); // 3 user_permanent + 1 user_temporary + 1 user_reject
-    assert.equal(measure.friction.permissionAutoAccepts, 10); // mode/config x8, hook x1, rule/config x1
+  it('counts permission prompts only for decisions the user was asked (source user_*, not matched by a saved rule)', () => {
+    assert.equal(measure.friction.permissionPrompts, 1); // the one user_reject; accept/rule/user_* is a saved rule applied without asking
+    assert.equal(measure.friction.permissionAutoAccepts, 14); // mode/config x8, hook x1, rule/config x1, rule/user_permanent x3, rule/user_temporary x1
   });
 
   it('merges permission decisions across sessions', () => {
@@ -332,6 +332,7 @@ describe('friction', () => {
         hooks: {
           ...newSessionSummary('/p/s.jsonl').hooks,
           errorsByCommand: { [`PostToolUse|${cmd}`]: errors },
+          runsByCommand: { [`PostToolUse|${cmd}`]: runs },
           durations: { [hookKey(cmd)]: { n: runs, ms: runs * 10, max: 50 } },
         },
       });
@@ -368,6 +369,41 @@ describe('friction', () => {
       assert.equal(h.runs, 40);
       assert.equal(h.failureRate, 0.75);
       assert.deepEqual(m.friction.failingHookCommands, [cmd]);
+    });
+
+    it('divides by the runs of this very hook: another hook with the same script name does not dilute the rate', () => {
+      const a = 'node "/x/broken/index.mjs"';
+      const b = 'node "/x/fine/index.mjs"';
+      assert.equal(hookKey(a), hookKey(b));
+      const withBoth = { ...inv, hooks: { ...inv.hooks, commands: [...inv.hooks.commands, { event: 'PreToolUse', matcher: '', command: a, file: 'settings.json' }] } };
+      const s = makeSession({
+        hooks: {
+          ...newSessionSummary('/p/s.jsonl').hooks,
+          errorsByCommand: { [`PreToolUse|${a}`]: 30 },
+          runsByCommand: { [`PreToolUse|${a}`]: 30, [`PostToolUse|${b}`]: 100 },
+          durations: { [hookKey(a)]: { n: 130, ms: 1300, max: 50 } },
+        },
+      });
+      const h = buildMeasure({ sessions: [s, ...padding()], inventory: withBoth, insights: null, env: ENV }).friction.failingHooks.find((x) => x.command === a);
+      assert.equal(h.runs, 30);
+      assert.equal(h.failureRate, 1);
+    });
+
+    it('keeps one command on two events apart', () => {
+      const g = 'npx prettier --write'; // configured in the fixture settings
+      const s = makeSession({
+        hooks: {
+          ...newSessionSummary('/p/s.jsonl').hooks,
+          errorsByCommand: { [`PostToolUse|${g}`]: 30 },
+          runsByCommand: { [`PostToolUse|${g}`]: 40, [`PreToolUse|${g}`]: 500 },
+          durations: { [hookKey(g)]: { n: 540, ms: 5400, max: 50 } },
+        },
+      });
+      const f = buildMeasure({ sessions: [s, ...padding()], inventory: inv, insights: null, env: ENV }).friction;
+      const h = f.failingHooks.find((x) => x.command === g);
+      assert.equal(h.runs, 40);
+      assert.equal(h.failureRate, 0.75);
+      assert.deepEqual(f.failingHookCommands, [g]);
     });
 
     it('never reports a rate above 1 when the run count is missing or smaller than the errors', () => {
@@ -654,17 +690,29 @@ describe('prompt stems across sessions', () => {
 describe('permission prompts', () => {
   const withDecisions = (permissionDecisions) => buildMeasure({ sessions: [makeSession({ permissionDecisions })], inventory: inv, insights: null, env: ENV }).friction;
 
-  it('counts user_permanent, user_temporary and user_reject but not mode, hook or rule decisions', () => {
+  it('counts answers the user gave in a dialog (user_temporary, user_reject) but not mode, hook or rule decisions', () => {
     const f = withDecisions({
-      'accept/rule/user_permanent': 2,
-      'accept/rule/user_temporary': 1,
+      'accept/?/user_temporary': 3,
+      'reject/?/user_reject': 2,
       'reject/user/user_reject': 1,
       'accept/mode/config': 7,
       'accept/hook/hook': 3,
       'reject/rule/config': 4,
     });
-    assert.equal(f.permissionPrompts, 4);
+    assert.equal(f.permissionPrompts, 6);
     assert.equal(f.permissionAutoAccepts, 10);
+  });
+
+  it('does not count a saved rule that a user wrote (accept/rule/user_permanent) as a prompt: it is applied without asking', () => {
+    const f = withDecisions({
+      'accept/rule/user_permanent': 1073,
+      'accept/rule/user_temporary': 4,
+      'reject/rule/user_permanent': 2,
+      'accept/?/user_temporary': 169,
+      'reject/?/user_reject': 5,
+    });
+    assert.equal(f.permissionPrompts, 174);
+    assert.equal(f.permissionAutoAccepts, 1077);
   });
 
   it('is zero when nothing was decided interactively', () => {
@@ -680,6 +728,23 @@ describe('permission prompts', () => {
   it('counts dontAsk like bypassPermissions in bypassShare', () => {
     const s = makeSession({ permissionModes: { dontAsk: 1, bypassPermissions: 1, default: 2 } });
     assert.equal(buildMeasure({ sessions: [s], inventory: inv, insights: null, env: ENV }).sessions.bypassShare, 0.5);
+  });
+});
+
+describe('PowerShell commands and the allow-rule suggestions', () => {
+  it('builds no Bash(...) rule from PowerShell verbs, and reports them under tools.powershellVerbs', () => {
+    const ps = makeSession({ powershellVerbs: { 'git status': 9, 'Get-ChildItem': 9, npm: 4 } });
+    const m = buildMeasure({ sessions: [ps, ...padding()], inventory: inv, insights: null, env: ENV });
+    assert.deepEqual(m.tools.suggestedAllowRules, []);
+    assert.deepEqual(m.tools.bashVerbs, {});
+    assert.deepEqual(m.tools.powershellVerbs, { 'git status': 9, 'Get-ChildItem': 9, npm: 4 });
+  });
+
+  it('still builds the rules from the Bash verbs of a session that also used PowerShell', () => {
+    const s = makeSession({ bashVerbs: { 'git status': 3 }, powershellVerbs: { 'git diff': 50 } });
+    const m = buildMeasure({ sessions: [s, ...padding()], inventory: inv, insights: null, env: ENV });
+    assert.equal(m.tools.suggestedAllowRules.length, 1);
+    assert.match(m.tools.suggestedAllowRules[0].rule, /^Bash\(git status[ :]\*\)$/);
   });
 });
 

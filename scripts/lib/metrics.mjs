@@ -2,7 +2,7 @@
 // measurement object (measure.json). Every metric that a recipe may test is
 // documented in docs/metrics.md (generated from METRIC_DOCS below).
 import { detectLang } from './i18n.mjs';
-import { hookKey, topN } from './transcripts.mjs';
+import { topN } from './transcripts.mjs';
 import { redact } from './redact.mjs';
 
 export const MEASURE_VERSION = 1;
@@ -234,6 +234,7 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
   const errorClasses = {};
   const durations = {};
   const bashVerbs = {};
+  const powershellVerbs = {};
   const bashCommands = {};
   const slowByVerb = {};
   for (const s of S) {
@@ -241,6 +242,7 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
     merge(errorsByName, s.toolErrors);
     merge(errorClasses, s.errorClasses);
     merge(bashVerbs, s.bashVerbs);
+    merge(powershellVerbs, s.powershellVerbs);
     merge(bashCommands, s.bashCommands);
     for (const [t, d] of Object.entries(s.toolDurations || {})) {
       const x = (durations[t] ||= { n: 0, ms: 0, max: 0 });
@@ -273,6 +275,8 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
         .slice(0, 20),
     ),
     bashVerbs: topN(bashVerbs, 30),
+    // PowerShell tool commands: counted apart from Bash because no Bash(...) allow rule covers them
+    powershellVerbs: topN(powershellVerbs, 30),
     repeatedBashCommands: Object.entries(bashCommands)
       .filter(([, c]) => c >= 3)
       .sort((a, b) => b[1] - a[1])
@@ -290,6 +294,7 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
   // ---- friction
   const permissionDecisions = {};
   const hookDurations = {};
+  const hookRunsByCommand = {};
   const hookTimeoutMap = {};
   const hookErrorSamples = [];
   let hookRuns = 0;
@@ -306,6 +311,7 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
       x.ms += d.ms;
       if (d.max > x.max) x.max = d.max;
     }
+    merge(hookRunsByCommand, s.hooks.runsByCommand);
     for (const [k, d] of Object.entries(s.hooks.timeouts || {})) {
       const x = (hookTimeoutMap[k] ||= { n: 0, limitMs: 0 });
       x.n += d.n;
@@ -338,8 +344,9 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
       const configured = configuredNorm.get(normalizeCmd(command)) || null;
       // `command` is the display copy (redacted); `configuredCommand` stays exactly as written in settings.json for matching
       const source = configured ? null : fixedSource.get(normalizeCmd(command)) || null; // 'managed' / 'plugin': not removable
-      // runs of the same hook (any outcome); an error attachment is a run too, but Stop hooks are counted from their summary only
-      const runs = Math.max((hookDurations[hookKey(command)] || {}).n || 0, errors);
+      // runs of this very hook (same event and command as the errors, any outcome); an error attachment is a run too, but Stop hooks
+      // are counted from their summary only. hookDurations is keyed by script name and would mix hooks that share it.
+      const runs = Math.max(hookRunsByCommand[key] || 0, errors);
       return { event, command: redact(command), errors, runs, failureRate: round(errors / runs, 3), configured: !!configured, configuredCommand: configured, ...(source ? { source } : {}) };
     })
     .sort((a, b) => b.errors - a.errors)
@@ -354,10 +361,11 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
   let promptedReject = 0;
   let autoAccept = 0;
   for (const [k, v] of Object.entries(permissionDecisions)) {
-    const [decision, , source] = k.split('/');
-    // source "user_temporary" / "user_permanent" / "user_reject" = the human answered a prompt;
-    // "config" / "hook" = resolved by mode, rule, classifier or a PreToolUse hook.
-    const interactive = /^user/i.test(source || '');
+    const [decision, reason, source] = k.split('/');
+    // source "user_temporary" / "user_reject" = the human answered a prompt; "config" / "hook" = resolved by mode, rule,
+    // classifier or a PreToolUse hook. reason "rule" is a saved rule matching (accept/rule/user_permanent is the user's own
+    // allow rule from settings, applied without asking), so it is auto even though a user wrote the rule.
+    const interactive = /^user/i.test(source || '') && reason !== 'rule';
     if (decision === 'accept' && !interactive) autoAccept += v;
     else if (decision === 'accept') promptedAccept += v;
     else if (decision === 'reject' && interactive) promptedReject += v;

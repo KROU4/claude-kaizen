@@ -20,6 +20,7 @@ import {
   listTranscripts,
   newSessionSummary,
   normalizeCommand,
+  powershellVerb,
   promptStem,
   scanTranscripts,
   summarizeTranscript,
@@ -1561,8 +1562,13 @@ describe('the PowerShell tool feeds the shell metrics like Bash', () => {
       assert.equal(s.forcePushes, 1);
       assert.equal(s.destructive, 1);
       assert.deepEqual(s.git, { commit: 1, push: 1 });
-      assert.deepEqual(s.bashVerbs, { 'npm test': 1, 'git commit': 1, 'Remove-Item': 1, 'git push': 1 });
     }
+    const verbs = { 'npm test': 1, 'git commit': 1, 'Remove-Item': 1, 'git push': 1 };
+    assert.deepEqual(bash.bashVerbs, verbs);
+    assert.deepEqual(bash.powershellVerbs, {});
+    // PowerShell verbs are not Bash verbs: no Bash(...) allow rule is built from them
+    assert.deepEqual(ps.bashVerbs, {});
+    assert.deepEqual(ps.powershellVerbs, verbs);
     assert.deepEqual(ps.toolUses, { Edit: 1, PowerShell: 4 });
   });
 
@@ -1663,5 +1669,214 @@ describe('corrections need something to correct', () => {
       asstText('1', { isSidechain: true }),
     ]);
     assert.equal(s.corrections, 0);
+  });
+});
+
+// Round 8: per-hook run counters, PowerShell verbs, destructive PowerShell forms, sidechain attribution, workflow subagents.
+
+describe('hook runs are counted per event and command (the key of errorsByCommand)', () => {
+  const att = (type, hookEvent, command, extra = {}) => ({ type: 'attachment', uuid: `h-${Math.random()}`, attachment: { type, hookEvent, command, durationMs: 10, ...extra } });
+
+  it('does not let two hooks that share a script name, or one command on two events, share a run counter', async () => {
+    const A = 'node "/x/broken/index.mjs"';
+    const B = 'node "/x/fine/index.mjs"';
+    const G = 'node "/x/guard.mjs"';
+    const lines = [];
+    for (let i = 0; i < 3; i++) lines.push(att('hook_non_blocking_error', 'PreToolUse', A));
+    for (let i = 0; i < 10; i++) lines.push(att('hook_success', 'PostToolUse', B));
+    for (let i = 0; i < 2; i++) lines.push(att('hook_non_blocking_error', 'PostToolUse', G));
+    for (let i = 0; i < 7; i++) lines.push(att('hook_success', 'PreToolUse', G));
+    const s = await summarizeLines(lines);
+    assert.deepEqual(s.hooks.runsByCommand, { [`PreToolUse|${A}`]: 3, [`PostToolUse|${B}`]: 10, [`PostToolUse|${G}`]: 2, [`PreToolUse|${G}`]: 7 });
+    assert.deepEqual(s.hooks.errorsByCommand, { [`PreToolUse|${A}`]: 3, [`PostToolUse|${G}`]: 2 });
+    assert.equal(s.hooks.durations['index.mjs'].n, 13, 'the by-script counter still mixes the two hooks: that is why rates do not use it');
+  });
+
+  it('counts a Stop hook run from its summary under the Stop event, once, and a cancelled run as a run', async () => {
+    const cmd = 'node "/x/notify.mjs"';
+    const s = await summarizeLines([
+      att('hook_success', 'Stop', cmd),
+      { type: 'system', subtype: 'stop_hook_summary', uuid: 'h2', hookCount: 1, hookInfos: [{ command: cmd, durationMs: 20 }], hookErrors: [] },
+      att('hook_success', 'SubagentStop', cmd),
+      att('hook_cancelled', 'PreToolUse', cmd, { timedOut: true, timeoutMs: 5000 }),
+    ]);
+    assert.deepEqual(s.hooks.runsByCommand, { [`Stop|${cmd}`]: 1, [`PreToolUse|${cmd}`]: 1 });
+  });
+
+  it('keeps the run count of every hook that has an error entry when the run map is trimmed', async () => {
+    const lines = [att('hook_non_blocking_error', 'PreToolUse', 'node "/x/rare.mjs"')];
+    for (let i = 0; i < 150; i++) lines.push(att('hook_success', 'PostToolUse', `node "/x/busy-${i}.mjs"`));
+    const s = await summarizeLines(lines);
+    assert.equal(s.hooks.runsByCommand['PreToolUse|node "/x/rare.mjs"'], 1);
+    assert.ok(Object.keys(s.hooks.runsByCommand).length <= 101);
+  });
+});
+
+describe('powershellVerb', () => {
+  it('reads the command behind the call operator, quoted paths, environment assignments and Set-Location prefixes', () => {
+    assert.equal(powershellVerb('& "C:\\Program Files\\nodejs\\npm.cmd" test'), 'npm test');
+    assert.equal(powershellVerb('$env:CI=1; npm test'), 'npm test');
+    assert.equal(powershellVerb('Set-Location C:\\work; git status'), 'git status');
+    assert.equal(powershellVerb('cd "C:\\my work"; git diff --stat'), 'git diff');
+    assert.equal(powershellVerb('Get-ChildItem -Recurse'), 'Get-ChildItem');
+    assert.equal(powershellVerb('dotnet.exe build'), 'dotnet build');
+  });
+
+  it('answers (script) instead of a garbage verb for fragments that are not a command name', () => {
+    for (const c of ["'PS5CameraDriver'; Get-Date", '$x = 1', '$(Get-Date).Year', '"unterminated']) {
+      assert.match(powershellVerb(c), /^(\(script\)|[\w.@-]+( [\w.:@-]+)?)$/, c);
+    }
+    for (const bad of ['&', '$env:CI=1;']) assert.notEqual(powershellVerb(`${bad} npm test`), bad);
+    assert.equal(powershellVerb(''), '(script)');
+  });
+});
+
+describe('PowerShell commands stay out of the Bash verbs', () => {
+  it('records PowerShell verbs apart and keeps PowerShell commands in the test, git, destructive and slow counters', async () => {
+    const cmds = ['& "C:\\Program Files\\nodejs\\npm.cmd" ci', '$env:CI=1; npm test', 'Get-ChildItem | Remove-Item -Recurse -Force'];
+    const s = await summarizeLines(cmds.map((c, i) => asstTools(`p${i}`, [useTool(`p${i}`, 'PowerShell', { command: c })])));
+    assert.deepEqual(s.bashVerbs, {});
+    assert.deepEqual(s.powershellVerbs, { 'npm ci': 1, 'npm test': 1, 'Get-ChildItem': 1 });
+    assert.equal(s.testCommands, 1);
+    assert.equal(s.destructive, 1);
+    assert.equal(Object.keys(s.bashCommands).length, 3, 'repeated-command detection still sees them');
+  });
+});
+
+describe('the PowerShell form of a recursive force delete is matched in command position only', () => {
+  const destructive = async (command) => (await summarizeLines([asstTools('x', [useTool('x', 'PowerShell', { command })])])).destructive;
+
+  it('does not flag a path that merely contains rd, rm or ri', async () => {
+    for (const c of ['Copy-Item .\\src\\rd -Destination .\\x -Recurse -Force', 'Copy-Item C:\\a\\rm.txt D:\\ -Recurse -Force', 'Get-ChildItem .\\ri -Recurse -Force', 'Write-Host "rd -r -fo"']) {
+      assert.equal(await destructive(c), 0, c);
+    }
+  });
+
+  it('flags -Recurse:$true and -Force:$true, and not the explicit $false forms', async () => {
+    assert.equal(await destructive('Remove-Item .\\build -Recurse:$true -Force'), 1);
+    assert.equal(await destructive('Remove-Item .\\build -Recurse -Force:$true'), 1);
+    assert.equal(await destructive('Remove-Item .\\build -Recurse:$false -Force'), 0);
+    assert.equal(await destructive('Remove-Item .\\build -Recurse -Force:$false'), 0);
+  });
+
+  it('flags the command after a separator, a pipe, a block or inside -Command', async () => {
+    for (const c of ['cd x; Remove-Item y -Recurse -Force', 'gci | % { rm $_ -r -fo }', 'powershell -Command "Remove-Item y -Recurse -Force"', 'if ($true) { Remove-Item y -Recurse -Force }']) {
+      assert.equal(await destructive(c), 1, c);
+    }
+  });
+});
+
+describe('sidechain lines do not feed main-session counters', () => {
+  const sideResult = (id, extra = {}) => userLine([resultOf(id, 'ok')], { uuid: `ur-${id}`, isSidechain: true, ...extra });
+
+  it('keeps the permission mode, timeouts, interruptions, background tasks and manual edits of a subagent out', async () => {
+    const s = await summarizeLines([
+      userLine([resultOf('m1', 'ok')], { uuid: 'ur-m1', permissionMode: 'default', toolUseResult: { timedOutAfterMs: 5, interrupted: true, backgroundTaskId: 'b1', userModified: true } }),
+      sideResult('s1', { permissionMode: 'bypassPermissions', toolUseResult: { timedOutAfterMs: 5, interrupted: true, backgroundTaskId: 'b2', userModified: true } }),
+      sideResult('s2', { permissionMode: 'bypassPermissions' }),
+    ]);
+    assert.deepEqual(s.permissionModes, { default: 1 });
+    assert.equal(s.toolTimeouts, 1);
+    assert.equal(s.toolInterrupted, 1);
+    assert.equal(s.backgroundTasks, 1);
+    assert.equal(s.userModifiedEdits, 1);
+  });
+
+  it('still counts a permission decision that reached the user from a subagent', async () => {
+    const s = await summarizeLines([sideResult('s1', { permissionDecision: { decision: 'accept', reasonType: 'rule', source: 'user_permanent' } })]);
+    assert.deepEqual(s.permissionDecisions, { 'accept/rule/user_permanent': 1 });
+  });
+
+  it('does not count a subagent tool_result whose tool_use is unknown (outside the window) as a main-session error', async () => {
+    const s = await summarizeLines([
+      userLine([resultOf('gone', 'Error: ENOENT no such file', true)], { uuid: 'ur-gone', isSidechain: true }),
+      userLine([resultOf('gone2', 'Error: ENOENT no such file', true)], { uuid: 'ur-gone2' }),
+    ]);
+    assert.deepEqual(s.toolErrors, { unknown: 1 }, 'only the main-session result is an error');
+    assert.deepEqual(s.errorClasses, { 'not-found': 1 });
+  });
+
+  it('does the same for a subagent file read as a whole (its lines carry no isSidechain flag)', async () => {
+    const dir = path.join(makeTempDir('kaizen-side-'), 'projects');
+    writeJsonl(path.join(dir, 'p1', 'S1.jsonl'), [userLine('implement the parser for the config', { uuid: 'p-u1' })]);
+    writeJsonl(path.join(dir, 'p1', 'S1', 'subagents', 'agent-1.jsonl'), [
+      userLine([resultOf('lost', 'Error: ENOENT no such file', true)], { uuid: 's-u1', permissionMode: 'bypassPermissions', toolUseResult: { interrupted: true } }),
+    ]);
+    const s = (await scanTranscripts({ projectsDir: dir })).sessions[0];
+    assert.deepEqual(s.toolErrors, {});
+    assert.deepEqual(s.permissionModes, {});
+    assert.equal(s.toolInterrupted, 0);
+  });
+});
+
+describe('workflow subagent transcripts (<session>/subagents/workflows/<run>/agent-*.jsonl)', () => {
+  const SID = '55555555-eeee-4eee-8eee-eeeeeeeeeeee';
+  const mkdir = () => path.join(makeTempDir('kaizen-wf-'), 'projects');
+  const main = () => [userLine('run the workflow for the release', { uuid: 'w-u1', sessionId: SID }), asstTools('w1', [useTool('ag1', 'Agent', { subagent_type: 'general-purpose', prompt: 'x' })], { sessionId: SID })];
+  const agent = (n, cmd) => [asstTools(`wa${n}`, [useTool(`wb${n}`, 'Bash', { command: cmd })], { isSidechain: true, sessionId: SID })];
+
+  it('lists agent files at the top of subagents/ and in workflows/<run>/, with a path that tells equal names apart', () => {
+    const dir = mkdir();
+    writeJsonl(path.join(dir, 'p1', `${SID}.jsonl`), main());
+    writeJsonl(path.join(dir, 'p1', SID, 'subagents', 'agent-top.jsonl'), agent(1, 'ls'));
+    writeJsonl(path.join(dir, 'p1', SID, 'subagents', 'workflows', 'run-a', 'agent-x.jsonl'), agent(2, 'ls'));
+    writeJsonl(path.join(dir, 'p1', SID, 'subagents', 'workflows', 'run-b', 'agent-x.jsonl'), agent(3, 'ls'));
+    writeText(path.join(dir, 'p1', SID, 'subagents', 'workflows', 'run-b', 'meta.json'), '{}');
+    const list = listTranscripts(dir);
+    assert.equal(list.length, 1, 'the agent files are not sessions');
+    assert.deepEqual(list[0].subagents.map((x) => x.rel), ['agent-top.jsonl', 'workflows/run-a/agent-x.jsonl', 'workflows/run-b/agent-x.jsonl']);
+  });
+
+  it('stops at a bounded depth', () => {
+    const dir = mkdir();
+    writeJsonl(path.join(dir, 'p1', `${SID}.jsonl`), main());
+    writeJsonl(path.join(dir, 'p1', SID, 'subagents', 'a', 'b', 'c', 'd', 'agent-ok.jsonl'), agent(1, 'ls'));
+    writeJsonl(path.join(dir, 'p1', SID, 'subagents', 'a', 'b', 'c', 'd', 'e', 'agent-deep.jsonl'), agent(2, 'ls'));
+    assert.deepEqual(listTranscripts(dir)[0].subagents.map((x) => x.rel), ['a/b/c/d/agent-ok.jsonl']);
+  });
+
+  it('merges workflow agents into the parent as sidechain and counts a line shared by two agent files once', async () => {
+    const dir = mkdir();
+    writeJsonl(path.join(dir, 'p1', `${SID}.jsonl`), main());
+    const shared = asstTools('shared', [useTool('sh1', 'Bash', { command: 'pytest -q' })], { isSidechain: true, sessionId: SID });
+    writeJsonl(path.join(dir, 'p1', SID, 'subagents', 'workflows', 'run-a', 'agent-1.jsonl'), [shared, ...agent(2, 'npm test')]);
+    writeJsonl(path.join(dir, 'p1', SID, 'subagents', 'workflows', 'run-b', 'agent-1.jsonl'), [shared]);
+    const res = await scanTranscripts({ projectsDir: dir });
+    const s = res.sessions[0];
+    assert.equal(res.sessions.length, 1);
+    assert.equal(s.testCommands, 2);
+    assert.equal(s.sidechainTestCommands, 2);
+    assert.equal(s.sidechainMessages, 2);
+    assert.equal(s.assistantMessages, 1, 'subagent responses are not main-session ones');
+  });
+
+  it('re-summarizes when only one of two same-named workflow agent files changed, and reports the bytes of all', async () => {
+    const dir = mkdir();
+    const cacheDir = path.join(path.dirname(dir), 'cache');
+    writeJsonl(path.join(dir, 'p1', `${SID}.jsonl`), main());
+    const a = path.join(dir, 'p1', SID, 'subagents', 'workflows', 'run-a', 'agent-x.jsonl');
+    const b = path.join(dir, 'p1', SID, 'subagents', 'workflows', 'run-b', 'agent-x.jsonl');
+    writeJsonl(a, agent(1, 'pytest -q'));
+    writeJsonl(b, agent(2, 'ls'));
+    const first = await scanTranscripts({ projectsDir: dir, cacheDir });
+    assert.equal(first.sessions[0].sidechainTestCommands, 1);
+    assert.equal((await scanTranscripts({ projectsDir: dir, cacheDir })).cached, 1);
+    fs.appendFileSync(b, JSON.stringify(agent(3, 'npm test')[0]) + '\n');
+    const again = await scanTranscripts({ projectsDir: dir, cacheDir });
+    assert.equal(again.cached, 0);
+    assert.equal(again.sessions[0].sidechainTestCommands, 2);
+    const list = listTranscripts(dir)[0];
+    assert.equal(again.bytes, list.size + list.subagents.reduce((n, x) => n + x.size, 0));
+  });
+
+  it('keeps a session whose only recent file is a workflow agent', () => {
+    const dir = mkdir();
+    const old = path.join(dir, 'p1', `${SID}.jsonl`);
+    writeJsonl(old, main());
+    const wf = path.join(dir, 'p1', SID, 'subagents', 'workflows', 'run-a', 'agent-1.jsonl');
+    writeJsonl(wf, agent(1, 'ls'));
+    fs.utimesSync(old, 1_700_000_000, 1_700_000_000);
+    fs.utimesSync(wf, 1_800_000_000, 1_800_000_000);
+    assert.equal(listTranscripts(dir, { sinceMs: 1_750_000_000 * 1000 }).length, 1);
   });
 });

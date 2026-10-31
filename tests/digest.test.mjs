@@ -194,7 +194,7 @@ describe('renderDigest with a previous measurement', () => {
     const md = renderDigest(measure, 'en', earlier());
     assert.ok(md.includes(`## ${d.delta}`));
     assert.ok(md.includes('2026-10-01'));
-    assert.ok(md.includes(`| ${loadLocale('en').f.permission_prompts} | 20 | 5 | -15 ✓ |`), md.slice(md.indexOf(`## ${d.delta}`)));
+    assert.ok(md.includes(`| ${loadLocale('en').f.permission_prompts} | 20 | 1 | -19 ✓ |`), md.slice(md.indexOf(`## ${d.delta}`)));
     assert.ok(md.includes('(14-day window)'));
     assert.ok(md.includes('(30-day window)'));
   });
