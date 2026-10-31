@@ -60,13 +60,14 @@ function dropTextBodies(cmd) {
     .replace(/(?<!<)<<-?[ \t]*(['"]?)([A-Za-z_]\w*)\1([^\n]*)\n(?:[\s\S]*?\n)?[ \t]*\2[ \t]*(?=\n|$)/g, (_m, _q, _w, rest) => ' ' + rest);
 }
 
-// Cuts the `{ ... }` block of every Start-Job out of the text (a job runs in the background) and returns the blocks.
+// Cuts the `{ ... }` block of every Start-Job (and of every Start-Process that does not -Wait) out of the text:
+// such a block runs in the background. Returns the text and the job blocks.
 function cutJobBlocks(text) {
   const blocks = [];
   let out = '';
   let pos = 0;
-  JOB_START.lastIndex = 0;
-  for (let m; (m = JOB_START.exec(text)); ) {
+  const starter = /\b(?:start-job|start-threadjob|sajb|start-process|saps)\b/gi;
+  for (let m; (m = starter.exec(text)); ) {
     if (m.index < pos) continue;
     const open = text.indexOf('{', m.index);
     if (open < 0 || /[;|\n]/.test(text.slice(m.index, open))) continue;
@@ -78,10 +79,12 @@ function cutJobBlocks(text) {
       else if (ch === '}' && --depth === 0) end = i;
     }
     if (end < 0) continue;
-    blocks.push(text.slice(open + 1, end));
+    const isProcess = /^(?:start-process|saps)$/i.test(m[0]);
+    if (isProcess && /\s-wait\b/i.test(text.slice(m.index).split(/[;|\n]/)[0] + text.slice(end).split(/[;|\n]/)[0])) continue;
+    if (!isProcess) blocks.push(text.slice(open + 1, end));
     out += text.slice(pos, open) + '{}';
     pos = end + 1;
-    JOB_START.lastIndex = pos;
+    starter.lastIndex = pos;
   }
   return { text: out + text.slice(pos), blocks };
 }
@@ -161,6 +164,7 @@ function selftest() {
     'npx.cmd vite', 'npx.cmd next dev', 'pnpm.cmd exec vite', 'npx.exe -y vite', '$x = npm run dev',
     "Start-Process npm -ArgumentList 'run','dev' -Wait -NoNewWindow", 'Start-Process -FilePath npm -ArgumentList "run dev" -Wait', 'Start-Job { npm run dev } | Receive-Job -Wait', 'Start-Job { npm run dev } | Wait-Job',
     '$j = Start-Job { npm run dev }; Wait-Job $j', 'Start-Job -ScriptBlock {\n  npm run dev\n} | Wait-Job', 'Start-Job { npm run dev }; while ($true) { Get-Date }', "git commit -m @'\nmsg\n'@; npm run dev",
+    "Start-Process pwsh -ArgumentList '-Command',{ while ($true) { Get-Date } } -Wait",
   ];
   const psQuiet = [
     'Start-Sleep -Seconds 5', 'Start-Sleep 60', 'Start-Sleep -Milliseconds 5000', 'Start-Sleep -m 90000', 'Get-Content app.log -Tail 20', 'ping -n 2 10.0.0.1', 'timeout /t 5', 'while ($true) { if (Test-Path x) { break }; Start-Sleep 2 }',
@@ -171,6 +175,7 @@ function selftest() {
     'Start-Process msiexec -ArgumentList "/i a.msi" -Wait', 'Start-Process npm -ArgumentList "run build" -Wait -NoNewWindow', 'Start-Job { Start-Sleep 5 } | Wait-Job', 'Start-Job { npm run dev } | Wait-Job -Timeout 5',
     'Start-Job { npm run dev } | Receive-Job -Timeout 5', 'Start-Job { npm run dev } | Receive-Job', 'Wait-Job $j', 'npx.cmd tsc --noEmit', 'pnpm.cmd exec tsc', 'npm.cmd run build',
     "git commit -m @'\nFix: while ($true) in npm run dev\nStart-Sleep 600\n'@", "@'\nStart-Job { x }\nnpm run dev\n'@ | Set-Content a.ps1",
+    "Start-Process pwsh -ArgumentList '-NoExit','-Command',{ while ($true) { Get-Date } }",
   ];
   for (const tool of ['Bash', 'PowerShell']) {
     for (const c of nudge) {
