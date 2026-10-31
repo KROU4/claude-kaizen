@@ -1565,7 +1565,216 @@ describe('two recipes sharing session-context.mjs across separate batches', () =
     assert.match(stdout, /session-context\.mjs/);
     assert.ok(fs.existsSync(scriptFile()), 'an edited script must survive');
   });
+
+  // ---- one rule for the shared file: it goes only when no entry in force refers to it; its content is the newest
+  // ---- writer's; an edit is judged against the hash Kaizen wrote, never against what was on the disk at apply time
+
+  const fileEntry = (n) => readManifest(batch(n)).recipes.flatMap((r) => r.actions).find((a) => a.type === 'file' && /session-context/.test(a.file));
+  const KEPT = /kept: .*session-context.mjs modified since apply/;
+
+  describe('a script edited by the user, then a second batch', () => {
+    it('the second batch records the hash Kaizen wrote, not the edited text', async () => {
+      await at(1, { recipe: SC });
+      const written = fileEntry(1).hash;
+      fs.appendFileSync(scriptFile(), '\n// USER EDIT\n');
+      await at(2, { recipe: PH });
+      assert.equal(fileEntry(2).shared, true);
+      assert.equal(fileEntry(2).hash, written);
+    });
+
+    it('undoing the first batch keeps the edit, and so does undoing the second one afterwards', async () => {
+      await at(1, { recipe: SC });
+      fs.appendFileSync(scriptFile(), '\n// USER EDIT\n'); // between the two applies: the second one sees the edited text
+      await at(2, { recipe: PH });
+      const first = await runUndo({}, [batch(1)]);
+      assert.match(first.stdout, /session-context\.mjs/);
+      assert.match(first.stdout, /modified since apply|изменён/);
+      assert.ok(read(scriptFile()).includes('USER EDIT'));
+      assert.equal(readManifest(batch(1)).partiallyUndone, true, 'the edit stays protected: the batch is left partly undone');
+      const second = await runUndo({}, [batch(2)]);
+      assert.ok(fs.existsSync(scriptFile()), `the edited script must survive both undos\n${second.stdout}`);
+      assert.ok(read(scriptFile()).includes('USER EDIT'));
+    });
+
+    it('--force finishes the job, and the edited script is backed up first', async () => {
+      await at(1, { recipe: SC });
+      await at(2, { recipe: PH });
+      fs.appendFileSync(scriptFile(), '\n// USER EDIT\n');
+      await runUndo({ force: true }, [batch(1)]);
+      assert.ok(fs.existsSync(scriptFile()), 'precompact-handoff still uses it');
+      await runUndo({ force: true }, [batch(2)]);
+      assertPristine();
+      const saved = readTree(path.join(appliedDir(), batch(2), 'undo'));
+      assert.ok(Object.values(saved).some((text) => String(text).includes('USER EDIT')), 'the edit is in the undo backups');
+    });
+  });
+
+  describe('a user hook added to a group of the shared SessionStart hook', () => {
+    const userHook = { type: 'command', command: 'echo mine' };
+    const sessionGroups = () => ((readSettings().hooks || {}).SessionStart || []);
+
+    for (const order of ['before', 'after']) {
+      it(`undo of both batches leaves only the user hook (added ${order} the first undo)`, async () => {
+        await at(1, { recipe: PH });
+        await at(2, { recipe: SC });
+        const addHook = () => {
+          const s = readSettings();
+          s.hooks.SessionStart.find((g) => g.matcher === 'startup|clear').hooks.push(userHook);
+          writeSettings(s);
+        };
+        if (order === 'before') addHook();
+        await runUndo({}, [batch(1)]);
+        if (order === 'after') addHook();
+        const last = await runUndo({}, [batch(2)]);
+        assert.ok(!last.stdout.includes('--force'), last.stdout);
+        assert.deepEqual(sessionGroups(), [{ matcher: 'startup|clear', hooks: [userHook] }], 'no Kaizen hook is left, the user one is');
+        assert.ok(!fs.existsSync(scriptFile()), 'the script is gone together with its last hook');
+        assert.equal(readManifest(batch(2)).undone, true);
+      });
+    }
+
+    it('a dry run of undo --all reports the same as the real run', async () => {
+      await at(1, { recipe: PH });
+      await at(2, { recipe: SC });
+      const s = readSettings();
+      s.hooks.SessionStart.find((g) => g.matcher === 'startup|clear').hooks.push(userHook);
+      writeSettings(s);
+      const dry = await runUndo({ all: true, 'dry-run': true });
+      const real = await runUndo({ all: true });
+      assert.equal(normalizeUndoOutput(dry.stdout), normalizeUndoOutput(real.stdout));
+      assert.deepEqual(sessionGroups(), [{ matcher: 'startup|clear', hooks: [userHook] }]);
+    });
+  });
+
+  describe('the same recipe applied again with other parameters', () => {
+    const p = (n) => ['hooks.session-context.maxChars=' + n];
+
+    it('undoing the first batch leaves the second one with its hook as well as its script', async () => {
+      await at(1, { recipe: SC });
+      await at(2, { recipe: SC, param: p(4000) });
+      const hookEntries = readManifest(batch(2)).recipes.flatMap((r) => r.actions).filter((a) => a.type === 'settings.hook');
+      assert.equal(hookEntries.length, 1, 'the second batch records that it relies on the hook');
+      assert.equal(hookEntries[0].shared, true);
+      await runUndo({}, [batch(1)]);
+      assert.deepEqual(covered(), ALL_EVENTS, 'the hook still runs the script of the second batch');
+      assert.match(read(scriptFile()), /const MAX_RAW = '4000'/);
+      await runUndo({}, [batch(2)]);
+      assertPristine();
+    });
+
+    it('a repeat that changed nothing still records nothing', async () => {
+      await at(1, { recipe: SC });
+      const again = await at(2, { recipe: SC });
+      assert.ok(again.manifest.recipes.every((r) => r.actions.length === 0));
+    });
+
+    it('three applies, undone middle first and then the last: the first parameters are back, nothing needs --force', async () => {
+      await at(1, { recipe: SC, param: p(1001) });
+      await at(2, { recipe: SC, param: p(2002) });
+      await at(3, { recipe: SC, param: p(3003) });
+      assert.match(read(scriptFile()), /MAX_RAW = '3003'/);
+      const mid = await runUndo({}, [batch(2)]);
+      assert.match(read(scriptFile()), /MAX_RAW = '3003'/, 'the newest writer still owns the content');
+      const last = await runUndo({}, [batch(3)]);
+      assert.match(read(scriptFile()), /MAX_RAW = '1001'/, 'with both newer batches gone the first one\'s script is back');
+      assert.equal(sessionStart().length, 1);
+      const first = await runUndo({}, [batch(1)]);
+      for (const out of [mid, last, first]) assert.ok(!out.stdout.includes('--force'), out.stdout);
+      assertPristine();
+      for (const n of [1, 2, 3]) assert.equal(readManifest(batch(n)).undone, true);
+    });
+
+    it('three applies undone in every order end in the pristine state', async () => {
+      const orders = [[1, 2, 3], [3, 2, 1], [2, 1, 3], [2, 3, 1], [1, 3, 2], [3, 1, 2]];
+      for (const order of orders) {
+        fs.rmSync(appliedDir(), { recursive: true, force: true });
+        await at(1, { recipe: SC, param: p(1001) });
+        await at(2, { recipe: SC, param: p(2002) });
+        await at(3, { recipe: SC, param: p(3003) });
+        for (const n of order) {
+          const { stdout } = await runUndo({}, [batch(n)]);
+          assert.ok(!stdout.includes('--force'), `${order.join(',')}: ${stdout}`);
+          if (n !== order[2]) {
+            assert.ok(fs.existsSync(scriptFile()), `${order.join(',')}: the script is still in use after undoing ${n}`);
+            assert.equal(sessionStart().length, 1, `${order.join(',')}: the hook is still wired after undoing ${n}`);
+          }
+        }
+        assertPristine();
+      }
+    });
+  });
+
+  describe('undo --all --dry-run against the real run', () => {
+    it('reports the same lines and counts as the real run, without a spurious "modified since apply"', async () => {
+      await at(1, { recipe: PH });
+      await at(2, { recipe: SC, param: SC_PARAMS });
+      const before = snapshotDir(ctx.root);
+      const dry = await runUndo({ all: true, 'dry-run': true });
+      assert.deepEqual(snapshotDir(ctx.root), before, 'a dry run changes nothing');
+      assert.ok(!KEPT.test(dry.stdout), dry.stdout);
+      assert.ok(!dry.stdout.includes('--force'), dry.stdout);
+      const real = await runUndo({ all: true });
+      assert.equal(normalizeUndoOutput(dry.stdout), normalizeUndoOutput(real.stdout));
+      assertPristine();
+    });
+
+    it('three applies of one recipe: dry run and real run agree', async () => {
+      for (const [n, v] of [[1, 1001], [2, 2002], [3, 3003]]) await at(n, { recipe: SC, param: ['hooks.session-context.maxChars=' + v] });
+      const dry = await runUndo({ all: true, 'dry-run': true });
+      const real = await runUndo({ all: true });
+      assert.equal(normalizeUndoOutput(dry.stdout), normalizeUndoOutput(real.stdout));
+      assertPristine();
+    });
+
+    it('a script the user edited: the dry run says kept, just like the real run', async () => {
+      await at(1, { recipe: SC });
+      await at(2, { recipe: PH });
+      fs.appendFileSync(scriptFile(), '\n// USER EDIT\n');
+      const dry = await runUndo({ all: true, 'dry-run': true });
+      const real = await runUndo({ all: true });
+      assert.ok(KEPT.test(dry.stdout), dry.stdout);
+      // only the real run writes the journal, so only it adds the hint about the partly undone batch
+      assert.equal(normalizeUndoOutput(dry.stdout), normalizeUndoOutput(real.stdout.replace(/\n {2}! [\s\S]*$/, '\n')));
+    });
+  });
+
+  describe('undo --force on entries of a shared script', () => {
+    it('an entry that only relies on the script has nothing to revert: a user edit does not hold it back', async () => {
+      await at(1, { recipe: SC, param: SC_PARAMS });
+      await at(2, { recipe: PH });
+      fs.appendFileSync(scriptFile(), '\n// USER EDIT\n');
+      const { stdout } = await runUndo({}, [batch(2)]);
+      assert.ok(!KEPT.test(stdout), stdout);
+      assert.ok(!stdout.includes('--force'), stdout);
+      assert.equal(readManifest(batch(2)).undone, true);
+      assert.ok(read(scriptFile()).includes('USER EDIT'));
+    });
+
+    it('--force on the later writer puts the earlier recipe\'s script back instead of leaving the undone one', async () => {
+      await at(1, { recipe: PH });
+      const first = read(scriptFile());
+      await at(2, { recipe: SC, param: SC_PARAMS });
+      fs.appendFileSync(scriptFile(), '\n// USER EDIT\n');
+      const plain = await runUndo({}, [batch(2)]);
+      assert.ok(KEPT.test(plain.stdout), plain.stdout);
+      assert.ok(read(scriptFile()).includes('USER EDIT'), 'without --force the edit is kept');
+      const forced = await runUndo({ force: true }, [batch(2)]);
+      assert.equal(read(scriptFile()), first, forced.stdout);
+      assert.equal(readManifest(batch(2)).undone, true);
+      await runUndo({}, [batch(1)]);
+      assertPristine();
+    });
+  });
 });
+
+/** The lines of an undo run without the arrow / check mark and the dry-run / done wording, to compare a preview with the real run. */
+function normalizeUndoOutput(stdout) {
+  return stdout
+    .replace(/\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d(?:-\d\d)?/g, 'ID')
+    .replace(/Dry run: nothing reverted\. (\d+) change\(s\) from ID would be reverted\./g, 'N=$1 ID')
+    .replace(/Reverted (\d+) change\(s\) from ID\./g, 'N=$1 ID')
+    .replace(/^ {2}[→✓] /gm, '  ~ ');
+}
 
 // ------------------------------------------------------------------ catalog <-> apply consistency
 

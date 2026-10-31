@@ -532,6 +532,25 @@ describe('kaizen end to end: measure, recommend, apply, verify, undo', () => {
     assert.equal(cli(home, ['undo']).status, 0);
     assert.ok(!fs.existsSync(script));
   });
+
+  it('undo --all --dry-run previews exactly what undo --all does with a script two recipes share', () => {
+    const home = measured();
+    const script = path.join(home.stateDir, 'hooks', 'session-context.mjs');
+    assert.equal(cli(home, ['apply', '--recipe', 'hooks.precompact-handoff']).status, 0);
+    assert.equal(cli(home, ['apply', '--recipe', 'hooks.session-context', '--param', 'hooks.session-context.includeGit=false']).status, 0);
+    const before = snapshotDir(home.root);
+    const dry = cli(home, ['undo', '--all', '--dry-run']);
+    assert.equal(dry.status, 0, dry.stderr);
+    assert.deepEqual(snapshotDir(home.root), before, 'a dry run changes nothing');
+    assert.ok(!/modified since apply|--force/.test(dry.stdout), dry.stdout);
+    const real = cli(home, ['undo', '--all']);
+    assert.equal(real.status, 0, real.stderr);
+    assert.ok(!/modified since apply|--force/.test(real.stdout), real.stdout);
+    const plan = (out) => out.split('\n').filter((l) => /^ {2}[→✓] /.test(l)).map((l) => l.replace(/^ {2}[→✓] /, ''));
+    assert.deepEqual(plan(dry.stdout), plan(real.stdout));
+    assert.ok(plan(real.stdout).length >= 4);
+    assert.ok(!fs.existsSync(script), 'nothing is left behind');
+  });
 });
 
 describe('kaizen verify', () => {
