@@ -694,14 +694,57 @@ describe('summarizeTranscript: edge cases on inline transcripts', () => {
     assert.equal(s.testFailures, 0);
   });
 
-  it('keeps subagent edits out of filesEdited and extensions, like subagent test runs', async () => {
+  it('keeps subagent edits out of filesEdited and extensions, but counts the tests a subagent ran', async () => {
     const s = await summarizeLines([
       asst('1', [toolUse('e1', 'Edit', { file_path: '/w/src/a.ts', old_string: 'a', new_string: 'b' }), toolUse('b1', 'Bash', { command: 'npm test' })], { isSidechain: true }),
       asst('2', [toolUse('e2', 'Write', { file_path: '/w/src/main.py', content: 'x' })]),
     ]);
     assert.equal(s.filesEdited, 1);
     assert.deepEqual(s.extensions, { '.py': 1 });
-    assert.equal(s.testCommands, 0);
+    assert.equal(s.testCommands, 1);
+    assert.equal(s.sidechainTestCommands, 1);
+    assert.deepEqual(s.bashVerbs, {}, 'the other Bash counters stay main-session');
+  });
+
+  it('counts a test run by a subagent (Kaizen test-runner) as verification of the main-session edits', async () => {
+    const s = await summarizeLines([
+      asst('1', [toolUse('e1', 'Edit', { file_path: '/w/src/a.ts', old_string: 'a', new_string: 'b' })]),
+      asst('2', [toolUse('a1', 'Agent', { subagent_type: 'test-runner', prompt: 'run the tests' })]),
+      asst('3', [toolUse('b1', 'Bash', { command: 'npm test' }), toolUse('b2', 'Bash', { command: 'git status' })], { isSidechain: true }),
+      userLine([toolResult('b1', 'Exit code 1\nTests: 2 failed, 118 passed')], { uuid: 'ur1', isSidechain: true }),
+    ]);
+    assert.equal(s.filesEdited, 1);
+    assert.equal(s.testCommands, 1);
+    assert.equal(s.sidechainTestCommands, 1);
+    assert.equal(s.testFailures, 1, 'a failing test run in a subagent is a test failure');
+    assert.deepEqual(s.toolErrors, {}, 'sidechain tool errors are not main-session errors');
+  });
+
+  it('does not count the time spent waiting for a permission answer as a slow command', async () => {
+    const at = (sec) => new Date(Date.UTC(2026, 9, 29, 9, 0, 0) + sec * 1000).toISOString();
+    const run = (id, cmd, startSec, endSec, decision) => [
+      { ...asst(id, [toolUse(id, 'Bash', { command: cmd })]), timestamp: at(startSec) },
+      { ...userLine([toolResult(id, 'ok', false)], { uuid: `ur-${id}` }), timestamp: at(endSec), ...(decision ? { permissionDecision: decision } : {}) },
+    ];
+    const s = await summarizeLines([
+      ...run('w1', 'git status', 0, 60, { decision: 'accept', reasonType: 'prompt', source: 'user_temporary' }),
+      ...run('w2', 'git diff', 100, 160, { decision: 'accept', reasonType: 'mode', source: 'config' }),
+      ...run('w3', 'npm run build', 200, 260),
+    ]);
+    assert.deepEqual(s.slowCommands.map((c) => c.verb).sort(), ['git diff', 'npm run'], 'the prompted git status is not slow, the unprompted ones are');
+    assert.equal(s.slowCommandCount, 2);
+  });
+
+  it('keeps counting slow commands past the ten longest of a session', async () => {
+    const at = (sec) => new Date(Date.UTC(2026, 9, 29, 9, 0, 0) + sec * 1000).toISOString();
+    const lines = [];
+    for (let i = 0; i < 25; i++) {
+      lines.push({ ...asst(`s${i}`, [toolUse(`s${i}`, 'Bash', { command: 'npm run build' })]), timestamp: at(i * 100) });
+      lines.push({ ...userLine([toolResult(`s${i}`, 'ok', false)], { uuid: `us${i}` }), timestamp: at(i * 100 + 40) });
+    }
+    const s = await summarizeLines(lines);
+    assert.equal(s.slowCommandCount, 25);
+    assert.equal(s.slowCommands.length, 25);
   });
 
   it('records hook runs and durations from hook_* attachments', async () => {

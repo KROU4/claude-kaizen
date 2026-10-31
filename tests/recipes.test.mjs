@@ -804,3 +804,68 @@ describe('secret parameters', () => {
     assert.equal(p.secret, true);
   });
 });
+
+// ---------------------------------------------------------------- conditions that must not fire on tiny numbers or nothing to do
+
+describe('catalog conditions: small samples, nothing to choose, shared hooks', () => {
+  let base;
+  before(async () => {
+    ({ measure: base } = await buildFixtureMeasure());
+  });
+  const withMeasure = (patch) => {
+    const m = JSON.parse(JSON.stringify(base));
+    for (const [p, v] of Object.entries(patch)) {
+      const parts = p.split('.');
+      let cur = m;
+      for (const k of parts.slice(0, -1)) cur = cur[k] ??= {};
+      cur[parts.at(-1)] = v;
+    }
+    return m;
+  };
+  const found = (m, id) => recommend(loadCatalog(), m).recommended.find((r) => r.id === id);
+  const SESSION_CONTEXT_CMD = 'node "/home/u/.claude/kaizen/hooks/session-context.mjs"';
+
+  it('verify-before-done needs at least 5 editing sessions, like its Stop-hook twin', () => {
+    const tiny = withMeasure({ 'quality.editsWithoutTestsShare': 1, 'quality.sessionsWithEdits': 1, 'context.claudeMdHints': {} });
+    assert.equal(found(tiny, 'claude-md.verify-before-done'), undefined);
+    assert.equal(found(withMeasure({ 'quality.editsWithoutTestsShare': 1, 'quality.sessionsWithEdits': 6, 'context.claudeMdHints': {} }), 'claude-md.verify-before-done')?.id, 'claude-md.verify-before-done');
+  });
+
+  it('context-pressure does not fire on one compacted session out of one', () => {
+    const quiet = { 'context.sessionsOver150k': 0, 'friction.compactionShare': 1, 'friction.sessionsWithCompaction': 1, 'totals.sessions': 1 };
+    assert.equal(found(withMeasure(quiet), 'advice.context-pressure'), undefined);
+    assert.ok(found(withMeasure({ ...quiet, 'friction.sessionsWithCompaction': 4, 'totals.sessions': 12, 'friction.compactionShare': 0.33 }), 'advice.context-pressure'));
+    assert.ok(found(withMeasure({ ...quiet, 'context.sessionsOver150k': 3 }), 'advice.context-pressure'), 'three huge sessions are enough on their own');
+  });
+
+  it('session-context is still offered when the only SessionStart hook is the one precompact-handoff installed', () => {
+    const lots = { 'totals.sessions': 20, 'context.hasSessionStartHook': true };
+    assert.equal(found(withMeasure({ ...lots, 'context.hookEvents': { SessionStart: 1 }, 'context.hookCommandsText': 'sessionstart:node "/x/other-hook.mjs"' }), 'hooks.session-context'), undefined);
+    assert.equal(found(withMeasure({ ...lots, 'context.hookEvents': { SessionStart: 2 }, 'context.hookCommandsText': `sessionstart:${SESSION_CONTEXT_CMD}\nsessionstart:node other.mjs` }), 'hooks.session-context'), undefined);
+    assert.ok(found(withMeasure({ ...lots, 'context.hookEvents': { SessionStart: 1 }, 'context.hookCommandsText': `sessionstart:${SESSION_CONTEXT_CMD}` }), 'hooks.session-context'));
+  });
+
+  it('prune-unused is not offered without a plugin to disable, nor for plugins that are already disabled', () => {
+    const crowded = { 'skills.installed': 24, 'skills.unusedCount': 24, 'skills.unusedShare': 1, 'skills.unusedPlugins': [] };
+    assert.equal(found(withMeasure(crowded), 'skills.prune-unused'), undefined);
+    const idle = { ...crowded, 'skills.unusedPlugins': ['idle@market'] };
+    assert.ok(found(withMeasure(idle), 'skills.prune-unused'));
+    const disabled = withMeasure({ ...idle, 'inventory.settings': [{ scope: 'user', disabledPlugins: ['idle@market'] }] });
+    assert.equal(found(disabled, 'skills.prune-unused'), undefined);
+    const two = withMeasure({ ...crowded, 'skills.unusedPlugins': ['idle@market', 'old@market'], 'inventory.settings': [{ scope: 'user', disabledPlugins: ['idle@market'] }] });
+    assert.deepEqual(found(two, 'skills.prune-unused').params[0].options, ['old@market']);
+    // the full list (recommend --all) still shows the recipe
+    assert.ok(recommend(loadCatalog(), disabled, { includeAll: true }).recommended.some((r) => r.id === 'skills.prune-unused'));
+  });
+
+  it('format-on-edit offers every formatter the measurement can name for a language', () => {
+    const src = fs.readFileSync(path.join(KIT_ROOT, 'scripts', 'lib', 'metrics.mjs'), 'utf8');
+    const block = /const FORMATTERS = \{([\s\S]*?)\n\};/.exec(src)[1];
+    const named = [...block.matchAll(/:\s*'([^']+)'/g)].map((m) => m[1]);
+    assert.ok(named.length >= 12, named.join(','));
+    const options = loadCatalog().recipes.find((r) => r.id === 'hooks.format-on-edit').params.find((p) => p.name === 'formatter').options;
+    for (const f of named) assert.ok(options.includes(f), `${f} must be a valid formatter option`);
+    const template = fs.readFileSync(path.join(KIT_ROOT, 'recipes', 'templates', 'hooks', 'format-on-edit.mjs'), 'utf8');
+    for (const f of options.filter((o) => o !== 'auto')) assert.ok(template.includes(f), `the hook template must know ${f}`);
+  });
+});

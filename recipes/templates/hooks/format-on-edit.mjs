@@ -1,9 +1,12 @@
 // Kaizen hook: format-on-edit
 // What it does: after Claude edits a file, formats that one file with the project's own tooling: prettier (only
 //   when installed in a local node_modules, or when the project has a prettier config and npx exists), ruff or
-//   black for Python, gofmt, rustfmt. Silent, never blocks; skips missing files, files over 2 MB and unknown types.
+//   black for Python, gofmt, rustfmt. When a language-specific formatter is chosen, it also runs dotnet format (C#),
+//   rubocop -a (Ruby), php-cs-fixer, swiftformat, ktlint -F (Kotlin), google-java-format -i, terraform fmt and
+//   shfmt -w, each only if the tool is on PATH. Silent, never blocks; skips missing files, files over 2 MB and unknown types.
 // Registered for: PostToolUse, matcher "Edit|Write|MultiEdit".
-// Parameters (substituted by Kaizen at install time): formatter (auto|prettier|ruff|black|gofmt|rustfmt|none),
+// Parameters (substituted by Kaizen at install time): formatter (auto|prettier|ruff|black|gofmt|rustfmt|dotnet format|
+//   rubocop|php-cs-fixer|swiftformat|ktlint|google-java-format|terraform fmt|shfmt|none),
 //   timeoutSec (overall limit per edit, default 20).
 // Remove: delete the PostToolUse entry that runs this file from settings.json, or run `kaizen undo`.
 // Self-test: node format-on-edit.mjs --selftest
@@ -35,6 +38,29 @@ function onPath(name) {
       const f = path.join(dir, name + ext);
       try { if (fs.statSync(f).isFile()) return f; } catch { /* keep looking */ }
     }
+  }
+  return null;
+}
+
+// Formatters that need no project detection: run when chosen explicitly and the binary is on PATH.
+const TOOLS = {
+  'dotnet format': { bin: 'dotnet', exts: ['cs'], args: (f, stopAt) => dotnetArgs(f, stopAt) },
+  rubocop: { bin: 'rubocop', exts: ['rb', 'rake'], args: (f) => ['-a', f] },
+  'php-cs-fixer': { bin: 'php-cs-fixer', exts: ['php'], args: (f) => ['fix', '--quiet', '--no-interaction', f] },
+  swiftformat: { bin: 'swiftformat', exts: ['swift'], args: (f) => ['--quiet', f] },
+  ktlint: { bin: 'ktlint', exts: ['kt', 'kts'], args: (f) => ['-F', f] },
+  'google-java-format': { bin: 'google-java-format', exts: ['java'], args: (f) => ['-i', f] },
+  'terraform fmt': { bin: 'terraform', exts: ['tf', 'tfvars'], args: (f) => ['fmt', f] },
+  shfmt: { bin: 'shfmt', exts: ['sh', 'bash'], args: (f) => ['-w', f] },
+};
+
+// dotnet format works on a project or solution: the nearest .sln (else .csproj) above the file.
+function dotnetArgs(file, stopAt) {
+  for (const d of ancestors(path.dirname(file), stopAt)) {
+    let names = [];
+    try { names = fs.readdirSync(d); } catch { /* unreadable directory */ }
+    const ws = names.find((n) => n.endsWith('.sln')) || names.find((n) => n.endsWith('.csproj'));
+    if (ws) return ['format', path.join(d, ws), '--include', file];
   }
   return null;
 }
@@ -77,6 +103,12 @@ function plan(file, opts = {}) {
   const which = opts.which || onPath;
   const ext = path.extname(file).slice(1).toLowerCase();
   const kind = PRETTIER_EXT.has(ext) ? 'prettier' : ext === 'py' || ext === 'pyi' ? 'python' : ext === 'go' ? 'go' : ext === 'rs' ? 'rust' : null;
+  const tool = TOOLS[formatter];
+  if (tool) {
+    const bin = tool.exts.includes(ext) && which(tool.bin);
+    const args = bin && tool.args(file, opts.stopAt);
+    return args ? [{ bin, args }] : [];
+  }
   const wants = { prettier: 'prettier', ruff: 'python', black: 'python', gofmt: 'go', rustfmt: 'rust' }[formatter];
   if (!kind || formatter === 'none' || (formatter !== 'auto' && wants !== kind)) return [];
   if (kind === 'prettier') return [prettierStep(file, which, opts.stopAt)].filter(Boolean);
@@ -138,6 +170,19 @@ function selftest() {
     check('rust: rustfmt edition 2021', plan(mk('m.rs'), opts('rustfmt'))[0]?.args.join(' ').startsWith('--edition 2021'), 'expected rustfmt');
     check('unknown extension -> skip', plan(mk('notes.txt'), opts('ruff', 'gofmt', 'npx')).length === 0, 'expected no steps');
     check('formatter=none -> skip', plan(js, { ...opts(), formatter: 'none' }).length === 0, 'expected no steps');
+    for (const [name, bin, ext, head] of [['rubocop', 'rubocop', 'rb', '-a'], ['php-cs-fixer', 'php-cs-fixer', 'php', 'fix'], ['swiftformat', 'swiftformat', 'swift', '--quiet'], ['ktlint', 'ktlint', 'kt', '-F'], ['google-java-format', 'google-java-format', 'java', '-i'], ['terraform fmt', 'terraform', 'tf', 'fmt'], ['shfmt', 'shfmt', 'sh', '-w']]) {
+      const f = mk(`tools/x.${ext}`);
+      const steps = plan(f, { ...opts(bin), formatter: name });
+      check(`${name}: runs ${bin} on .${ext}`, steps.length === 1 && steps[0].args[0] === head && steps[0].args.at(-1) === f, first(steps));
+      check(`${name}: tool missing -> skip`, plan(f, { ...opts(), formatter: name }).length === 0, 'expected no steps');
+      check(`${name}: ignores other extensions`, plan(js, { ...opts(bin), formatter: name }).length === 0, 'expected no steps');
+      check(`auto does not run ${name}`, plan(f, opts(bin)).length === 0, 'expected no steps');
+    }
+    const cs = mk('net/src/A.cs');
+    check('dotnet format: no project -> skip', plan(cs, { ...opts('dotnet'), formatter: 'dotnet format' }).length === 0, 'expected no steps');
+    mk('net/App.csproj', '<Project/>');
+    const dn = plan(cs, { ...opts('dotnet'), formatter: 'dotnet format' });
+    check('dotnet format: project found above the file', dn.length === 1 && dn[0].args[0] === 'format' && dn[0].args[1].endsWith('App.csproj') && dn[0].args.at(-1) === cs, first(dn));
     check('forced black ignores .js', plan(js, { ...opts('black'), formatter: 'black' }).length === 0, 'expected no steps');
     format({ tool_input: { file_path: path.join(tmp, 'missing.js') } }, { formatter: 'auto' });
     format({ tool_input: { file_path: js }, cwd: tmp }, { formatter: 'auto' });

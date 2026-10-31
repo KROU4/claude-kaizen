@@ -249,10 +249,32 @@ describe('settings.hook', () => {
     assert.equal(readSettings().hooks.PreToolUse.length, 1);
   });
 
-  it('treats the same command under another matcher as already present', () => {
-    run('settings.hook', action());
+  it('treats the same command under a matcher it already covers as already present', () => {
+    run('settings.hook', action({ matcher: 'Bash|Edit' }));
     const { entry } = run('settings.hook', action({ matcher: 'Edit' }));
     assert.equal(entry.skipped, true);
+    assert.equal(run('settings.hook', action({ matcher: undefined })).entry.skipped, true);
+    assert.equal(readSettings().hooks.PreToolUse.length, 1);
+  });
+
+  it('adds only the matcher alternatives that are still missing for the same command, and undo removes only those', () => {
+    const first = run('settings.hook', action({ matcher: 'compact|resume|fork' }));
+    const second = run('settings.hook', action({ matcher: 'startup|resume|clear|compact|fork' }));
+    assert.equal(second.entry.skipped, undefined);
+    assert.equal(second.entry.matcher, 'startup|clear');
+    const groups = readSettings().hooks.PreToolUse;
+    assert.deepEqual(groups.map((g) => g.matcher), ['compact|resume|fork', 'startup|clear']);
+    assert.equal(undoEntry(second.entry).result, 'ok');
+    assert.deepEqual(readSettings().hooks.PreToolUse.map((g) => g.matcher), ['compact|resume|fork']);
+    assert.equal(undoEntry(first.entry).result, 'ok');
+    assert.equal(readSettings().hooks.PreToolUse, undefined);
+  });
+
+  it('a recipe whose matcher is a subset of an installed one adds nothing (no double firing)', () => {
+    run('settings.hook', action({ matcher: 'startup|resume|clear|compact|fork' }));
+    const { entry } = run('settings.hook', action({ matcher: 'compact|resume|fork' }));
+    assert.equal(entry.skipped, true);
+    assert.equal(readSettings().hooks.PreToolUse.length, 1);
   });
 
   it('writes matcher-less groups, async and if options when given', () => {
@@ -1315,6 +1337,20 @@ describe('cmdUndo', () => {
     assert.deepEqual(snapshotDir(ctx.root), before);
     assert.match(stdout, /→ .*remove rules block "read-before-edit"/);
     assert.equal(readManifest(ids[2]).undone, undefined);
+    // a dry run must not claim that anything was reverted
+    assert.ok(stdout.includes(t('cli.undo_dry', { n: 1, id: ids[2] })), stdout);
+    assert.ok(!stdout.includes(prefixOf('cli.undo_done', { n: 1 })), stdout);
+  });
+
+  it('installs session-context for startup|clear even after precompact-handoff, and undo removes both cleanly', async () => {
+    await withFrozenDate('2026-10-30T12:00:01.000Z', () => runApply({ recipe: 'hooks.precompact-handoff,hooks.session-context' }));
+    const groups = readSettings().hooks.SessionStart.filter((g) => g.hooks.some((h) => h.command.includes('session-context.mjs')));
+    assert.deepEqual(groups.map((g) => g.matcher), ['compact|resume|fork', 'startup|clear']);
+    const covered = new Set(groups.flatMap((g) => g.matcher.split('|')));
+    assert.deepEqual([...covered].sort(), ['clear', 'compact', 'fork', 'resume', 'startup']);
+    await runUndo({ all: true });
+    assert.equal(readSettings().hooks.SessionStart, undefined);
+    assert.equal(readSettings().hooks.PreCompact, undefined);
   });
 
   it('does nothing when there is nothing to undo, and ignores an unknown id', async () => {

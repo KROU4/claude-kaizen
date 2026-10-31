@@ -183,6 +183,25 @@ export function defaultParams(recipe, measure) {
 }
 
 /**
+ * The option list of a select/multiselect parameter: its fixed `options`, or the list at `optionsFrom` in the measure
+ * minus what `optionsExclude` ({from, field?}: a list in the measure; with `field`, the field of each element) names.
+ */
+export function paramOptions(p, measure) {
+  let options = p.options || null;
+  if (p.optionsFrom) {
+    const dyn = resolvePath(measure, p.optionsFrom);
+    if (Array.isArray(dyn)) options = dyn.map((x) => (typeof x === 'object' ? x.name || x.id || JSON.stringify(x) : String(x)));
+  }
+  const ex = p.optionsExclude;
+  if (ex && ex.from && Array.isArray(options)) {
+    const src = resolvePath(measure, ex.from);
+    const skip = new Set((Array.isArray(src) ? src : []).flatMap((x) => (ex.field && x && typeof x === 'object' ? x[ex.field] : x)).filter((x) => typeof x === 'string'));
+    options = options.filter((o) => !skip.has(o));
+  }
+  return options;
+}
+
+/**
  * Evaluate the catalog against a measure.
  * Returns {recommended: [...], alreadyApplied: [...], notApplicable: [...]}.
  * `applied` is a Set of recipe ids already applied (from the Kaizen journal).
@@ -208,6 +227,11 @@ export function recommend(catalog, measure, { lang = 'en', applied = new Set(), 
       notApplicable.push({ id: r.id, reason: 'conditions not met' });
       continue;
     }
+    // a parameter marked `needsOptions` is what the action works on: with nothing to choose from there is nothing to offer
+    if (!includeAll && (r.params || []).some((p) => p.needsOptions && !(paramOptions(p, measure) || []).length)) {
+      notApplicable.push({ id: r.id, reason: 'nothing to choose from' });
+      continue;
+    }
     const params = defaultParams(r, measure);
     recommended.push({
       id: r.id,
@@ -223,11 +247,7 @@ export function recommend(catalog, measure, { lang = 'en', applied = new Set(), 
       matched,
       score: score(r, measure),
       params: (r.params || []).map((p) => {
-        let options = p.options || null;
-        if (p.optionsFrom) {
-          const dyn = resolvePath(measure, p.optionsFrom);
-          if (Array.isArray(dyn)) options = dyn.map((x) => (typeof x === 'object' ? x.name || x.id || JSON.stringify(x) : String(x)));
-        }
+        const options = paramOptions(p, measure);
         // a secret parameter is never pre-filled into the page; the console asks for it in chat instead (artifact mode)
         if (p.secret) return { name: p.name, type: p.type || 'text', secret: true, label: pick(p.label, lang), options, value: '' };
         return { name: p.name, type: p.type || 'text', label: pick(p.label, lang), options, value: params[p.name] };

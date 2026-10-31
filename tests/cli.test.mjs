@@ -724,6 +724,41 @@ describe('parseArgs: only value flags take the next argument', () => {
     assert.ok(r.stdout.includes(first), r.stdout);
     assert.ok(!r.stdout.includes(second), r.stdout);
   });
+
+  it('undo --dry-run says what would be reverted, never "Reverted N change(s)", in English and Russian', () => {
+    const home = measured();
+    const id = '2026-10-31T10-00-00';
+    writeJson(home.settingsFile, { ...readJson(home.settingsFile), cleanupPeriodDays: 90 });
+    writeJson(path.join(home.stateDir, 'applied', id, 'manifest.json'), { id, at: '2026-10-31T10:00:00.000Z', recipes: [{ id: 'settings.cleanup-period', scope: 'user', params: {}, actions: [{ type: 'settings.set', file: home.settingsFile, path: 'cleanupPeriodDays', previous: null, hadPrevious: false, value: 90 }], advice: false }] });
+    const before = snapshotDir(home.root);
+    const en = cli(home, ['undo', '--dry-run']);
+    assert.equal(en.status, 0, en.stderr);
+    assert.ok(en.stdout.includes(t('cli.undo_dry', { n: 1, id })), en.stdout);
+    assert.ok(!en.stdout.includes(prefixOf('cli.undo_done', { n: 1 })), en.stdout);
+    const ru = cli(home, ['undo', '--dry-run', '--lang', 'ru']);
+    assert.ok(ru.stdout.includes(tRu('cli.undo_dry', { n: 1, id })), ru.stdout);
+    assert.ok(!ru.stdout.includes(prefixOf('cli.undo_done', { n: 1 }, 'ru')), ru.stdout);
+    assert.deepEqual(snapshotDir(home.root), before);
+  });
+});
+
+describe('skills: how undo and start talk about reverting', () => {
+  const skill = (name) => fs.readFileSync(path.join(KIT_ROOT, 'skills', name, 'SKILL.md'), 'utf8');
+
+  it('the undo skill offers only whole batches: no hand edit, which its tools could not do and the rules forbid', () => {
+    const text = skill('undo');
+    assert.ok(!/manual edit is acceptable|manual removal/i.test(text), 'no manual removal offered');
+    assert.match(text, /Never edit `settings\.json`/);
+    assert.match(text, /apply --recipe/);
+    assert.ok(!/\b(Edit|Write)\b/.test(text.split('---')[1] || ''), 'allowed-tools has no Edit or Write');
+  });
+
+  it('the start skill closes by explaining that one run can leave several batches and how to undo them all', () => {
+    const text = skill('start');
+    assert.match(text, /several batches/);
+    assert.match(text, /undo --all/);
+    assert.match(text, /undo <id>/);
+  });
 });
 
 describe('kaizen recommend --all', () => {

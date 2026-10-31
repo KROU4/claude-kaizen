@@ -69,7 +69,7 @@ Generated from `recipes/catalog.json` (31 recipes). Do not edit by hand; run `no
 
 - Impact: **medium**, risk: low, scope: user / project
 - Why: Claude starts every session blind. A SessionStart hook adds branch, recent commits, uncommitted files and the handoff saved before the last compaction, so you stop re-explaining where you were.
-- Trigger: `{"all":[{"metric":"totals.sessions","gte":10},{"metric":"context.hasSessionStartHook","falsy":true}]}`
+- Trigger: `{"all":[{"metric":"totals.sessions","gte":10},{"any":[{"metric":"context.hasSessionStartHook","falsy":true},{"all":[{"metric":"context.hookEvents.SessionStart","lte":1},{"metric":"context.hookCommandsText","includes":"session-context.mjs"}]}]}]}`
 - Actions: file → {kaizenHome}/hooks/session-context.mjs; settings.hook SessionStart
 
 ### `hooks.long-command-nudge` — Nudge Claude to background or time-limit commands that tend to hang
@@ -142,7 +142,7 @@ Generated from `recipes/catalog.json` (31 recipes). Do not edit by hand; run `no
 
 - Impact: **medium**, risk: low, scope: user
 - Why: Every installed skill's description is in the prompt of every request. Plugins with zero invocations in the window can be disabled (not uninstalled) and re-enabled in one command.
-- Trigger: `{"all":[{"metric":"skills.unusedShare","gte":0.5},{"metric":"skills.installed","gte":20}]}`
+- Trigger: `{"all":[{"metric":"skills.unusedShare","gte":0.5},{"metric":"skills.installed","gte":20},{"metric":"skills.unusedPlugins.length","gte":1}]}`
 - Actions: plugins.disable
 - Inspired by: Anthropic /skill-doctor; rohitg00 skills-janitor
 
@@ -152,7 +152,7 @@ Generated from `recipes/catalog.json` (31 recipes). Do not edit by hand; run `no
 
 - Impact: **medium**, risk: low, scope: user
 - Why: Compaction loses detail and costs tokens. Delegating searches and test runs to subagents, using /clear between unrelated tasks and the handoff hook keep the main window small.
-- Trigger: `{"any":[{"metric":"context.sessionsOver150k","gte":3},{"metric":"friction.compactionShare","gte":0.2}]}`
+- Trigger: `{"any":[{"metric":"context.sessionsOver150k","gte":3},{"all":[{"metric":"friction.compactionShare","gte":0.2},{"metric":"friction.sessionsWithCompaction","gte":3},{"metric":"totals.sessions","gte":10}]}]}`
 - Actions: advice only (Claude discusses it with you)
 
 ## claude-md
@@ -190,7 +190,7 @@ Generated from `recipes/catalog.json` (31 recipes). Do not edit by hand; run `no
 
 - Impact: **medium**, risk: low, scope: user / project
 - Why: Softer alternative to the Stop hook: a rule asking Claude to run tests/lint/build and show the output before declaring completion.
-- Trigger: `{"all":[{"metric":"quality.editsWithoutTestsShare","gte":0.3},{"metric":"context.claudeMdHints.verification","falsy":true}]}`
+- Trigger: `{"all":[{"metric":"quality.editsWithoutTestsShare","gte":0.3},{"metric":"quality.sessionsWithEdits","gte":5},{"metric":"context.claudeMdHints.verification","falsy":true}]}`
 - Actions: claude-md.block
 
 ### `claude-md.corrections` — Turn your repeated corrections into standing rules

@@ -91,7 +91,7 @@
       "evidence": { "en": "Main languages: {languages.primary}. {tools.errorClasses.lint} lint-related errors and {totals.filesEdited} edited files in the window.", "ru": "Основные языки: {languages.primary}. За период {tools.errorClasses.lint} ошибок линтера и {totals.filesEdited} изменённых файлов." },
       "when": { "all": [ { "metric": "totals.filesEdited", "gte": 20 }, { "metric": "context.hasFormatterHook", "falsy": true }, { "not": { "metric": "languages.formatter", "eq": "auto" } } ] },
       "boost": [ { "when": { "metric": "tools.errorClasses.lint", "gte": 5 }, "weight": 1 } ],
-      "params": [ { "name": "formatter", "type": "select", "options": ["auto", "prettier", "ruff", "black", "gofmt", "rustfmt"], "default": "auto", "defaultFrom": "languages.formatter", "label": { "en": "Formatter", "ru": "Форматер" } }, { "name": "timeoutSec", "type": "text", "default": "20", "label": { "en": "Formatter timeout, seconds", "ru": "Таймаут форматера, секунд" } } ],
+      "params": [ { "name": "formatter", "type": "select", "options": ["auto", "prettier", "ruff", "black", "gofmt", "rustfmt", "dotnet format", "rubocop", "php-cs-fixer", "swiftformat", "ktlint", "google-java-format", "terraform fmt", "shfmt"], "default": "auto", "defaultFrom": "languages.formatter", "label": { "en": "Formatter", "ru": "Форматер" } }, { "name": "timeoutSec", "type": "text", "default": "20", "label": { "en": "Formatter timeout, seconds", "ru": "Таймаут форматера, секунд" } } ],
       "actions": [
         { "type": "file", "template": "hooks/format-on-edit.mjs", "target": "{kaizenHome}/hooks/format-on-edit.mjs" },
         { "type": "settings.hook", "event": "PostToolUse", "matcher": "Edit|Write|MultiEdit", "command": "{node} \"{kaizenHome}/hooks/format-on-edit.mjs\"", "timeout": 30 }
@@ -143,7 +143,7 @@
       "title": { "en": "Inject git state and the last handoff note at session start", "ru": "Подставлять состояние git и последнюю заметку-передачу в начале сессии" },
       "why": { "en": "Claude starts every session blind. A SessionStart hook adds branch, recent commits, uncommitted files and the handoff saved before the last compaction, so you stop re-explaining where you were.", "ru": "Каждую сессию Claude начинает с нуля. SessionStart-хук добавляет ветку, последние коммиты, незакоммиченные файлы и заметку, сохранённую перед последней компакцией — не нужно заново объяснять, где остановились." },
       "evidence": { "en": "{totals.sessions} sessions in {totals.projects} projects; {friction.compactions} compactions and {sessions.oneShotSessions} one-prompt sessions suggest frequent restarts.", "ru": "{totals.sessions} сессий в {totals.projects} проектах; {friction.compactions} компакций и {sessions.oneShotSessions} сессий из одного запроса говорят о частых перезапусках." },
-      "when": { "all": [ { "metric": "totals.sessions", "gte": 10 }, { "metric": "context.hasSessionStartHook", "falsy": true } ] },
+      "when": { "all": [ { "metric": "totals.sessions", "gte": 10 }, { "any": [ { "metric": "context.hasSessionStartHook", "falsy": true }, { "all": [ { "metric": "context.hookEvents.SessionStart", "lte": 1 }, { "metric": "context.hookCommandsText", "includes": "session-context.mjs" } ] } ] } ] },
       "params": [ { "name": "maxChars", "type": "text", "default": "1500", "label": { "en": "Max characters injected", "ru": "Максимум символов" } }, { "name": "includeGit", "type": "select", "options": ["true", "false"], "default": "true", "label": { "en": "Include git summary", "ru": "Включать сводку git" } } ],
       "actions": [
         { "type": "file", "template": "hooks/session-context.mjs", "target": "{kaizenHome}/hooks/session-context.mjs" },
@@ -238,7 +238,7 @@
       "title": { "en": "Rule: run the project's checks before saying done", "ru": "Правило: прогонять проверки проекта перед словом «готово»" },
       "why": { "en": "Softer alternative to the Stop hook: a rule asking Claude to run tests/lint/build and show the output before declaring completion.", "ru": "Мягкая альтернатива Stop-хуку: правило запускать тесты/линтер/сборку и показывать вывод до объявления о завершении." },
       "evidence": { "en": "{quality.editsWithoutTestsShare|pct} of editing sessions never ran tests; {quality.testFailures} test failures were seen.", "ru": "{quality.editsWithoutTestsShare|pct} сессий с правками ни разу не запускали тесты; падений тестов: {quality.testFailures}." },
-      "when": { "all": [ { "metric": "quality.editsWithoutTestsShare", "gte": 0.3 }, { "metric": "context.claudeMdHints.verification", "falsy": true } ] },
+      "when": { "all": [ { "metric": "quality.editsWithoutTestsShare", "gte": 0.3 }, { "metric": "quality.sessionsWithEdits", "gte": 5 }, { "metric": "context.claudeMdHints.verification", "falsy": true } ] },
       "conflicts": ["hooks.verify-before-stop"],
       "actions": [ { "type": "claude-md.block", "id": "verify-before-done", "template": "claude-md/verify-before-done.md" } ]
     },
@@ -296,8 +296,8 @@
       "title": { "en": "Disable plugins whose skills you never use", "ru": "Отключить плагины, скиллы которых вы не используете" },
       "why": { "en": "Every installed skill's description is in the prompt of every request. Plugins with zero invocations in the window can be disabled (not uninstalled) and re-enabled in one command.", "ru": "Описание каждого установленного скилла попадает в промпт каждого запроса. Плагины с нулём вызовов за период можно отключить (не удаляя) и вернуть одной командой." },
       "evidence": { "en": "{skills.unusedCount} of {skills.installed} installed skills were never invoked ({skills.unusedShare|pct}); ≈{skills.descriptionTokens} tokens of skill descriptions per request.", "ru": "{skills.unusedCount} из {skills.installed} установленных скиллов ни разу не вызывались ({skills.unusedShare|pct}); ≈{skills.descriptionTokens} токенов описаний на запрос." },
-      "when": { "all": [ { "metric": "skills.unusedShare", "gte": 0.5 }, { "metric": "skills.installed", "gte": 20 } ] },
-      "params": [ { "name": "plugins", "type": "multiselect", "options": [], "optionsFrom": "skills.unusedPlugins", "default": [], "label": { "en": "Plugins to disable", "ru": "Плагины для отключения" } } ],
+      "when": { "all": [ { "metric": "skills.unusedShare", "gte": 0.5 }, { "metric": "skills.installed", "gte": 20 }, { "metric": "skills.unusedPlugins.length", "gte": 1 } ] },
+      "params": [ { "name": "plugins", "type": "multiselect", "options": [], "optionsFrom": "skills.unusedPlugins", "optionsExclude": { "from": "inventory.settings", "field": "disabledPlugins" }, "needsOptions": true, "default": [], "label": { "en": "Plugins to disable", "ru": "Плагины для отключения" } } ],
       "actions": [ { "type": "plugins.disable", "plugins": "{params.plugins}" } ],
       "source": "Anthropic /skill-doctor; rohitg00 skills-janitor"
     },
@@ -464,7 +464,7 @@
       "title": { "en": "Sessions regularly hit the context ceiling", "ru": "Сессии регулярно упираются в потолок контекста" },
       "why": { "en": "Compaction loses detail and costs tokens. Delegating searches and test runs to subagents, using /clear between unrelated tasks and the handoff hook keep the main window small.", "ru": "Компакция теряет детали и стоит токенов. Делегирование поиска и тестов субагентам, /clear между несвязанными задачами и хук-передача держат основное окно небольшим." },
       "evidence": { "en": "{context.sessionsOver150k} sessions over 150k tokens, {context.sessionsOver400k} over 400k; {friction.compactionShare|pct} of sessions compacted.", "ru": "{context.sessionsOver150k} сессий свыше 150k токенов, {context.sessionsOver400k} свыше 400k; компакция в {friction.compactionShare|pct} сессий." },
-      "when": { "any": [ { "metric": "context.sessionsOver150k", "gte": 3 }, { "metric": "friction.compactionShare", "gte": 0.2 } ] },
+      "when": { "any": [ { "metric": "context.sessionsOver150k", "gte": 3 }, { "all": [ { "metric": "friction.compactionShare", "gte": 0.2 }, { "metric": "friction.sessionsWithCompaction", "gte": 3 }, { "metric": "totals.sessions", "gte": 10 } ] } ] },
       "actions": []
     }
   ]

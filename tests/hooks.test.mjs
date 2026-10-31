@@ -235,3 +235,23 @@ test('guard-destructive: SQL clients are matched by command name, not by a path 
     assert.equal(out && out.permissionDecision, 'deny', c);
   }
 });
+
+test('format-on-edit: a shell file is formatted by shfmt when it is on PATH and left alone when it is not', () => {
+  const script = render('format-on-edit.mjs', { formatter: 'shfmt', timeoutSec: '20' });
+  const bin = path.join(tmp, 'fakebin');
+  fs.mkdirSync(bin, { recursive: true });
+  // a fake shfmt that rewrites its last argument, so the test needs no real formatter
+  if (process.platform === 'win32') fs.writeFileSync(path.join(bin, 'shfmt.cmd'), '@echo off\r\n> "%~2" echo formatted\r\n');
+  else fs.writeFileSync(path.join(bin, 'shfmt'), '#!/bin/sh\nprintf formatted > "$2"\n', { mode: 0o755 });
+  const target = path.join(tmp, 'deploy.sh');
+  const other = path.join(tmp, 'notes.md');
+  const go = (file, pathVar) => {
+    fs.writeFileSync(file, 'x');
+    const r = spawnSync(process.execPath, [script], { input: JSON.stringify({ tool_input: { file_path: file } }), encoding: 'utf8', timeout: 15000, windowsHide: true, env: { ...process.env, PATH: pathVar } });
+    assert.equal(r.status, 0, r.stderr);
+    return fs.readFileSync(file, 'utf8');
+  };
+  assert.match(go(target, `${bin}${path.delimiter}${path.dirname(process.execPath)}`), /^formatted/);
+  assert.equal(go(target, path.dirname(process.execPath)), 'x', 'no shfmt on PATH: nothing happens');
+  assert.equal(go(other, `${bin}${path.delimiter}${path.dirname(process.execPath)}`), 'x', 'shfmt does not touch other file types');
+});

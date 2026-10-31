@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { configDir, ensureDir, exists, expandHome, homeDir, kitRoot, readJsonSafe, settingsFiles, stateDir, toPosix, writeJsonAtomic } from './paths.mjs';
+import { configDir, ensureDir, exists, expandHome, globalConfigPath, kitRoot, readJsonSafe, settingsFiles, stateDir, toPosix, writeJsonAtomic } from './paths.mjs';
 import { nodeCommand } from './platform.mjs';
 import { actionApplies, addExtraRecipes, closeMatches, loadCatalog, readExtraRecipes, rememberedExtraFile, resolveExtraFile, resolvePath } from './recipes.mjs';
 import { UserError, translator } from './i18n.mjs';
@@ -71,7 +71,7 @@ export function buildContext({ scope = 'user', projectDir = null, params = {} })
     agentsDir: scope === 'project' ? toPosix(path.join(proj, '.claude', 'agents')) : toPosix(path.join(cfg, 'agents')),
     claudeMd: scope === 'project' ? toPosix(path.join(proj, 'CLAUDE.md')) : toPosix(path.join(cfg, 'CLAUDE.md')),
     settingsFile: scope === 'project' ? path.join(proj, '.claude', 'settings.json') : path.join(cfg, 'settings.json'),
-    globalConfig: path.join(homeDir(), '.claude.json'),
+    globalConfig: globalConfigPath(),
     params,
   };
   return ctx;
@@ -145,15 +145,30 @@ const handlers = {
     if (a.async) entry.async = true;
     if (a.if) entry.if = a.if;
     const id = hookIdentity(entry);
-    for (const group of list) for (const h of group.hooks || []) if (hookIdentity(h) === id) return { skipped: true, reason: io.t('apply.skip.hook_present'), file, event: a.event, command: entry.command };
+    // The same command can already be wired to part of the matchers this recipe wants (precompact-handoff installs
+    // session-context for compact|resume|fork, the session-context recipe wants startup|resume|clear|compact|fork).
+    // Add only the matcher alternatives that are still missing, so neither a hook is silently dropped nor does it fire twice.
+    const theirs = list.filter((group) => (group.hooks || []).some((h) => hookIdentity(h) === id));
+    let matcher = a.matcher || null;
+    if (theirs.length) {
+      const covered = new Set();
+      let all = !matcher;
+      for (const g of theirs) {
+        if (!g.matcher || g.matcher === '*') all = true;
+        else for (const tok of String(g.matcher).split('|')) covered.add(tok);
+      }
+      const missing = matcher && !all ? matcher.split('|').filter((tok) => !covered.has(tok)) : [];
+      if (!missing.length) return { skipped: true, reason: io.t('apply.skip.hook_present'), file, event: a.event, command: entry.command };
+      matcher = missing.join('|');
+    }
     const group = { hooks: [entry] };
-    if (a.matcher) group.matcher = a.matcher;
-    io.describe(io.t('apply.plan.hook_add', { file, event: a.event, matcher: a.matcher ? ` [${a.matcher}]` : '', command: entry.command }));
+    if (matcher) group.matcher = matcher;
+    io.describe(io.t('apply.plan.hook_add', { file, event: a.event, matcher: matcher ? ` [${matcher}]` : '', command: entry.command }));
     if (!io.dry) {
       list.push(group);
       io.save(file, settings);
     }
-    return { type: 'settings.hook', file, event: a.event, matcher: a.matcher || null, identity: id };
+    return { type: 'settings.hook', file, event: a.event, matcher, identity: id };
   },
 
   'settings.set'(a, ctx, io) {
@@ -633,6 +648,8 @@ function undoEntry(e, io) {
       if (!Array.isArray(list)) return 'hook list missing';
       let removed = 0;
       for (const group of list) {
+        // the same command may sit in another group for other matchers (installed by another recipe): leave that one
+        if ((group.matcher || null) !== (e.matcher || null)) continue;
         const before = (group.hooks || []).length;
         group.hooks = (group.hooks || []).filter((h) => hookIdentity(h) !== e.identity);
         removed += before - group.hooks.length;
@@ -843,7 +860,7 @@ export async function cmdUndo(args, { pickLang }) {
       m.manifest.undoResults = results;
       writeJsonAtomic(path.join(m.dir, 'manifest.json'), m.manifest);
     }
-    process.stdout.write(t('cli.undo_done', { n, id: m.id }) + '\n');
+    process.stdout.write(t(dry ? 'cli.undo_dry' : 'cli.undo_done', { n, id: m.id }) + '\n');
     if (pending.length && !dry) {
       process.stdout.write(t('cli.undo_partial', { n: pending.length, id: m.id, dir: path.join(m.dir, 'undo') }) + '\n');
       // apply only copies files that existed before it; a batch that created everything has no such folder

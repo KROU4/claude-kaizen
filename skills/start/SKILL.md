@@ -72,7 +72,7 @@ Run `node "${CLAUDE_PLUGIN_ROOT}/scripts/kaizen.mjs" verify` (add `--project <di
 
 ## 6. Close
 
-In the user's language, in ≤ 10 lines: what changed (grouped by category), what to expect on the next session, `/kaizen:undo` reverts the last batch, Kaizen will remind them to re-measure in a week (SessionStart nudge; `~/.claude/kaizen/config.json` → `{"nudge": false}` turns it off), and that `/kaizen:measure` after a week shows whether friction actually dropped.
+In the user's language, in ≤ 10 lines: what changed (grouped by category), what to expect on the next session, one run can leave several batches (the `apply` of step 4.2 plus one more for every drafted rule or skill from step 4.4), so name the batch ids this run created (`status` lists them) and say how to revert all of them: `/kaizen:undo --all` if no older Kaizen batch should stay, otherwise `undo <id>` for each id, newest first (plain `/kaizen:undo` reverts only the last batch, for example just the drafted rules), Kaizen will remind them to re-measure in a week (SessionStart nudge; `~/.claude/kaizen/config.json` → `{"nudge": false}` turns it off), and that `/kaizen:measure` after a week shows whether friction actually dropped.
 
 ## Rules
 

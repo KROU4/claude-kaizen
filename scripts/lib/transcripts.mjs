@@ -12,7 +12,7 @@ import { readJsonl } from './jsonl.mjs';
 import { redact, snippet } from './redact.mjs';
 import { ensureDir, readJsonSafe, writeJsonAtomic } from './paths.mjs';
 
-export const SUMMARY_VERSION = 17;
+export const SUMMARY_VERSION = 18;
 
 const INTERRUPT_RE = /\[Request interrupted by user/;
 const COMPACT_RE = /^This session is being continued from a previous conversation/;
@@ -41,6 +41,9 @@ const MACHINE_TAGS = [
 const MACHINE_BLOCK_RE = new RegExp(`<(${MACHINE_TAGS.join('|')})(?:\\s[^>]*)?>[\\s\\S]*?<\\/\\1>`, 'g');
 const MACHINE_PREFIX_RE = /^\s*(\[SYSTEM NOTIFICATION|\[Request interrupted|<task-notification|<system-reminder)/;
 const LEFTOVER_TAG_RE = /<\/?[a-z][a-z0-9_-]*(?:\s[^>]*)?>/g;
+
+// Per session; the list only has to be long enough that the per-window total is not clipped by a busy session.
+const MAX_SLOW_COMMANDS = 200;
 
 const TEST_CMD_RE =
   /\b(pytest|py\.test|npm (?:run )?test|yarn (?:run )?test|pnpm (?:run )?test|bun test|vitest|jest|mocha|go test|cargo test|dotnet test|mvn (?:-[^\s]+ )*test|gradle(?:w)? test|phpunit|rspec|mix test|make test|ctest|tox|nox|node --test)\b/;
@@ -183,7 +186,8 @@ export function newSessionSummary(file) {
     toolErrors: {},
     errorClasses: {},
     toolDurations: {}, // tool -> {n, ms, max}
-    slowCommands: [], // [{verb, ms}] top long bash commands
+    slowCommands: [], // [{verb, ms}] the longest bash commands (at most MAX_SLOW_COMMANDS); commands that waited for a permission answer are left out
+    slowCommandCount: 0, // all of them, also the ones beyond the list
     interruptions: 0,
     compactions: 0,
     permissionDecisions: {},
@@ -200,7 +204,8 @@ export function newSessionSummary(file) {
     mcp: {}, // server -> {calls, tools: {}}
     bashVerbs: {},
     bashCommands: {}, // normalised -> count (trimmed to top N at the end)
-    testCommands: 0,
+    testCommands: 0, // test runs of the main session plus those run by subagents
+    sidechainTestCommands: 0, // the part of testCommands that a subagent ran (Kaizen's test-runner, Task/Agent helpers)
     testFailures: 0,
     git: {},
     forcePushes: 0,
@@ -241,7 +246,8 @@ function finalize(s) {
   s.hooks.errorsByCommand = topN(s.hooks.errorsByCommand, 20);
   for (const k of Object.keys(s.promptSamples)) if (!(k in s.promptStems)) delete s.promptSamples[k];
   s.slowCommands.sort((a, b) => b.ms - a.ms);
-  s.slowCommands = s.slowCommands.slice(0, 10);
+  s.slowCommandCount = s.slowCommands.length;
+  s.slowCommands = s.slowCommands.slice(0, MAX_SLOW_COMMANDS);
   s.promptLengths = s.promptLengths.slice(0, 500);
   s.responseGaps = s.responseGaps.slice(0, 500);
   s.langSample = s.langSample.slice(0, 40);
@@ -402,6 +408,11 @@ export async function summarizeTranscript(file) {
             if (g) inc(s.git, g[1]);
             if (FORCE_PUSH_RE.test(cmd)) s.forcePushes++;
             if (DESTRUCTIVE_RE.test(cmd)) s.destructive++;
+          } else if (TEST_CMD_RE.test(cmd)) {
+            // A subagent running the tests (Kaizen's test-runner agent does exactly that) still verified the edits of
+            // this session. Only the test counters look at the sidechain: edits and the other Bash counters stay main-session.
+            s.testCommands++;
+            s.sidechainTestCommands++;
           }
         } else if ((name === 'Agent' || name === 'Task') && !sidechain) {
           inc(s.subagents, input.subagent_type || 'general-purpose');
@@ -454,6 +465,10 @@ export async function summarizeTranscript(file) {
       if (tur.userModified === true) s.userModifiedEdits++;
     }
     const results = blocks(content, 'tool_result');
+    // The tool_result line carries how the permission was decided. A decision the user made in a dialog means the time
+    // from tool_use to tool_result includes the wait for that answer, so it says nothing about how long the command ran.
+    const pd0 = o.permissionDecision;
+    const waitedForUser = !!pd0 && typeof pd0 === 'object' && /^user/i.test(String(pd0.source || ''));
     if (results.length) {
       for (const r of results) {
         const pend = pendingTools.get(r.tool_use_id);
@@ -465,7 +480,7 @@ export async function summarizeTranscript(file) {
             d.n++;
             d.ms += ms;
             if (ms > d.max) d.max = ms;
-            if (pend.isBash && ms >= 30000) s.slowCommands.push({ verb: pend.verb, ms });
+            if (pend.isBash && ms >= 30000 && !waitedForUser) s.slowCommands.push({ verb: pend.verb, ms });
           }
         }
         if (r.is_error === true && (!pend || !pend.sidechain)) {
@@ -484,8 +499,10 @@ export async function summarizeTranscript(file) {
           inc(s.errorClasses, cls);
           if (cls === 'user-rejected') s.userRejections++;
           if (cls === 'test-failure') s.testFailures++;
-        } else if (pend && pend.isBash && pend.verb && TEST_CMD_RE.test(pend.verb)) {
-          // test command that did not error: nothing to do, counted at tool_use time
+        } else if (r.is_error === true && pend && pend.sidechain && pend.isBash) {
+          // a failing test run inside a subagent is still a test failure (nothing else of a sidechain tool error is counted)
+          const text = typeof r.content === 'string' ? r.content : textOf(r.content);
+          if (!INTERRUPT_RE.test(text) && classifyError(text, true) === 'test-failure') s.testFailures++;
         }
       }
       continue;
