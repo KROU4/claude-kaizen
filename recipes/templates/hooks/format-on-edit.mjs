@@ -86,10 +86,10 @@ function plan(file, opts = {}) {
 }
 
 function run(step, cwd, deadline) {
-  const shell = /\.(?:cmd|bat)$/i.test(step.bin);
-  if (shell && [step.bin, ...step.args].some((a) => /["%^&|<>!]/.test(a))) return;
-  const q = (x) => (shell ? `"${x}"` : x);
-  spawnSync(q(step.bin), step.args.map(q), { cwd, timeout: Math.max(500, deadline - Date.now()), stdio: 'ignore', shell, windowsHide: true });
+  const opts = { cwd, timeout: Math.max(500, deadline - Date.now()), stdio: 'ignore', windowsHide: true };
+  const all = [step.bin, ...step.args];
+  if (!/\.(?:cmd|bat)$/i.test(step.bin)) spawnSync(step.bin, step.args, opts);
+  else if (!all.some((a) => /["%^&|<>!]/.test(a))) spawnSync(all.map((a) => `"${a}"`).join(' '), { ...opts, shell: true }); // .cmd shims need cmd.exe
 }
 
 function format(payload, opts = {}) {
