@@ -61,20 +61,42 @@ function segments(cmd) {
 
 // Returns the offending path (or a short description) when a Bash command would print a secret.
 function bashHit(cmd, extras) {
+  // PowerShell/.NET forms that the segment split below would cut apart at "(".
+  if (/\bGetEnvironmentVariables\s*\(/i.test(cmd)) return 'the process environment';
+  for (const m of cmd.matchAll(/\bGetEnvironmentVariable\s*\(\s*['"]?([\w.*-]+)/gi)) if (SECRETY.test(m[1])) return 'a secret environment variable';
+  for (const m of cmd.matchAll(/\b(?:ReadAll(?:Text|Lines|Bytes)|OpenText)\s*\(\s*(['"])(.+?)\1/gi)) if (isSecretPath(m[2], extras)) return m[2];
   for (const raw of segments(cmd)) {
     let i = 0;
     while (i < raw.length && (/^[A-Za-z_]\w*=/.test(raw[i]) || /^(?:sudo|command|time|nohup|exec)$/i.test(raw[i]))) i++;
-    const name = (raw[i] || '').split(/[\\/]/).pop().toLowerCase().replace(/\.(?:exe|cmd|bat|ps1)$/, '');
-    const args = raw.slice(i + 1).map((a) => a.replace(/^\d*<+/, ''));
+    const first = raw[i] || '';
+    const name = first.split(/[\\/]/).pop().toLowerCase().replace(/\.(?:exe|cmd|bat|ps1)$/, '');
+    // "-Path:.env" is one token in PowerShell: split it so the path is seen.
+    const args = raw.slice(i + 1).map((a) => a.replace(/^\d*<+/, '')).flatMap((a) => { const m = /^-(?:path|literalpath|lp|filepath|pspath):(.+)$/i.exec(a); return m ? ['-path', m[1]] : [a]; });
     const pos = args.filter((a) => a && !a.startsWith('-'));
     if (READERS.has(name) || PATTERN_FIRST.has(name)) {
       const file = (PATTERN_FIRST.has(name) ? pos.slice(1) : pos).find((a) => isSecretPath(a, extras));
       if (file) return file;
     }
+    if (name === 'select-string' || name === 'sls') {
+      // The pattern is the first positional unless -Path/-Pattern name the parameters explicitly.
+      const named = args.some((a) => /^-(?:path|literalpath|lp|pattern)$/i.test(a));
+      const file = (named ? pos : pos.slice(1)).find((a) => isSecretPath(a, extras));
+      if (file) return file;
+    }
     if (name === 'printenv' && (!pos.length || pos.some((a) => SECRETY.test(a)))) return 'the process environment';
     if (name === 'env' && !pos.length) return 'the process environment';
-    if (/^(?:get-childitem|gci|dir|ls)$/.test(name) && pos.some((a) => /^env:?$/i.test(a))) return 'the process environment';
-    if (/^(?:echo|printf|write-host|write-output)$/.test(name) && args.some((a) => SECRETY.test((/\$\{?(?:env:)?(\w+)/.exec(a) || [])[1] || ''))) return 'a secret environment variable';
+    if (/^(?:get-childitem|gci|dir|ls|get-item|gi|get-itemproperty|gp|get-content|gc)$/.test(name)) {
+      // Env: drive: the bare drive (also "Env:\", "env:*") lists everything; "env:NAME" prints one value.
+      for (const a of pos) {
+        const m = /^env:[\\/]?(.*)$/i.exec(a);
+        if (m && (!m[1] || /^\*+$/.test(m[1]) || SECRETY.test(m[1]))) return 'the process environment';
+      }
+    }
+    if (/^(?:echo|printf|write-host|write-output|write-error|write-warning|write-verbose|write-information|out-host|out-string)$/.test(name)
+      && args.some((a) => [...a.matchAll(/\$\{?(?:env:)?(\w+)/g)].some((m) => SECRETY.test(m[1])))) return 'a secret environment variable';
+    // A bare expression ($env:API_TOKEN, "$env:API_TOKEN") prints its value in PowerShell; an assignment does not.
+    if (/\$\{?env:\w+/i.test(first) && !/\$\{?env:\w+\}?\s*[+\-*\/]?=/i.test(first) && !/^[+\-*\/]?=$/.test(raw[i + 1] || '')
+      && [...first.matchAll(/\$\{?env:(\w+)/gi)].some((m) => SECRETY.test(m[1]))) return 'a secret environment variable';
   }
   return null;
 }
@@ -108,6 +130,13 @@ function selftest() {
     [ps('Get-Content .env'), true], [ps('Get-Content -Path .\\.env'), true], [ps('type .\\.env'), true], [ps('gc C:\\proj\\.env.production'), true], [ps('cat ~/.ssh/id_rsa'), true],
     [ps('Get-ChildItem env:'), true], [ps('Write-Host $env:GITHUB_TOKEN'), true], [ps('Get-Content .env; ls'), true],
     [ps('Get-Content README.md'), false], [ps('Get-Content .env.example'), false], [ps('Write-Host $env:PATH'), false], [ps('Get-ChildItem'), false],
+    [ps('$env:GITHUB_TOKEN'), true], [ps('"$env:API_TOKEN"'), true], [ps('${env:API_TOKEN}'), true], [ps('Write-Output "token: $env:API_TOKEN"'), true], [ps('echo $env:AWS_SECRET_ACCESS_KEY'), true],
+    [ps('Get-ChildItem Env:\\'), true], [ps('dir env:\\'), true], [ps('ls env:'), true], [ps('gci env:'), true], [ps('Get-ChildItem env:GITHUB_TOKEN'), true], [ps('Get-Item env:API_TOKEN'), true],
+    [ps('(Get-Item env:API_TOKEN).Value'), true], [ps("[Environment]::GetEnvironmentVariable('API_TOKEN')"), true], [ps('[Environment]::GetEnvironmentVariables()'), true],
+    [ps('Select-String -Path .env -Pattern KEY'), true], [ps('sls KEY .env'), true], [ps('Select-String KEY -Path:.env'), true], [ps('Get-Content -Path:.env'), true], [ps("[IO.File]::ReadAllText('.env')"), true],
+    [ps('$env:PATH'), false], [ps('"$env:PATH"'), false], [ps('Get-Item env:PATH'), false], [ps('Get-ChildItem env:PATH'), false], [ps('Get-ChildItem C:\\proj'), false], [ps('dir'), false],
+    [ps('$env:API_TOKEN = "x"'), false], [ps('$env:PATH += ";C:\\bin"'), false], [ps('Select-String -Path .env.example -Pattern KEY'), false], [ps('sls TODO README.md'), false],
+    [ps('sls .env README.md'), false], [ps('Get-Content -Path:.env.example'), false], [ps("[Environment]::GetEnvironmentVariable('PATH')"), false], [ps('Write-Output $env:PATH'), false],
     [{ tool_name: 'WebFetch', tool_input: { command: 'cat .env' } }, false],
   ];
   let failed = 0;
