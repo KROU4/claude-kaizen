@@ -186,6 +186,8 @@ export function recommend(catalog, measure, { lang = 'en', applied = new Set(), 
           const dyn = resolvePath(measure, p.optionsFrom);
           if (Array.isArray(dyn)) options = dyn.map((x) => (typeof x === 'object' ? x.name || x.id || JSON.stringify(x) : String(x)));
         }
+        // a secret parameter is never pre-filled into the page; the console asks for it in chat instead (artifact mode)
+        if (p.secret) return { name: p.name, type: p.type || 'text', secret: true, label: pick(p.label, lang), options, value: '' };
         return { name: p.name, type: p.type || 'text', label: pick(p.label, lang), options, value: params[p.name] };
       }),
       actionsSummary: (r.actions || []).filter((a) => actionApplies(a, measure)).map((a) => summarizeAction(a, lang)),

@@ -201,7 +201,7 @@ describe('validateChoices', () => {
 
   it('accepts the two scopes apply understands and rejects the rest (local used to be let through and landed in the user files)', () => {
     for (const scope of ['user', 'project']) assert.doesNotThrow(() => validateChoices({ selected: [{ id: 'a.b', scope }] }));
-    for (const scope of ['local', 'projekt', 'Project']) assert.throws(() => validateChoices({ selected: [{ id: 'a.b', scope }] }), /bad scope for a\.b/, scope);
+    for (const scope of ['local', 'projekt', 'Project']) assert.throws(() => validateChoices({ selected: [{ id: 'a.b', scope }] }), /bad scope "[^"]*" for a\.b/, scope);
   });
 
   it('rejects anything that is not an object with a selected array', () => {
@@ -216,7 +216,7 @@ describe('validateChoices', () => {
   });
 
   it('rejects an unknown scope', () => {
-    assert.throws(() => validateChoices({ selected: [{ id: 'a.b', scope: 'global' }] }), /bad scope for a\.b/);
+    assert.throws(() => validateChoices({ selected: [{ id: 'a.b', scope: 'global' }] }), /bad scope "[^"]*" for a\.b/);
   });
 
   it('rejects params that are not an object', () => {

@@ -1203,6 +1203,24 @@ describe('loadChoices', () => {
     const choices = apply.loadChoices({ _: ['apply'], flags: { recipe: 'settings.cleanup-period' } });
     assert.deepEqual(choices.selected, [{ id: 'settings.cleanup-period', scope: 'user', params: {} }]);
   });
+
+  it('validates a choices file like `choices --import` does', () => {
+    const dir = makeTempDir('choices-file');
+    const good = path.join(dir, 'good.json');
+    writeJson(good, { selected: [{ id: 'settings.cleanup-period', scope: 'user' }], notes: 'hi' });
+    const ok = apply.loadChoices({ _: ['apply', good], flags: {} });
+    assert.deepEqual(ok.selected.map((s) => s.id), ['settings.cleanup-period']);
+    assert.equal(ok.notes, 'hi');
+    const badId = path.join(dir, 'bad-id.json');
+    writeJson(badId, { selected: [{ id: '../../etc/passwd' }] });
+    assert.throws(() => apply.loadChoices({ _: ['apply', badId], flags: {} }), /bad recipe id/);
+    const badScope = path.join(dir, 'bad-scope.json');
+    writeJson(badScope, { selected: [{ id: 'a.b', scope: 'everywhere' }] });
+    assert.throws(() => apply.loadChoices({ _: ['apply', badScope], flags: {} }), /bad scope/);
+    const notList = path.join(dir, 'not-list.json');
+    writeJson(notList, { selected: 'settings.cleanup-period' });
+    assert.throws(() => apply.loadChoices({ _: ['apply', notList], flags: {} }), /must be an array/);
+  });
 });
 
 // ------------------------------------------------------------------ cmdUndo

@@ -8,6 +8,7 @@ import { configDir, ensureDir, exists, expandHome, homeDir, kitRoot, readJsonSaf
 import { nodeCommand } from './platform.mjs';
 import { actionApplies, addExtraRecipes, loadCatalog, readExtraRecipes, resolveExtraFile, resolvePath } from './recipes.mjs';
 import { translator } from './i18n.mjs';
+import { validateChoices } from './console.mjs';
 
 const SCOPES = ['user', 'project'];
 const TEMPLATES = path.join(kitRoot(), 'recipes', 'templates');
@@ -464,7 +465,8 @@ export function loadChoices(args) {
   }
   const choices = readJsonSafe(file);
   if (!choices) throw new Error(`No choices file at ${file}. Run \`kaizen console\` or pass --recipe id[,id].`);
-  return choices;
+  // the file may come from a browser page or an artifact database: same checks as `choices --import`
+  return { ...validateChoices(choices), ...(choices.source ? { source: String(choices.source) } : {}) };
 }
 
 function applyParamOverrides(selected, flags) {

@@ -748,3 +748,27 @@ describe('extra recipes files (recommend --add / apply --add)', () => {
     }
   });
 });
+
+describe('secret parameters', () => {
+  it('are flagged and never pre-filled, even when the catalog has a default', () => {
+    const catalog = {
+      version: 1,
+      recipes: [{ id: 's.secret', category: 'hooks', impact: 'high', risk: 'low', kind: 'recipe', title: { en: 'S', ru: 'S' }, why: { en: 'w', ru: 'w' }, when: [],
+        params: [{ name: 'token', type: 'text', secret: true, default: 'sekret-default' }, { name: 'chat', type: 'text', default: '42' }], actions: [] }],
+    };
+    const res = recommend(catalog, {}, { includeAll: true });
+    const all = [...res.recommended, ...res.notApplicable, ...res.alreadyApplied];
+    const r = all.find((x) => x.id === 's.secret');
+    assert.ok(r && Array.isArray(r.params), 'recipe with params is listed');
+    const token = r.params.find((p) => p.name === 'token');
+    assert.equal(token.secret, true);
+    assert.equal(token.value, '');
+    assert.equal(r.params.find((p) => p.name === 'chat').value, '42');
+  });
+
+  it('the real catalog marks the Telegram bot token as secret', () => {
+    const cat = loadCatalog();
+    const p = cat.recipes.flatMap((r) => r.params || []).find((x) => x.name === 'telegramBotToken');
+    assert.equal(p.secret, true);
+  });
+});

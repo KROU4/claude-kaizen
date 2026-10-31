@@ -57,7 +57,7 @@ export function validateChoices(obj) {
   for (const s of obj.selected) {
     if (!s || typeof s.id !== 'string' || !/^[a-z0-9.-]+$/.test(s.id)) throw new Error(`bad recipe id in choices: ${JSON.stringify(s && s.id)}`);
     // apply only knows user and project; any other scope would silently land in the user files
-    if (s.scope && !['user', 'project'].includes(s.scope)) throw new Error(`bad scope for ${s.id}`);
+    if (s.scope && !['user', 'project'].includes(s.scope)) throw new Error(`bad scope ${JSON.stringify(s.scope)} for ${s.id}: expected user or project`);
     if (s.params && typeof s.params !== 'object') throw new Error(`params for ${s.id} must be an object`);
   }
   if (obj.notes && typeof obj.notes !== 'string') throw new Error('notes must be a string');
