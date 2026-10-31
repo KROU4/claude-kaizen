@@ -29,18 +29,24 @@ export function parseArgs(argv) {
     const a = argv[i];
     if (a.startsWith('--')) {
       const eq = a.indexOf('=');
+      let key;
+      let value;
       if (eq > 0) {
-        args.flags[a.slice(2, eq)] = a.slice(eq + 1);
+        key = a.slice(2, eq);
+        value = a.slice(eq + 1);
       } else {
-        const key = a.slice(2);
+        key = a.slice(2);
         const next = argv[i + 1];
         if (next !== undefined && !next.startsWith('--')) {
-          args.flags[key] = next;
+          value = next;
           i++;
         } else {
-          args.flags[key] = true;
+          value = true;
         }
       }
+      // a repeated flag (e.g. several --param) accumulates into an array
+      if (key in args.flags) args.flags[key] = [].concat(args.flags[key], value);
+      else args.flags[key] = value;
     } else {
       args._.push(a);
     }

@@ -15,6 +15,9 @@ const unset = (v) => typeof v !== 'string' || v.startsWith('{' + '{') || v.trim(
 const MODE = !unset(MODE_RAW) && MODE_RAW.trim().toLowerCase() === 'ask' ? 'ask' : 'deny';
 const BRANCH_LIST = (unset(BRANCHES_RAW) ? '' : BRANCHES_RAW).split(',').map((s) => s.trim()).filter(Boolean);
 const PROTECTED = BRANCH_LIST.length ? BRANCH_LIST : ['main', 'master', 'production'];
+// "release/*" style patterns: * matches any run of characters
+const PROTECTED_RE = PROTECTED.map((p) => new RegExp('^' + p.split('*').map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$'));
+const isProtected = (name) => PROTECTED_RE.some((re) => re.test(name));
 
 const WELL_KNOWN = new Set(['node_modules', 'dist', 'build', 'out', 'target', 'coverage', 'tmp', 'temp', '.tmp', '.cache', '.next', '.nuxt', '.output', '.svelte-kit', '.turbo', '.parcel-cache', '.angular', '.gradle', '.terraform', '.nyc_output', '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache', '.tox', '.venv', 'venv', 'obj', '.vite', '.docusaurus', '.serverless', '.dart_tool', 'deriveddata', 'storybook-static', 'htmlcov', '.hypothesis', '.eggs', '.pnpm-store']);
 const SYSTEM_DIR = /^(?:bin|boot|dev|etc|lib|lib32|lib64|proc|root|sbin|sys|usr|var|windows|program files|program files \(x86\)|programdata|system|library|applications)$/i;
@@ -121,7 +124,7 @@ function checkGit(args, ctx) {
   if (!force) return null;
   const targets = specs.map((s) => s.replace(/^\+/, '').split(':').pop().replace(/^refs\/heads\//, ''));
   const names = targets.length ? targets.map((t) => (t === 'HEAD' ? ctx.branch() : t)) : [ctx.branch()];
-  if (has(/^--(?:all|mirror)$/) || names.some((n) => !n || PROTECTED.includes(n))) {
+  if (has(/^--(?:all|mirror)$/) || names.some((n) => !n || isProtected(n))) {
     return `force-push to a protected branch (${names.filter(Boolean).join(', ') || 'current branch unknown'}) can rewrite shared history`;
   }
   return null;

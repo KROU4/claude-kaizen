@@ -1,0 +1,125 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 620" width="1000" height="620" role="img" aria-labelledby="kc-t kc-d">
+  <title id="kc-t">Kaizen console</title>
+  <desc id="kc-d">A mock of the Kaizen console in a light theme: header, session stats, category filters, three recommendation cards (one selected, one with MCP server checkboxes, one advice card) and a sticky bar with the selection count, a notes field and an Apply selected button.</desc>
+  <defs>
+    <style>
+      .s{font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+      .m{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+      .j{font-family:ui-sans-serif,system-ui,-apple-system,"Hiragino Sans","Yu Gothic UI","Yu Gothic",Meiryo,sans-serif}
+    </style>
+    <linearGradient id="kc-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#e5edef"/>
+      <stop offset="1" stop-color="#cddbe0"/>
+    </linearGradient>
+    <linearGradient id="kc-up" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#102823" stop-opacity="0"/>
+      <stop offset="1" stop-color="#102823" stop-opacity=".09"/>
+    </linearGradient>
+    <clipPath id="kc-win"><rect x="28" y="22" width="944" height="574" rx="14"/></clipPath>
+    <filter id="kc-shadow" x="-6%" y="-6%" width="112%" height="120%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="16" result="b1"/>
+      <feOffset in="b1" dy="12" result="o1"/>
+      <feComponentTransfer in="o1" result="s1"><feFuncA type="linear" slope=".24"/></feComponentTransfer>
+      <feGaussianBlur in="SourceAlpha" stdDeviation="2" result="b2"/>
+      <feOffset in="b2" dy="1" result="o2"/>
+      <feComponentTransfer in="o2" result="s2"><feFuncA type="linear" slope=".2"/></feComponentTransfer>
+      <feMerge><feMergeNode in="s1"/><feMergeNode in="s2"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="kc-card" x="-2%" y="-10%" width="104%" height="130%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="1"/>
+      <feOffset dy="1"/>
+      <feComponentTransfer><feFuncA type="linear" slope=".11"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1000" height="620" rx="20" fill="url(#kc-bg)"/>
+  <rect x=".5" y=".5" width="999" height="619" rx="19.5" fill="none" stroke="#b8c8cf" stroke-opacity=".7"/>
+
+  <!-- window -->
+  <rect x="28" y="22" width="944" height="574" rx="14" fill="#f1f5f4" filter="url(#kc-shadow)"/>
+  <g clip-path="url(#kc-win)">
+    <rect x="28" y="22" width="944" height="3" fill="#0f766e"/>
+
+    <!-- header -->
+    <rect x="56" y="54" width="46" height="26" rx="6" fill="#e0f0ec"/>
+    <text class="j" x="79" y="72.5" font-size="14" font-weight="700" fill="#0a5a53" text-anchor="middle" letter-spacing="1.5" lang="ja" xml:lang="ja">改善</text>
+    <text class="s" x="114" y="77" font-size="26" font-weight="700" fill="#10201d" letter-spacing="-.2">Kaizen · tune Claude Code to how you work</text>
+
+    <!-- session stats -->
+    <g fill="#fff" stroke="#d8e0dd">
+      <rect x="56.5" y="96.5" width="115" height="25" rx="6"/>
+      <rect x="180.5" y="96.5" width="85" height="25" rx="6"/>
+      <rect x="274.5" y="96.5" width="111" height="25" rx="6"/>
+      <rect x="394.5" y="96.5" width="163" height="25" rx="6"/>
+    </g>
+    <g class="s" font-size="13" fill="#52645f">
+      <text x="66" y="113.5">Sessions</text>
+      <text x="190" y="113.5">Days</text>
+      <text x="284" y="113.5">Prompts</text>
+      <text x="404" y="113.5">Recommendations</text>
+    </g>
+    <g class="m" font-size="14" font-weight="700" fill="#10201d" text-anchor="end">
+      <text x="162" y="113.5">173</text>
+      <text x="256" y="113.5">30</text>
+      <text x="376" y="113.5">892</text>
+      <text x="548" y="113.5">18</text>
+    </g>
+
+    <!-- control strip: category chips and filter -->
+    <g filter="url(#kc-card)"><rect x="56.5" y="136.5" width="887" height="47" rx="11.5" fill="#fff" stroke="#d8e0dd"/></g>
+    <rect x="68" y="144" width="76" height="32" rx="16" fill="#0f766e"/>
+    <rect x="112" y="150" width="26" height="20" rx="10" fill="#000" fill-opacity=".18"/>
+    <g fill="#fff" stroke="#d8e0dd">
+      <rect x="152.5" y="144.5" width="93" height="31" rx="15.5"/>
+      <rect x="254.5" y="144.5" width="149" height="31" rx="15.5"/>
+      <rect x="412.5" y="144.5" width="91" height="31" rx="15.5"/>
+      <rect x="512.5" y="144.5" width="107" height="31" rx="15.5"/>
+    </g>
+    <g fill="#f5f8f7">
+      <rect x="214" y="150" width="26" height="20" rx="10"/>
+      <rect x="372" y="150" width="26" height="20" rx="10"/>
+      <rect x="472" y="150" width="26" height="20" rx="10"/>
+      <rect x="588" y="150" width="26" height="20" rx="10"/>
+    </g>
+    <g class="s" font-size="13.5" font-weight="600">
+      <text x="80" y="164.5" fill="#fff">All</text>
+      <text x="164" y="164.5" fill="#34453f">Hooks</text>
+      <text x="266" y="164.5" fill="#34453f">Permissions</text>
+      <text x="424" y="164.5" fill="#34453f">Rules</text>
+      <text x="524" y="164.5" fill="#34453f">Context</text>
+    </g>
+    <g class="m" font-size="13" font-weight="600" text-anchor="middle">
+      <text x="125" y="164.5" fill="#fff">18</text>
+      <text x="227" y="164.5" fill="#52645f">2</text>
+      <text x="385" y="164.5" fill="#52645f">1</text>
+      <text x="485" y="164.5" fill="#52645f">3</text>
+      <text x="601" y="164.5" fill="#52645f">3</text>
+    </g>
+    <rect x="684.5" y="144.5" width="247" height="31" rx="6" fill="#fff" stroke="#74867f"/>
+    <text class="s" x="696" y="164.5" font-size="13.5" fill="#697a75">Filter recommendations…</text>
+
+    <!-- card shapes -->
+    <g filter="url(#kc-card)">
+      <rect x="57" y="199" width="886" height="108" rx="9" fill="#eff8f5" stroke="#0f766e" stroke-width="2"/>
+      <rect x="56.5" y="318.5" width="887" height="107" rx="9.5" fill="#fff" stroke="#d8e0dd"/>
+      <rect x="56.5" y="436.5" width="887" height="75" rx="9.5" fill="#fff" stroke="#d8e0dd"/>
+    </g>
+
+    <!-- card a: selected recipe -->
+    <rect x="72" y="210" width="20" height="20" rx="5" fill="#0f766e"/>
+    <path d="M77.3 220.6L80.6 223.9L86.9 216.2" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+    <text class="s" x="104" y="227" font-size="16.5" font-weight="600" fill="#10201d">Guard against destructive commands</text>
+    <rect x="726.5" y="210.5" width="117" height="21" rx="5" fill="#e0f0ec" stroke="#86c3ba"/>
+    <circle cx="739" cy="221" r="4.5" fill="#0f766e"/>
+    <rect x="849.5" y="210.5" width="78" height="21" rx="5" fill="#f5f8f7" stroke="#d8e0dd"/>
+    <g class="s" font-size="13" font-weight="600" text-anchor="middle">
+      <text x="793" y="225.5" fill="#0a5a53">high impact</text>
+      <text x="888.5" y="225.5" fill="#34453f">low risk</text>
+    </g>
+    <rect x="104" y="238" width="2" height="22" fill="#b9c7c3"/>
+    <text class="s" x="118" y="253" font-size="13.5" font-style="italic" fill="#52645f">362 destructive-looking commands and 1 force push in 30 days</text>
+    <rect x="104.5" y="268.5" width="299" height="27" rx="6" fill="#fff" stroke="#74867f"/>
+    <text class="s" x="116" y="287" font-size="13.5" fill="#52645f">When a pattern matches: <tspan font-weight="700" fill="#10201d">deny</tspan></text>
+    <path d="M384 280l5 5l5-5" fill="none" stroke="#34453f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+
