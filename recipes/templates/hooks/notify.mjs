@@ -170,6 +170,10 @@ function selftest() {
     check('empty or foreign input -> quiet', plan({}, both, 'win32', now) === null && plan({ hook_event_name: 'SessionStart' }, both, 'win32', now) === null, 'expected null');
     const stop = (secondsAgo) => plan({ hook_event_name: 'Stop', last_assistant_message: 'All done.\nTests pass.', transcript_path: secondsAgo === null ? undefined : transcript(secondsAgo), cwd: '/w/demo' }, both, 'win32', now);
     check('short turn -> quiet', stop(5) === null, 'expected null');
+    const noisy = path.join(tmp, 'noisy.jsonl'); // a background-task notice 5 s ago must not restart the turn clock
+    const line = (secondsAgo, content) => JSON.stringify({ type: 'user', timestamp: new Date(now - secondsAgo * 1000).toISOString(), message: { role: 'user', content } });
+    fs.writeFileSync(noisy, line(120, 'do the thing') + '\n' + line(5, '<task-notification>job done</task-notification>') + '\n');
+    check('task notifications do not reset the clock', plan({ hook_event_name: 'Stop', transcript_path: noisy }, both, 'win32', now) !== null, 'expected a notification');
     const long = stop(120);
     check('long turn -> notify', long && long.text === 'Claude finished: All done. Tests pass. [demo]', JSON.stringify(long && long.text));
     check('unknown turn length -> notify', stop(null) !== null, 'expected a notification');

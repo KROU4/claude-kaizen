@@ -108,6 +108,9 @@ function selftest() {
     check('only docs/config edited -> silent', ev(transcript(user('docs'), edit('/p/README.md'), edit('/p/package.json'), edit('/p/x.yaml'))) === null, 'expected silence');
     check('stop_hook_active -> silent', ev({ ...transcript(user('fix'), edit('/p/a.ts')), stop_hook_active: true }) === null, 'expected silence');
     check('new prompt resets the turn', ev(transcript(user('one'), edit('/p/a.ts'), user('what is this?'), asst({ type: 'text', text: 'an answer' }))) === null, 'expected silence');
+    check('task notifications do not reset the turn', ev(transcript(user('go'), edit('/p/a.ts'), user('<task-notification>build done</task-notification>')))?.decision === 'block', 'expected block');
+    const mixed = JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: '<system-reminder>x</system-reminder>' }, { type: 'text', text: 'next thing' }] } });
+    check('reminder plus typed text is a new prompt', ev(transcript(user('go'), edit('/p/a.ts'), mixed)) === null, 'expected silence');
     check('earlier test run does not cover a new edit', ev(transcript(user('one'), bash('pytest -q'), user('two'), edit('/p/a.py')))?.decision === 'block', 'expected block');
     const side = JSON.stringify({ type: 'assistant', isSidechain: true, message: { role: 'assistant', content: [use('Edit', { file_path: '/p/a.ts' })] } });
     check('sidechain edits ignored', ev(transcript(user('go'), side)) === null, 'expected silence');

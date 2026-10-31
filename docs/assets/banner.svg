@@ -1,0 +1,128 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 300" width="1200" height="300" role="img" aria-labelledby="kb-t kb-d">
+  <title id="kb-t">Kaizen: continuous improvement for Claude Code</title>
+  <desc id="kb-d">The kanji 改善 in a thin frame, the Kaizen wordmark, the tagline and the cycle measure, choose, apply, undo. On the right, a terminal with three metric bars and a falling friction sparkline, overlapped by a console card with three toggle switches.</desc>
+  <defs>
+    <style>
+      .s{font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+      .m{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+      .j{font-family:ui-sans-serif,system-ui,-apple-system,"Hiragino Sans","Yu Gothic UI","Yu Gothic",Meiryo,sans-serif}
+    </style>
+    <pattern id="kb-dots" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="12" cy="12" r="1.2" fill="#94a3b8"/>
+    </pattern>
+    <linearGradient id="kb-fade" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#fff" stop-opacity=".12"/>
+      <stop offset=".5" stop-color="#fff" stop-opacity=".45"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="1"/>
+    </linearGradient>
+    <mask id="kb-mask"><rect width="1200" height="300" fill="url(#kb-fade)"/></mask>
+    <radialGradient id="kb-glow" cx="930" cy="150" r="380" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#14b8a6" stop-opacity=".26"/>
+      <stop offset="1" stop-color="#14b8a6" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="kb-area" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#14b8a6" stop-opacity=".38"/>
+      <stop offset="1" stop-color="#14b8a6" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="kb-rule" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#0f766e"/>
+      <stop offset=".7" stop-color="#14b8a6"/>
+      <stop offset="1" stop-color="#f59e0b"/>
+    </linearGradient>
+    <clipPath id="kb-clip"><rect width="1200" height="300" rx="20"/></clipPath>
+    <clipPath id="kb-term"><rect x="704" y="36" width="448" height="210" rx="14"/></clipPath>
+    <filter id="kb-shadow" x="-10%" y="-25%" width="120%" height="160%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="9"/>
+      <feOffset dy="8"/>
+      <feComponentTransfer><feFuncA type="linear" slope=".5"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <g clip-path="url(#kb-clip)">
+    <!-- background: slate, dot grid fading in from the left, teal glow behind the illustration -->
+    <rect width="1200" height="300" fill="#0f172a"/>
+    <rect width="1200" height="300" fill="url(#kb-dots)" mask="url(#kb-mask)" opacity=".34"/>
+    <rect width="1200" height="300" fill="url(#kb-glow)"/>
+    <rect y="296" width="1200" height="4" fill="url(#kb-rule)"/>
+
+    <!-- seal: the kanji in a thin double frame -->
+    <g class="j" text-anchor="middle" lang="ja" xml:lang="ja">
+      <rect x="53" y="67" width="164" height="164" rx="18" fill="none" stroke="#14b8a6" stroke-width="2"/>
+      <rect x="61" y="75" width="148" height="148" rx="12" fill="none" stroke="#14b8a6" stroke-opacity=".32" stroke-width="1"/>
+      <text x="135" y="137" font-size="62" font-weight="700" fill="#14b8a6">改</text>
+      <text x="135" y="205" font-size="62" font-weight="700" fill="#14b8a6">善</text>
+    </g>
+    <rect x="205" y="55" width="12" height="12" rx="3" fill="#f59e0b"/>
+
+    <!-- wordmark: monoline geometric letters drawn as paths, so it looks the same everywhere -->
+    <g transform="translate(256 150) scale(.85)" fill="none" stroke="#f8fafc" stroke-width="14" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M0 -80V0M40 -80L0 -40L40 0"/>
+      <circle cx="91" cy="-27" r="27"/>
+      <path d="M118 -54V0"/>
+      <path d="M150 -54V0"/>
+      <path d="M182 -54H226L182 0H226"/>
+      <path d="M258 -27H312A27 27 0 1 0 305.7 -9.6"/>
+      <path d="M344 -54V0M344 -27A27 27 0 0 1 398 -27V0"/>
+      <circle cx="150" cy="-79" r="8.5" fill="#f59e0b" stroke="none"/>
+    </g>
+
+    <text class="s" x="250" y="194" font-size="20" font-weight="500" fill="#cbd5e1">Continuous improvement for <tspan fill="#f8fafc" font-weight="600">Claude Code</tspan></text>
+    <text class="m" x="250" y="226" font-size="16" fill="#94a3b8">measure<tspan fill="#14b8a6"> · </tspan>choose<tspan fill="#14b8a6"> · </tspan>apply<tspan fill="#14b8a6"> · </tspan>undo</text>
+
+    <!-- terminal -->
+    <rect x="704" y="36" width="448" height="210" rx="14" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+    <rect x="704" y="36" width="448" height="34" fill="#243349" clip-path="url(#kb-term)"/>
+    <path d="M704 70H1152" stroke="#334155" stroke-width="1"/>
+    <circle cx="726" cy="53" r="5" fill="#475569"/>
+    <circle cx="744" cy="53" r="5" fill="#475569"/>
+    <circle cx="762" cy="53" r="5" fill="#475569"/>
+    <text class="m" x="928" y="58" font-size="13" fill="#94a3b8" text-anchor="middle">kaizen · measure</text>
+    <text class="m" x="726" y="98" font-size="14" fill="#e2e8f0"><tspan fill="#14b8a6">$</tspan> kaizen measure --days 30</text>
+
+    <g class="m" font-size="13" fill="#94a3b8">
+      <text x="726" y="128">approvals</text>
+      <text x="726" y="152">errors</text>
+      <text x="726" y="176">retries</text>
+    </g>
+    <g fill="#334155">
+      <rect x="812" y="119" width="90" height="8" rx="4"/>
+      <rect x="812" y="143" width="90" height="8" rx="4"/>
+      <rect x="812" y="167" width="90" height="8" rx="4"/>
+    </g>
+    <g fill="#14b8a6">
+      <rect x="812" y="119" width="68" height="8" rx="4"/>
+      <rect x="812" y="143" width="46" height="8" rx="4"/>
+      <rect x="812" y="167" width="24" height="8" rx="4"/>
+    </g>
+
+    <rect x="984" y="84" width="152" height="74" rx="9" fill="#0f172a" stroke="#334155" stroke-width="1"/>
+    <text class="m" x="998" y="105" font-size="13" fill="#94a3b8">friction</text>
+    <text class="m" x="1122" y="105" font-size="13" font-weight="700" fill="#f59e0b" text-anchor="end">-38%</text>
+    <path d="M998 116L1013.5 113L1029 121L1044.5 118L1060 128L1075.5 125L1091 135L1106.5 132L1122 143V150H998Z" fill="url(#kb-area)"/>
+    <path d="M998 116L1013.5 113L1029 121L1044.5 118L1060 128L1075.5 125L1091 135L1106.5 132L1122 143" fill="none" stroke="#14b8a6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="1122" cy="143" r="8" fill="#f59e0b" fill-opacity=".28"/>
+    <circle cx="1122" cy="143" r="4" fill="#f59e0b"/>
+
+    <text class="m" x="726" y="208" font-size="14" fill="#e2e8f0"><tspan fill="#14b8a6">$</tspan> kaizen console</text>
+    <text class="m" x="726" y="230" font-size="13" fill="#94a3b8">→ localhost:7337</text>
+
+    <!-- console card: light, overlaps the terminal, three toggles -->
+    <g filter="url(#kb-shadow)">
+      <rect x="912" y="168" width="240" height="98" rx="12" fill="#f8fafc"/>
+    </g>
+    <rect x="912.5" y="168.5" width="239" height="97" rx="11.5" fill="none" stroke="#e2e8f0"/>
+    <rect x="928" y="181" width="34" height="20" rx="10" fill="#0f766e"/>
+    <circle cx="952" cy="191" r="7.5" fill="#fff"/>
+    <rect x="928" y="207" width="34" height="20" rx="10" fill="#0f766e"/>
+    <circle cx="952" cy="217" r="7.5" fill="#fff"/>
+    <rect x="928" y="233" width="34" height="20" rx="10" fill="#cbd5e1"/>
+    <circle cx="938" cy="243" r="7.5" fill="#fff"/>
+    <g class="s" font-size="14" font-weight="600">
+      <text x="974" y="196" fill="#0f172a">Destructive guard</text>
+      <text x="974" y="222" fill="#0f172a">Prune MCP servers</text>
+      <text x="974" y="248" fill="#64748b">Auto-compact</text>
+    </g>
+  </g>
+  <rect x=".5" y=".5" width="1199" height="299" rx="19.5" fill="none" stroke="#334155" stroke-opacity=".7"/>
+</svg>

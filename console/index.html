@@ -223,7 +223,7 @@ input[type=checkbox]:disabled{cursor:not-allowed}
       </div>
       <div class="srch" role="search"><input type="search" id="q" class="in" autocomplete="off" spellcheck="false"></div>
     </div>
-    <div class="chips" id="chips" role="group"></div>
+    <div class="chips" id="chips"></div>
   </div>
   <div id="list"></div>
   <p class="empty" id="empty" role="status" hidden></p>
@@ -531,7 +531,6 @@ $('b-high').disabled = !highN;
 $('b-none').textContent = t('select_none');
 $('q').placeholder = t('search_placeholder');
 $('q').setAttribute('aria-label', t('search_placeholder'));
-$('chips').setAttribute('aria-label', t('filter_all'));
 $('empty').textContent = t('empty');
 $('tool').hidden = !recs.length;
 $('notes-lbl').textContent = t('notes_label');
@@ -607,11 +606,14 @@ function restore() {
   if (typeof s.notes === 'string') $('notes').value = s.notes;
 }
 
-let busy = false;
+let busy = false, lastN = -1;
 function refresh() {
   const n = cards.filter((c) => c.cb.checked).length;
-  const parts = t('selected').split('{n}');
-  $('cnt').replaceChildren(parts[0], h('b', { text: n }), parts.slice(1).join('{n}'));
+  if (n !== lastN) { /* touch the live region only when the count changes */
+    lastN = n;
+    const parts = t('selected').split('{n}');
+    $('cnt').replaceChildren(parts[0], h('b', { text: n }), parts.slice(1).join('{n}'));
+  }
   const hasNotes = !!$('notes').value.trim();
   $('submit').disabled = busy || (n === 0 && !hasNotes);
   $('ntg').toggleAttribute('data-has', hasNotes);

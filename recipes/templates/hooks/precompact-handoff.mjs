@@ -81,11 +81,8 @@ function collect(lines, maxPrompts) {
     let o;
     try { o = JSON.parse(line); } catch { continue; }
     if (!o || o.isSidechain) continue;
-    if (isHuman(o)) {
-      const c = o.message.content;
-      prompts.push(typeof c === 'string' ? c : c.filter((b) => b && b.type === 'text').map((b) => b.text).join(' '));
-      continue;
-    }
+    const typed = humanText(o);
+    if (typed) { prompts.push(typed); continue; }
     const blocks = o.type === 'assistant' && o.message && o.message.content;
     for (const b of Array.isArray(blocks) ? blocks : []) {
       if (!b) continue;
@@ -135,6 +132,8 @@ function selftest() {
   const use = (name, input) => ({ type: 'tool_use', id: 't', name, input });
   const lines = [];
   for (let i = 1; i <= 7; i++) lines.push(user(i === 7 ? 'deploy with password=hunter22 and key sk-ant-api03-abcdefghijklmnop1234' : `prompt number ${i}`));
+  lines.push(user('<task-notification>background job finished</task-notification>'));
+  lines.push(JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: '<system-reminder>hook context</system-reminder>' }, { type: 'text', text: 'final ask <system-reminder>inline</system-reminder>' }] } }));
   for (let i = 1; i <= 35; i++) lines.push(asst(use('Edit', { file_path: `/p/src/f${i}.ts` })));
   lines.push(asst(use('Edit', { file_path: '/p/src/f1.ts' })));
   lines.push(JSON.stringify({ type: 'assistant', isSidechain: true, message: { role: 'assistant', content: [use('Write', { file_path: '/p/side.ts' })] } }));
@@ -152,7 +151,8 @@ function selftest() {
     const text = file ? fs.readFileSync(file, 'utf8') : '';
     check('handoff written to <config>/kaizen/handoffs/<session>.md', file === path.join(tmp, 'kaizen', 'handoffs', 'sess-1.md'), String(file));
     const prompts = text.split('## Last user prompts')[1]?.split('\n\n')[0].split('\n').filter((l) => /^\d+\./.test(l)) || [];
-    check('keeps the last 5 prompts', prompts.length === 5 && prompts[0].startsWith('1. prompt number 3'), JSON.stringify(prompts));
+    check('keeps the last 5 human prompts', prompts.length === 5 && prompts[0].startsWith('1. prompt number 4') && prompts[4] === '5. final ask', JSON.stringify(prompts));
+    check('machine-injected text is left out', !/task-notification|system-reminder|background job/.test(text), text.slice(0, 300));
     check('secrets are scrubbed', !/hunter22|sk-ant/.test(text) && text.includes('password=[redacted]'), text.slice(0, 400));
     const files = text.split('## Recently edited files')[1]?.split('\n').filter((l) => l.startsWith('- ')) || [];
     check('last 30 distinct edited files, newest last', files.length === 30 && files[29] === '- /p/src/f1.ts' && !text.includes('side.ts'), `${files.length} ${files[29]}`);
