@@ -331,3 +331,34 @@ test('long-command-nudge: PowerShell calls are nudged like Bash ones; wrapped or
     assert.equal(run(script, payload), null, c);
   }
 });
+
+test('long-command-nudge: here-string and heredoc bodies, Start-Job in assignments and blocks, -Wait forms and .cmd shims', () => {
+  const script = render('long-command-nudge.mjs', {});
+  const quiet = [
+    ['PowerShell', "git commit -m @'\nnpm run dev now loads .env\n'@"],
+    ['PowerShell', "@'\n## Dev\nnpm run dev\n'@ | Set-Content README.md"],
+    ['Bash', "git commit -m \"$(cat <<'EOF'\nnpm start works again\nEOF\n)\""],
+    ['Bash', 'cat <<EOF > a.md\ntail -f x\nEOF'],
+    ['PowerShell', "Write-Host 'while ($true) loop removed'"],
+    ['PowerShell', '$job = Start-Job { Start-Sleep 600 }'],
+    ['PowerShell', '$job = Start-Job -ScriptBlock { while ($true) { Get-Date; Start-Sleep 5 } }'],
+    ['PowerShell', 'Start-Job -ScriptBlock {\n  npm run dev\n}'],
+    ['PowerShell', 'Start-Job { Start-Sleep 5 } | Wait-Job'],
+    ['PowerShell', 'Start-Job { npm run dev } | Wait-Job -Timeout 5'],
+    ['PowerShell', 'Start-Process msiexec -ArgumentList "/i a.msi" -Wait'],
+  ];
+  for (const [tool, c] of quiet) assert.equal(run(script, shell(tool, c)), null, c);
+  const nudged = [
+    ['PowerShell', "Start-Process npm -ArgumentList 'run','dev' -Wait -NoNewWindow"],
+    ['PowerShell', 'Start-Job { npm run dev } | Receive-Job -Wait'],
+    ['PowerShell', 'Start-Job { npm run dev } | Wait-Job'],
+    ['PowerShell', '$j = Start-Job { npm run dev }; Wait-Job $j'],
+    ['PowerShell', 'npx.cmd vite'],
+    ['PowerShell', 'pnpm.cmd exec vite'],
+    ['Bash', 'cat <<EOF > a.md\nx\nEOF\nnpm run dev'],
+  ];
+  for (const [tool, c] of nudged) {
+    const out = run(script, shell(tool, c));
+    assert.ok(out && /run_in_background/.test(out.additionalContext), c);
+  }
+});
