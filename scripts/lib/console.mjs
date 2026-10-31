@@ -47,7 +47,8 @@ export function renderConsole(data) {
   if (!template.includes(PLACEHOLDER)) throw new Error('console/index.html: data placeholder missing');
   // </script> inside JSON strings would end the script block early
   const json = JSON.stringify(data).replace(/<\//g, '<\\/');
-  return template.replace(PLACEHOLDER, json);
+  // function form: a plain string replacement would interpret $&, $', $1 … inside the data
+  return template.replace(PLACEHOLDER, () => json);
 }
 
 export function validateChoices(obj) {

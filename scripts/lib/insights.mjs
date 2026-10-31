@@ -65,15 +65,18 @@ export function readInsights(usageDataDir, { sinceMs = 0 } = {}) {
     /* ignore */
   }
 
-  const metaBySession = new Map();
+  const metaBySession = new Map(); // sessions inside the window
+  const allMetaIds = new Set(); // every session that has a meta file, in or out of the window
   if (fs.existsSync(metaDir)) {
     for (const f of fs.readdirSync(metaDir)) {
       if (!f.endsWith('.json')) continue;
       const m = readJsonSafe(path.join(metaDir, f));
       if (!m) continue;
+      const id = m.session_id || f.replace(/\.json$/, '');
+      allMetaIds.add(id);
       const start = m.start_time ? Date.parse(m.start_time) : NaN;
       if (!Number.isNaN(start) && start < sinceMs) continue;
-      metaBySession.set(m.session_id || f.replace(/\.json$/, ''), m);
+      metaBySession.set(id, m);
       result.sessionMeta++;
       const M = result.meta;
       M.sessions++;
@@ -104,8 +107,8 @@ export function readInsights(usageDataDir, { sinceMs = 0 } = {}) {
       if (!fx) continue;
       const sid = fx.session_id || f.replace(/\.json$/, '');
       const meta = metaBySession.get(sid);
-      if (sinceMs && meta && meta.start_time && Date.parse(meta.start_time) < sinceMs) continue;
-      if (sinceMs && !meta && metaBySession.size) continue; // older than the window we know about
+      // a facet whose session-meta exists but fell outside the window is old; one with no meta at all is kept
+      if (sinceMs && !meta && allMetaIds.has(sid)) continue;
       result.facets++;
       inc(result.outcome, fx.outcome);
       inc(result.helpfulness, fx.claude_helpfulness);
