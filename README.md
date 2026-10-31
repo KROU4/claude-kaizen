@@ -131,7 +131,7 @@ tests/              node --test, synthetic fixtures only
 
 ## Contributing
 
-`node scripts/kaizen.mjs selfcheck && node --test tests/` must pass. Recipes need `en` and `ru` text, a trigger, evidence and working undo. See [CONTRIBUTING.md](CONTRIBUTING.md).
+`node scripts/kaizen.mjs selfcheck && npm test` must pass. Recipes need `en` and `ru` text, a trigger, evidence and working undo. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

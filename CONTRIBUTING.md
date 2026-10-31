@@ -15,7 +15,7 @@ Thanks for helping make Claude Code setups better for everyone. Kaizen is small 
 
 ```bash
 node scripts/kaizen.mjs selfcheck    # catalog, locales, templates, manifests
-node --test tests/                   # unit and CLI tests on synthetic fixtures
+npm test                   # unit and CLI tests on synthetic fixtures
 claude plugin validate . --strict    # if you have Claude Code installed
 node scripts/kaizen.mjs docs         # regenerate docs/recipes.md after catalog changes
 ```

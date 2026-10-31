@@ -73,7 +73,7 @@ function selftest() {
 }
 
 async function main() {
-  if (process.argv.includes('--selftest')) { process.exitCode = selftest(); return; }
+  if (process.argv.includes('--selftest')) { try { process.exitCode = selftest(); } catch (e) { console.log('FAIL selftest crashed: ' + e.message); process.exitCode = 1; } return; }
   const chunks = [];
   if (!process.stdin.isTTY) for await (const c of process.stdin) chunks.push(c);
   let payload = {};

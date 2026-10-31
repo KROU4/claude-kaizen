@@ -45,7 +45,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --test tests/",
+    "test": "node scripts/test-runner.mjs",
     "lint": "node scripts/kaizen.mjs selfcheck",
     "measure": "node scripts/kaizen.mjs measure",
     "recommend": "node scripts/kaizen.mjs recommend",

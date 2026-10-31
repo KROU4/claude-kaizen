@@ -34,7 +34,7 @@ The short version:
 
 ## 4. For contributors (agents working on this repository)
 
-- Run `node scripts/kaizen.mjs selfcheck` and `node --test tests/` before committing. CI also runs `claude plugin validate . --strict`.
+- Run `node scripts/kaizen.mjs selfcheck` and `npm test` before committing. CI also runs `claude plugin validate . --strict`.
 - Recipes live in `recipes/catalog.json`; every text field needs `en` and `ru`; every action must be undoable by `scripts/lib/apply.mjs` (add a handler and an undo branch together). Regenerate `docs/recipes.md` with `node scripts/kaizen.mjs docs`.
 - Hook templates in `recipes/templates/hooks/` are self-contained Node scripts with a `--selftest` mode and `{{param}}` placeholders. Keep them under ~220 lines and never let them throw.
 - Fixtures under `tests/fixtures/` are synthetic. Do not add real transcripts, paths, names or tokens.

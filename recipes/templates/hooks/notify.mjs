@@ -90,6 +90,7 @@ function osCommand(platform, text, which = onPath) {
 
 // Turn a hook payload into { text, os, tg } (null = stay quiet). Pure: nothing is sent here.
 function plan(p, cfg = CFG, platform = process.platform, now = Date.now()) {
+  if (p.hook_event_name !== 'Stop' && p.hook_event_name !== 'Notification') return null; // empty or foreign input: stay quiet
   let text;
   if (p.hook_event_name === 'Stop') {
     const secs = turnSeconds(p.transcript_path, now);
@@ -173,7 +174,7 @@ function selftest() {
 }
 
 async function main() {
-  if (process.argv.includes('--selftest')) { process.exitCode = selftest(); return; }
+  if (process.argv.includes('--selftest')) { try { process.exitCode = selftest(); } catch (e) { console.log('FAIL selftest crashed: ' + e.message); process.exitCode = 1; } return; }
   const chunks = [];
   if (!process.stdin.isTTY) for await (const c of process.stdin) chunks.push(c);
   let payload = {};

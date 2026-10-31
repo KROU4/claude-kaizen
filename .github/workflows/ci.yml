@@ -30,7 +30,7 @@ jobs:
       - name: Self-check (catalog, locales, templates)
         run: node scripts/kaizen.mjs selfcheck
       - name: Unit tests
-        run: node --test tests/
+        run: node scripts/test-runner.mjs
 
   plugin-validate:
     name: Plugin manifest validation

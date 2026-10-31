@@ -1,9 +1,8 @@
 // Kaizen hook: guard-destructive
-// What it does: denies (or asks about) destructive shell commands: recursive deletes of /, ~, $HOME, .,
-//   * or any top-level path, git reset --hard, git clean -f, git checkout -- ., force-push to a protected
-//   branch, git branch -D, SQL DROP/TRUNCATE, Windows del /s, rmdir /s, Remove-Item -Recurse on roots,
-//   format, mkfs, dd onto a device, chmod -R on /. Everything else passes silently (rm -rf node_modules,
-//   dist/, ./tmp/foo and git push --force-with-lease to a feature branch are allowed).
+// What it does: denies (or asks about) destructive shell commands: rm -rf / ~ $HOME . * or any top-level path,
+//   git reset --hard, git clean -f, git checkout -- ., force-push to a protected branch, git branch -D, SQL
+//   DROP/TRUNCATE, del /s, rmdir /s, Remove-Item -Recurse on roots, format, mkfs, dd onto a device, chmod -R /.
+//   Everything else passes silently (rm -rf node_modules, dist/, ./tmp/foo, push --force-with-lease to a feature branch).
 // Registered for: PreToolUse, matcher "Bash" (tool_name "PowerShell" is handled too).
 // Parameters (substituted by Kaizen at install time): mode (deny|ask), protectedBranches (comma list).
 // Remove: delete the PreToolUse entry that runs this file from settings.json, or run `kaizen undo`.
@@ -146,7 +145,6 @@ function nested(name, args) {
   const after = (re) => { const i = args.findIndex((a) => re.test(a)); return i < 0 ? null : args.slice(i + 1); };
   let r;
   if (/^(?:bash|sh|zsh|dash|ksh)$/.test(name)) return (r = after(/^-[a-z]*c$/)) && r[0] ? [r[0], false] : null;
-  if (name === 'eval') return [args.join(' '), false];
   if (/^(?:powershell|pwsh)$/.test(name)) return (r = after(/^-c(?:ommand)?$/i)) ? [r.join(' '), true] : null;
   if (name === 'cmd') return (r = after(/^\/[ck]$/i)) ? [r.join(' '), false] : null;
   return null;
@@ -211,7 +209,7 @@ function selftest() {
 }
 
 async function main() {
-  if (process.argv.includes('--selftest')) { process.exitCode = selftest(); return; }
+  if (process.argv.includes('--selftest')) { try { process.exitCode = selftest(); } catch (e) { console.log('FAIL selftest crashed: ' + e.message); process.exitCode = 1; } return; }
   let payload = {};
   try {
     const chunks = [];

@@ -131,7 +131,7 @@ tests/              node --test, только синтетические тес�
 
 ## Участие в разработке
 
-Команда `node scripts/kaizen.mjs selfcheck && node --test tests/` должна завершаться успешно. Рецептам нужны тексты на `en` и `ru`, условие срабатывания, основание и работающий откат. См. [CONTRIBUTING.md](CONTRIBUTING.md).
+Команда `node scripts/kaizen.mjs selfcheck && npm test` должна завершаться успешно. Рецептам нужны тексты на `en` и `ru`, условие срабатывания, основание и работающий откат. См. [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Лицензия
 

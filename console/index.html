@@ -73,7 +73,8 @@ h1{max-width:30em;margin-top:16px;font-size:clamp(1.3rem,1.05rem + 1.3vw,1.75rem
 .stats b{color:var(--fg);font:600 .875rem/1 var(--mono);font-variant-numeric:tabular-nums}
 
 /* control strip */
-.tool{display:grid;gap:12px;margin-top:18px;padding:12px;border:var(--bd);border-radius:12px;background:var(--surface);box-shadow:0 1px 2px var(--sh)}
+.tool,.card,.fb-box{border:var(--bd);background:var(--surface);box-shadow:0 1px 2px var(--sh)}
+.tool{display:grid;gap:12px;margin-top:18px;padding:12px;border-radius:12px}
 .tool-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px 12px}
 .tool-btns{display:flex;flex-wrap:wrap;gap:8px}
 .srch{flex:1 1 240px;max-width:360px}
@@ -114,7 +115,7 @@ input[type=checkbox]:disabled{cursor:not-allowed}
 .grp>h2::after{content:"";flex:1;height:1px;background:var(--line)}
 .grp>h2 .n{border:var(--bd);background:var(--surface)}
 .cards{display:grid;gap:10px;margin-top:12px}
-.card{padding:14px 16px;border:var(--bd);border-radius:10px;background:var(--surface);box-shadow:0 1px 2px var(--sh);transition:border-color .12s,background-color .12s,box-shadow .12s}
+.card{padding:14px 16px;border-radius:10px;transition:border-color .12s,background-color .12s,box-shadow .12s}
 .card:hover{border-color:var(--rule)}
 .card.on{border-color:var(--accent);background:var(--sel);box-shadow:0 0 0 1px var(--accent),0 1px 2px var(--sh)}
 .top{display:grid;grid-template-columns:20px minmax(0,1fr) auto;gap:6px 12px;align-items:start}
@@ -154,7 +155,7 @@ input[type=checkbox]:disabled{cursor:not-allowed}
 .empty{margin-top:28px;padding:20px 16px;border:1px dashed var(--ctl);border-radius:10px;color:var(--muted)}
 
 /* JSON fallback panel */
-.fb-box{display:grid;gap:10px;margin-top:28px;padding:16px;border:var(--bd);border-radius:12px;background:var(--surface);box-shadow:0 1px 2px var(--sh)}
+.fb-box{display:grid;gap:10px;margin-top:28px;padding:16px;border-radius:12px}
 .fb.warn .fb-hint{padding:8px 12px;border:1px solid var(--warn-line);border-radius:8px;background:var(--warn-bg);color:var(--warn-fg)}
 .json{height:15rem;white-space:pre;overflow:auto;font-size:.78rem}
 .fb-act{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px}
@@ -261,7 +262,6 @@ input[type=checkbox]:disabled{cursor:not-allowed}
 
 <script>
 const KAIZEN = /*__KAIZEN_DATA__*/null/*__END__*/;
-/* page code; the wrapper body is not indented, to save bytes */
 (() => {
 'use strict';
 
@@ -352,7 +352,6 @@ const I = D.i18n || {};
 const mode = D.mode === 'local' || D.mode === 'artifact' ? D.mode : 'static';
 const stats = D.stats || {};
 const recs = Array.isArray(D.recommendations) ? D.recommendations : [];
-const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
 document.documentElement.lang = L;
 
 const $ = (id) => document.getElementById(id);
@@ -627,7 +626,7 @@ function showJson(choices, failed) {
   $('fb-hint').textContent = t('offline_hint');
   $('copied').textContent = '';
   $('json').value = JSON.stringify(choices, null, 2);
-  $('fb').scrollIntoView({ block: 'center', behavior: reduce ? 'auto' : 'smooth' });
+  $('fb').scrollIntoView({ block: 'center' });
   $('json').focus({ preventScroll: true });
   $('json').select();
 }
