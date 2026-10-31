@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- `kaizen paths` prints where Kaizen keeps its files for this run (the state directory and the files in it, as JSON). Skills and subagents read it instead of assuming `~/.claude/kaizen`.
+- `apply --from-batch ID [--recipe a,b]` re-applies the recipes of a journaled batch with the scope and parameters that batch used (for example to drop one recipe of a batch: `undo <id>`, then `apply --from-batch <id> --recipe <the ones to keep>`).
+- Measurement reads subagent transcripts, deduplicates forked sessions by uuid across files, counts PowerShell commands, and filters `--days` by the time of each line.
+
+### Changed
+- Failing hooks are judged by their failure rate: a hook is offered for removal when it fails in nearly every run, not when it has a handful of errors among thousands of runs.
+- Project-specific hook scripts: a recipe meant for one project (`format-on-edit`, `verify-before-stop`) applied at project scope writes `<name>.<project key>.mjs`, so two projects keep their own formatter / mode. Every other hook (`guard-destructive`, `protect-secrets`, `session-context`, `precompact-handoff`, ...) keeps one shared script and command also at project scope, so the same hook installed at user and project scope is run once by Claude Code. The recommendation summary shows the real script name.
+- `plugins.disable` switches a plugin off in every file that enables it: the user settings, and `settings.local.json` of the project when the project (or the local) settings enable it. The shared `.claude/settings.json` of the repository is never edited. Each change is journaled and `undo` restores it.
+
+### Fixed
+- Upgrading from 0.1.4: applying `format-on-edit` / `verify-before-stop` again in a project that already has the old shared-script hook now says which old batch to `undo`, instead of silently leaving two hooks.
+- `undo` of a hook that stays because another batch still needs it prints the shared message, not "remove … hook".
+- `apply --recipe` for a recipe that is not in the recommendations (`hooks.verify-before-stop`, `hooks.format-on-edit`) uses the recipe's own default scope (project) instead of forcing `user`.
+
 ## [0.1.4] — 2026-11-01
 
 ### Fixed

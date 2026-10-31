@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { loadLocale } from '../scripts/lib/i18n.mjs';
-import { IMPACT_WEIGHT, RISK_PENALTY, actionApplies, addExtraRecipes, readExtraRecipes, resolveExtraFile, defaultParams, evaluate, loadCatalog, recommend, renderText, resolvePath, score, validateCatalog } from '../scripts/lib/recipes.mjs';
+import { IMPACT_WEIGHT, RISK_PENALTY, actionApplies, addExtraRecipes, readExtraRecipes, resolveExtraFile, defaultParams, evaluate, loadCatalog, projectKey, recommend, renderText, resolvePath, score, validateCatalog } from '../scripts/lib/recipes.mjs';
 import { KIT_ROOT, buildFixtureMeasure, cleanupTempDirs, makeTempDir, setEnv, writeJson, writeText } from './helpers.mjs';
 
 after(() => cleanupTempDirs());
@@ -886,5 +886,40 @@ describe('catalog conditions: small samples, nothing to choose, shared hooks', (
     for (const f of named) assert.ok(options.includes(f), `${f} must be a valid formatter option`);
     const template = fs.readFileSync(path.join(KIT_ROOT, 'recipes', 'templates', 'hooks', 'format-on-edit.mjs'), 'utf8');
     for (const f of options.filter((o) => o !== 'auto')) assert.ok(template.includes(f), `the hook template must know ${f}`);
+  });
+});
+
+describe('recommendation summaries name the script apply will really write', () => {
+  const fileLine = (res, id) => res.recommended.find((r) => r.id === id).actionsSummary.find((s) => /hooks\//.test(s));
+  const withProject = (dir) => ({ env: { projectDir: dir } });
+
+  it('a project-specific recipe (format-on-edit, defaultScope project) shows the script of the project it is applied to', () => {
+    const dir = path.join(os.tmpdir(), 'kaizen-summary-proj');
+    const res = recommend(loadCatalog(), withProject(dir), { includeAll: true });
+    const key = projectKey(dir);
+    assert.equal(fileLine(res, 'hooks.format-on-edit'), `file ~/.claude/kaizen/hooks/format-on-edit.${key}.mjs`);
+    assert.equal(fileLine(res, 'hooks.verify-before-stop'), `file ~/.claude/kaizen/hooks/verify-before-stop.${key}.mjs`);
+    const ru = recommend(loadCatalog(), withProject(dir), { includeAll: true, lang: 'ru' });
+    assert.equal(fileLine(ru, 'hooks.format-on-edit'), `файл ~/.claude/kaizen/hooks/format-on-edit.${key}.mjs`);
+  });
+
+  it('without a known project directory the name has a <project> placeholder instead of the shared name', () => {
+    const res = recommend(loadCatalog(), {}, { includeAll: true });
+    assert.equal(fileLine(res, 'hooks.format-on-edit'), 'file ~/.claude/kaizen/hooks/format-on-edit.<project>.mjs');
+  });
+
+  it('recipes that keep the shared script (user default scope) show the shared name', () => {
+    const res = recommend(loadCatalog(), withProject(path.join(os.tmpdir(), 'kaizen-summary-proj')), { includeAll: true });
+    for (const id of ['hooks.guard-destructive', 'hooks.protect-secrets', 'hooks.session-context', 'hooks.precompact-handoff']) {
+      assert.ok(!/\.[0-9a-f]{10}\.mjs|<project>/.test(res.recommended.find((r) => r.id === id).actionsSummary.join(' ')), id);
+    }
+    assert.equal(fileLine(res, 'hooks.guard-destructive'), 'file ~/.claude/kaizen/hooks/guard-destructive.mjs');
+  });
+
+  it('projectKey is the key apply uses: ten hex digits, stable for a directory', () => {
+    const dir = path.join(os.tmpdir(), 'kaizen-summary-proj');
+    assert.match(projectKey(dir), /^[0-9a-f]{10}$/);
+    assert.equal(projectKey(dir), projectKey(dir + path.sep));
+    assert.notEqual(projectKey(dir), projectKey(dir + '2'));
   });
 });

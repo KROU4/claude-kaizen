@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { configDir, ensureDir, exists, expandHome, globalConfigPath, kitRoot, managedSettingsFiles, projectConfigKey, readJsonSafe, settingsFiles, stateDir, toPosix, writeJsonAtomic } from './paths.mjs';
 import { nodeCommand } from './platform.mjs';
-import { actionApplies, addExtraRecipes, closeMatches, loadCatalog, readExtraRecipes, recipeDigest, rememberedExtraFile, resolveExtraFile, resolvePath } from './recipes.mjs';
+import { actionApplies, addExtraRecipes, closeMatches, hookScriptKey, keyHookScripts, loadCatalog, projectKey, readExtraRecipes, recipeDigest, rememberedExtraFile, resolveExtraFile, resolvePath } from './recipes.mjs';
 import { UserError, translator } from './i18n.mjs';
 import { validateChoices } from './console.mjs';
 
@@ -77,35 +77,14 @@ export function buildContext({ scope = 'user', projectDir = null, params = {} })
   return ctx;
 }
 
-/** A short name for a project directory that is stable across runs (case-insensitive paths on Windows). */
-export function projectKey(projectDir) {
-  const norm = toPosix(path.resolve(projectDir)).replace(/\/+$/, '');
-  return sha(process.platform === 'win32' ? norm.toLowerCase() : norm).slice(0, 10);
-}
-
-/**
- * The key that makes the hook scripts of a recipe applied to ONE project that project's own (`format-on-edit.<key>.mjs`):
- * their templates bake parameters into the script (`{{formatter}}`, `{{mode}}`...), so one shared script would be rewritten
- * by every project and change the behaviour of the others. Null for user scope (the scripts stay where they were) and for
- * recipes whose scripts have no parameters.
- */
-export function hookScriptKey(recipe, scope, projectDir) {
-  if (scope !== 'project' || !projectDir) return null;
-  const bakes = (recipe.actions || []).some((a) => {
-    if (a.type !== 'file' || !a.template) return false;
-    try {
-      return /\{\{[a-zA-Z0-9_]+\}\}/.test(fs.readFileSync(path.join(TEMPLATES, a.template), 'utf8'));
-    } catch {
-      return false; // a missing template is reported by the file action itself
-    }
-  });
-  return bakes ? projectKey(projectDir) : null;
-}
+// projectKey and hookScriptKey (which recipes get project-specific hook script names) live in recipes.mjs, next to the
+// recommendation summaries that show those names
+export { hookScriptKey, projectKey };
 
 export function fill(str, ctx) {
   if (typeof str !== 'string') return str;
-  // the scripts of a project-scope recipe with baked parameters belong to that project (see hookScriptKey)
-  if (ctx.hookKey) str = str.replace(/\{kaizenHome\}\/hooks\/([A-Za-z0-9_-]+)\.mjs/g, (m, name) => `{kaizenHome}/hooks/${name}.${ctx.hookKey}.mjs`);
+  // the scripts of a project-specific recipe belong to that project (see perProjectScripts)
+  str = keyHookScripts(str, ctx.hookKey);
   return str.replace(/\{(node|kaizenHome|configDir|projectDir|skillsDir|agentsDir|claudeMd)\}/g, (m, k) => ctx[k] ?? m).replace(/\{params\.([a-zA-Z0-9_]+)\}/g, (m, k) => {
     const v = ctx.params[k];
     if (v === undefined || v === null) return '';
@@ -274,6 +253,21 @@ const handlers = {
     if (matcher) group.matcher = matcher;
     io.describe(io.t('apply.plan.hook_add', { file, event: a.event, matcher: matcher ? ` [${matcher}]` : '', command: entry.command }));
     list.push(group);
+    // Upgrade from 0.1.4, which wired the shared script (format-on-edit.mjs) in the project: a live batch of this very recipe
+    // still owns that unkeyed hook, and Claude Code runs two different commands twice. The old batch is the one to undo (it
+    // removes its hook and script); removing the hook here would take it out of that batch's journal without a trace.
+    if (ctx.hookKey) {
+      const legacyId = hookIdentity({ type: 'command', command: fill(a.command, { ...ctx, hookKey: null }) });
+      const stillWired = list.some((g) => (g.hooks || []).some((h) => hookIdentity(h) === legacyId));
+      const owners = io
+        .live()
+        .filter((p) => p.entry.type === 'settings.hook' && !p.entry.shared && p.entry.event === a.event && p.entry.identity === legacyId && samePath(p.entry.file, file) && p.recipe.id === io.recipeId);
+      if (stillWired && owners.length) {
+        const ids = [...new Set(owners.map((p) => p.box.id))];
+        const undo = ids.map((id) => `kaizen undo ${id}`).join('; ');
+        io.note(io.say(`${file} still has the ${a.event} hook of an earlier version (shared script, batch ${ids.join(', ')}) next to the new project-specific one, so it runs twice. Remove the old one with: ${undo}`, `в ${file} остался хук ${a.event} прежней версии (общий скрипт, пакет ${ids.join(', ')}) рядом с новым, своим для проекта, поэтому он сработает дважды. Уберите старый: ${undo}`));
+      }
+    }
     if (!io.dry) io.save(file, settings);
     // wanted: the whole matcher the recipe asked for (matcher is only what this batch added), so that undoing another
     // batch can put back the part of the coverage this recipe still depends on
@@ -534,14 +528,23 @@ const handlers = {
         blocked.push(p);
         continue;
       }
-      // The project file belongs to the repository and is shared: a plugin enabled there is switched off for this user
-      // in settings.local.json, which comes later in the order and is not committed.
-      const target = !win ? userLayer : win.layer.scope === 'project' ? localLayer : win.layer;
-      const settings = io.load(target.file);
-      settings.enabledPlugins ||= {};
-      changed.push({ plugin: p, previous: settings.enabledPlugins[p] === undefined ? null : settings.enabledPlugins[p], file: target.file, ...(exists(target.file) ? {} : { created: true }) });
-      settings.enabledPlugins[p] = false;
-      files.set(target.file, settings);
+      // Switched off in EVERY file that enables it, not only where the winning `true` is: a plugin enabled in the user and in
+      // the project settings would otherwise stay on in every other project. The project file belongs to the repository
+      // and is shared, so a `true` there is switched off for this user in settings.local.json, which comes later in the
+      // order and is not committed.
+      const targets = new Set();
+      for (const layer of layers) {
+        const map = layer.readOnly ? null : readMap(layer);
+        if (map && map[p] === true) targets.add(layer.scope === 'project' ? localLayer : layer);
+      }
+      if (!targets.size) targets.add(userLayer); // not mentioned anywhere: the user settings
+      for (const target of targets) {
+        const settings = io.load(target.file);
+        settings.enabledPlugins ||= {};
+        changed.push({ plugin: p, previous: settings.enabledPlugins[p] === undefined ? null : settings.enabledPlugins[p], file: target.file, ...(exists(target.file) ? {} : { created: true }) });
+        settings.enabledPlugins[p] = false;
+        files.set(target.file, settings);
+      }
     }
     if (blocked.length) io.note(io.say(`not disabled (enabled by the managed settings of your organisation, which Kaizen never edits): ${blocked.join(', ')}`, `не выключено (включено управляемыми настройками вашей организации, которые Kaizen не правит): ${blocked.join(', ')}`));
     if (!changed.length) {
@@ -797,7 +800,9 @@ export function loadChoices(args, t = translator('en')) {
     const selected = ids.map((id) => {
       const find = (x) => x && Array.isArray(x.recommendations) && x.recommendations.find((y) => y.id === id);
       const r = find(rec) || find(recAll);
-      return { id, scope: args.flags.scope || (r && r.scope) || 'user', params: Object.fromEntries((r ? r.params : []).map((p) => [p.name, p.value])) };
+      // no scope when neither --scope nor a recommendation names one: cmdApply then takes the recipe's own defaultScope
+      const scope = args.flags.scope || (r && r.scope);
+      return { id, ...(scope ? { scope } : {}), params: Object.fromEntries((r ? r.params : []).map((p) => [p.name, p.value])) };
     });
     return { version: 1, source: 'cli', selected, discuss: [], notes: '' };
   }
@@ -1075,6 +1080,8 @@ function undoEntry(e, io) {
         }
         // else: the same command sits in another group for other matchers (installed by another recipe): leave that one
       }
+      const adopters = []; // the batches that took the hook over, because they still need it
+      let kept = false; // ... and between them they cover everything this undo took out: the hook stays
       // Put back the coverage that other batches still in force asked for and that only the removed group provided; the
       // batch that needs it takes the alternatives over, so that undoing it later removes them again.
       if (sample && (gone.size || goneAll)) {
@@ -1104,13 +1111,17 @@ function undoEntry(e, io) {
           p.entry.adopted = true;
           delete p.entry.shared;
           io.touch(p.box);
+          adopters.push(p);
         }
+        kept = adopters.length > 0 && (coveredAll || (!goneAll && [...gone].every((x) => covered.has(x))));
       }
       s.hooks[e.event] = list.filter((g) => g.hooks && g.hooks.length);
       if (!s.hooks[e.event].length) delete s.hooks[e.event];
       if (!Object.keys(s.hooks).length) delete s.hooks;
-      io.describe(io.t('undo.plan.hook_remove', { file: e.file, event: e.event, command: e.identity.split('|')[1] }));
       if (!io.dry) io.save(e.file, s);
+      // the hook is still in the file when another batch adopted it: say that, not that it was removed
+      if (kept) return `shared: ${e.file} [${e.event}] still in use by ${recipeNames(adopters)}`;
+      io.describe(io.t('undo.plan.hook_remove', { file: e.file, event: e.event, command: e.identity.split('|')[1] }));
       return removed ? 'ok' : 'hook was already gone';
     }
     case 'settings.set': {

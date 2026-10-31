@@ -10,8 +10,50 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { exists, expandHome, kitRoot, readJsonSafe } from './paths.mjs';
+import { exists, expandHome, kitRoot, readJsonSafe, toPosix } from './paths.mjs';
 import { interpolate, pick, translator } from './i18n.mjs';
+
+/** A short name for a project directory that is stable across runs (case-insensitive paths on Windows). */
+export function projectKey(projectDir) {
+  const norm = toPosix(path.resolve(projectDir)).replace(/\/+$/, '');
+  return crypto.createHash('sha256').update(process.platform === 'win32' ? norm.toLowerCase() : norm).digest('hex').slice(0, 10);
+}
+
+/**
+ * True when the hook scripts of this recipe are project-specific: the recipe is meant for one project (defaultScope
+ * project: format-on-edit, verify-before-stop) and its script templates bake parameters in (`{{formatter}}`, `{{mode}}`...),
+ * so one shared script would be rewritten by every project and change the behaviour of the others.
+ *
+ * Only these recipes get a script (and so a hook command) of their own per project. Every other hook (guard-destructive,
+ * protect-secrets, session-context, precompact-handoff...) is meant to be one thing for the user, and when it is also
+ * installed at project scope it must keep the SAME script path and command as the user-scope copy: Claude Code runs the
+ * identical command found in several settings files once, while two different commands run twice. A project copy of such
+ * a recipe is also rendered from another recipe's template (precompact-handoff carries session-context's), whose
+ * parameters it does not declare, so a name of its own would hold a script with unfilled placeholders.
+ */
+export function perProjectScripts(recipe) {
+  if (!recipe || recipe.defaultScope !== 'project') return false;
+  const templates = path.join(kitRoot(), 'recipes', 'templates');
+  return (recipe.actions || []).some((a) => {
+    if (a.type !== 'file' || !a.template) return false;
+    try {
+      return /\{\{[a-zA-Z0-9_]+\}\}/.test(fs.readFileSync(path.join(templates, a.template), 'utf8'));
+    } catch {
+      return false; // a missing template is reported by the file action itself
+    }
+  });
+}
+
+/** The key that gives the hook scripts of a recipe applied to ONE project that project's own names (`format-on-edit.<key>.mjs`); null when they stay shared. */
+export function hookScriptKey(recipe, scope, projectDir) {
+  if (scope !== 'project' || !projectDir) return null;
+  return perProjectScripts(recipe) ? projectKey(projectDir) : null;
+}
+
+/** `{kaizenHome}/hooks/name.mjs` -> `{kaizenHome}/hooks/name.<key>.mjs` (the script names of a project-specific recipe). */
+export function keyHookScripts(str, key) {
+  return key ? str.replace(/\{kaizenHome\}\/hooks\/([A-Za-z0-9_-]+)\.mjs/g, (m, name) => `{kaizenHome}/hooks/${name}.${key}.mjs`) : str;
+}
 
 export const IMPACT_WEIGHT = { high: 3, medium: 2, low: 1 };
 export const RISK_PENALTY = { low: 0, medium: 0.5, high: 1 };
@@ -243,13 +285,17 @@ export function recommend(catalog, measure, { lang = 'en', applied = new Set(), 
       continue;
     }
     const params = defaultParams(r, measure);
+    const scope = r.defaultScope || (Array.isArray(r.scope) ? r.scope[0] : r.scope) || 'user';
+    // the scripts of a project-specific recipe carry the key of the project it would be applied to (see perProjectScripts)
+    const keyed = scope === 'project' && perProjectScripts(r);
+    const scriptKey = keyed ? (measure && measure.env && measure.env.projectDir ? projectKey(measure.env.projectDir) : '<project>') : null;
     recommended.push({
       id: r.id,
       category: r.category,
       impact: r.impact,
       effort: r.effort || 'low',
       risk: r.risk || 'low',
-      scope: r.defaultScope || (Array.isArray(r.scope) ? r.scope[0] : r.scope) || 'user',
+      scope,
       scopes: Array.isArray(r.scope) ? r.scope : [r.scope || 'user'],
       title: renderText(pick(r.title, lang), templateVars(measure), params, lang),
       why: renderText(pick(r.why, lang), templateVars(measure), params, lang),
@@ -262,7 +308,7 @@ export function recommend(catalog, measure, { lang = 'en', applied = new Set(), 
         if (p.secret) return { name: p.name, type: p.type || 'text', secret: true, label: pick(p.label, lang), options, value: '' };
         return { name: p.name, type: p.type || 'text', label: pick(p.label, lang), options, value: params[p.name] };
       }),
-      actionsSummary: (r.actions || []).filter((a) => actionApplies(a, measure)).map((a) => summarizeAction(a, lang)),
+      actionsSummary: (r.actions || []).filter((a) => actionApplies(a, measure)).map((a) => summarizeAction(a, lang, scriptKey)),
       kind: r.actions && r.actions.length ? 'recipe' : 'advice',
       source: r.source || null,
       conflicts: r.conflicts || [],
@@ -282,8 +328,8 @@ export function actionApplies(action, measure) {
   }
 }
 
-function humanPath(s) {
-  return String(s || '')
+function humanPath(s, scriptKey = null) {
+  return keyHookScripts(String(s || ''), scriptKey)
     .replace('{kaizenHome}', '~/.claude/kaizen')
     .replace('{configDir}', '~/.claude')
     .replace('{skillsDir}', '<skills dir>')
@@ -292,7 +338,7 @@ function humanPath(s) {
     .replace(/\{params\.([a-zA-Z0-9_]+)\}/g, '<$1>');
 }
 
-function summarizeAction(a, lang) {
+function summarizeAction(a, lang, scriptKey = null) {
   const ru = lang === 'ru';
   switch (a.type) {
     case 'settings.hook':
@@ -302,7 +348,7 @@ function summarizeAction(a, lang) {
     case 'settings.append':
       return ru ? `settings.json: дополнить ${a.path}` : `settings.json: extend ${a.path}`;
     case 'file':
-      return ru ? `файл ${humanPath(a.target)}` : `file ${humanPath(a.target)}`;
+      return ru ? `файл ${humanPath(a.target, scriptKey)}` : `file ${humanPath(a.target, scriptKey)}`;
     case 'skill':
       return ru ? `скилл /${humanPath(a.name)}` : `skill /${humanPath(a.name)}`;
     case 'agent':

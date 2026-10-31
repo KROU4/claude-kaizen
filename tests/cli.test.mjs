@@ -587,6 +587,19 @@ describe('kaizen end to end: measure, recommend, apply, verify, undo', () => {
     assert.equal(cli(home, ['undo', '--all']).status, 0);
     assert.deepEqual(fs.readdirSync(path.join(home.stateDir, 'hooks')), []);
   });
+
+  it('apply --recipe for a defaultScope-project recipe that was never recommended plans the project settings, not the user ones', () => {
+    const home = measured();
+    const proj = path.join(home.root, 'projScope');
+    fs.mkdirSync(proj);
+    const before = snapshotDir(home.root);
+    const r = cli(home, ['apply', '--recipe', 'hooks.verify-before-stop', '--project', proj, '--dry-run']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(r.stdout.includes(path.join(proj, '.claude', 'settings.json')), r.stdout);
+    assert.ok(!r.stdout.includes(path.join(home.configDir, 'settings.json')), r.stdout);
+    assert.ok(new RegExp(`verify-before-stop\\.${'[0-9a-f]'.repeat(10)}\\.mjs`).test(r.stdout), r.stdout);
+    assert.deepEqual(snapshotDir(home.root), before, 'a dry run writes nothing');
+  });
 });
 
 describe('kaizen verify', () => {

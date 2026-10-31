@@ -1246,18 +1246,30 @@ describe('loadChoices', () => {
     assert.equal(choices.selected[0].scope, 'user');
   });
 
-  it('uses --scope over the recommended scope, and "user" when the recipe is unknown', () => {
+  it('uses --scope over the recommended scope; a recipe nobody recommended gets no scope of its own', () => {
     seedState();
     const choices = apply.loadChoices({ _: ['apply'], flags: { recipe: 'permissions.deny-secrets,made.up', scope: 'project' } });
     assert.deepEqual(choices.selected.map((s) => s.scope), ['project', 'project']);
     const plain = apply.loadChoices({ _: ['apply'], flags: { recipe: 'made.up' } });
-    assert.equal(plain.selected[0].scope, 'user');
+    assert.ok(!('scope' in plain.selected[0]), 'no hard-coded "user": cmdApply takes defaultScope of the recipe');
     assert.deepEqual(plain.selected[0].params, {});
   });
 
-  it('works without recommendations.json', () => {
+  it('works without recommendations.json: the scope is left to the recipe', () => {
     const choices = apply.loadChoices({ _: ['apply'], flags: { recipe: 'settings.cleanup-period' } });
-    assert.deepEqual(choices.selected, [{ id: 'settings.cleanup-period', scope: 'user', params: {} }]);
+    assert.deepEqual(choices.selected, [{ id: 'settings.cleanup-period', params: {} }]);
+  });
+
+  it('--recipe for a recipe with defaultScope project, not in recommendations.json, is applied to the project (not the user settings)', async () => {
+    const proj = path.join(ctx.root, 'projScope');
+    fs.mkdirSync(proj, { recursive: true });
+    const userBefore = read(ctx.settingsFile);
+    const { manifest } = await runApply({ recipe: 'hooks.verify-before-stop', project: proj });
+    assert.equal(manifest.recipes[0].scope, 'project');
+    assert.ok(fs.existsSync(path.join(proj, '.claude', 'settings.json')));
+    assert.equal(read(ctx.settingsFile), userBefore, 'the user settings are untouched');
+    const user = await runApply({ recipe: 'hooks.verify-before-stop', project: proj, scope: 'user' });
+    assert.equal(user.manifest.recipes[0].scope, 'user', '--scope still wins');
   });
 
   it('validates a choices file like `choices --import` does', () => {
@@ -2736,6 +2748,56 @@ describe('claims: a batch that relies on what an earlier batch provides', () => 
       assert.ok(!fs.existsSync(localSettings()));
     });
 
+    it('a plugin enabled in the user AND the project settings is switched off in both places: user settings and settings.local.json, the repository file stays', () => {
+      installX();
+      writeJson(projSettings(), { enabledPlugins: { 'x@m': true } });
+      writeSettings({ ...readSettings(), enabledPlugins: { ...readSettings().enabledPlugins, 'x@m': true } });
+      const projBytes = read(projSettings());
+      const userBefore = readSettings();
+      const { entry } = disable(['x@m']);
+      assert.equal(readSettings().enabledPlugins['x@m'], false, 'other projects see it off too');
+      assert.deepEqual(readJson(localSettings()), { enabledPlugins: { 'x@m': false } }, 'this project: the later file overrides the repository');
+      assert.equal(read(projSettings()), projBytes);
+      assert.equal(xEnabled(), false);
+      assert.deepEqual(entry.changed.map((c) => [c.plugin, c.file || entry.file, c.previous]).sort(), [['x@m', ctx.settingsFile, true], ['x@m', localSettings(), null]].sort());
+      // undo puts both back
+      assert.equal(undoEntry(entry).result, 'ok');
+      assert.deepEqual(readSettings(), userBefore);
+      assert.ok(!fs.existsSync(localSettings()), 'the file apply created is gone');
+      assert.equal(read(projSettings()), projBytes);
+      assert.equal(xEnabled(), true);
+    });
+
+    it('a plugin enabled in the user and the local settings is switched off in both; an unrelated key of the local file is kept', () => {
+      installX('local');
+      writeJson(localSettings(), { enabledPlugins: { 'x@m': true }, model: 'sonnet' });
+      writeSettings({ ...readSettings(), enabledPlugins: { ...readSettings().enabledPlugins, 'x@m': true } });
+      const { entry } = disable(['x@m']);
+      assert.equal(readSettings().enabledPlugins['x@m'], false);
+      assert.deepEqual(readJson(localSettings()), { enabledPlugins: { 'x@m': false }, model: 'sonnet' });
+      assert.equal(entry.changed.length, 2);
+      assert.equal(undoEntry(entry).result, 'ok');
+      assert.equal(readSettings().enabledPlugins['x@m'], true);
+      assert.deepEqual(readJson(localSettings()), { enabledPlugins: { 'x@m': true }, model: 'sonnet' });
+    });
+
+    it('through apply, dry run and real run agree and list both files; undo of the batch restores both', async () => {
+      installX();
+      writeJson(projSettings(), { enabledPlugins: { 'x@m': true } });
+      writeSettings({ ...readSettings(), enabledPlugins: { ...readSettings().enabledPlugins, 'x@m': true } });
+      const userBefore = readSettings();
+      addRecipes(customRecipe('custom.off', [{ type: 'plugins.disable', plugins: ['x@m'] }]));
+      const dry = await applyCustom(1, 'custom.off', { 'dry-run': true, project: proj() });
+      assert.ok(dry.stdout.includes(`${ctx.settingsFile}: disable plugins x@m`) && dry.stdout.includes(`${localSettings()}: disable plugins x@m`), dry.stdout);
+      assert.deepEqual(readSettings(), userBefore);
+      await applyCustom(1, 'custom.off', { project: proj() });
+      assert.equal(readSettings().enabledPlugins['x@m'], false);
+      assert.equal(readJson(localSettings()).enabledPlugins['x@m'], false);
+      await runUndo({}, [batch(1)]);
+      assert.deepEqual(readSettings(), userBefore);
+      assert.ok(!fs.existsSync(localSettings()));
+    });
+
     it('two batches that switch the same plugin off: undoing the first leaves it off, the second restores it', async () => {
       addRecipes(
         customRecipe('custom.off1', [{ type: 'plugins.disable', plugins: ['idle@fixture-market', 'demo@fixture-market'] }]),
@@ -2848,17 +2910,108 @@ describe('hook scripts of a project-scope recipe belong to that project', () => 
     assert.match(read(scriptOf(hookCommand(projB(), 'Stop'))), /MODE_RAW = 'remind'/);
   });
 
-  it('every project-scope recipe whose templates bake parameters in gets a project key; user scope and parameter-free scripts keep the shared name', async () => {
+  it('only a recipe meant for one project (defaultScope project) with parameters baked into its scripts gets a project key', async () => {
     const catalog = loadCatalog();
+    const keyed = [];
     for (const r of catalog.recipes) {
       const bakes = (r.actions || []).some((a) => a.type === 'file' && a.template && /\{\{[a-zA-Z0-9_]+\}\}/.test(read(path.join(apply.__test.TEMPLATES, a.template))));
-      assert.equal(apply.hookScriptKey(r, 'project', projA()) !== null, bakes, r.id);
+      const expected = bakes && r.defaultScope === 'project';
+      assert.equal(apply.hookScriptKey(r, 'project', projA()) !== null, expected, r.id);
       assert.equal(apply.hookScriptKey(r, 'user', projA()), null, r.id);
+      if (expected) keyed.push(r.id);
     }
-    assert.notEqual(apply.hookScriptKey(catalog.recipes.find((r) => r.id === 'hooks.guard-destructive'), 'project', projA()), null);
-    assert.equal(apply.hookScriptKey(catalog.recipes.find((r) => r.id === 'hooks.long-command-nudge'), 'project', projA()), null);
+    assert.deepEqual(keyed.sort(), ['hooks.format-on-edit', 'hooks.verify-before-stop']);
+    for (const id of ['hooks.guard-destructive', 'hooks.protect-secrets', 'hooks.session-context', 'hooks.precompact-handoff', 'hooks.long-command-nudge']) {
+      assert.equal(apply.hookScriptKey(catalog.recipes.find((r) => r.id === id), 'project', projA()), null, id);
+    }
     await at(1, { recipe: 'hooks.format-on-edit', scope: 'user' });
     assert.deepEqual(hookFiles(), ['format-on-edit.mjs']);
+  });
+
+  // Claude Code runs the identical command found in several settings files once, two different commands twice.
+  const eventCommands = (settings, event) => (settings.hooks[event] || []).flatMap((g) => g.hooks.map((h) => h.command));
+
+  it('session-context at user scope and precompact-handoff at project scope: the same SessionStart command in both files, a script with no unfilled placeholders', async () => {
+    await at(1, { recipe: 'hooks.session-context', scope: 'user' });
+    await at(2, { recipe: 'hooks.precompact-handoff', scope: 'project', project: projA() });
+    const user = eventCommands(readSettings(), 'SessionStart');
+    const proj = eventCommands(readJson(path.join(projA(), '.claude', 'settings.json')), 'SessionStart');
+    assert.equal(user.length, 1);
+    assert.deepEqual(proj, user, 'identical, so Claude Code runs it once');
+    assert.deepEqual(hookFiles(), ['precompact-handoff.mjs', 'session-context.mjs']);
+    assert.ok(!/\{\{[a-zA-Z0-9_]+\}\}/.test(read(scriptOf(user[0]))), 'session-context.mjs is the one rendered from its own template');
+  });
+
+  it('guard-destructive and protect-secrets at user and at project scope keep one command (no second copy of the hook)', async () => {
+    await at(1, { recipe: 'hooks.guard-destructive,hooks.protect-secrets', scope: 'user' });
+    await at(2, { recipe: 'hooks.guard-destructive,hooks.protect-secrets', scope: 'project', project: projA() });
+    const user = readSettings();
+    const proj = readJson(path.join(projA(), '.claude', 'settings.json'));
+    assert.deepEqual(eventCommands(proj, 'PreToolUse'), eventCommands(user, 'PreToolUse'));
+    assert.deepEqual(hookFiles(), ['guard-destructive.mjs', 'protect-secrets.mjs']);
+    // undoing the project batch leaves the user's scripts in place, undoing the user batch then removes them
+    await runUndo({}, [batch(2)]);
+    assert.deepEqual(hookFiles(), ['guard-destructive.mjs', 'protect-secrets.mjs']);
+    await runUndo({}, [batch(1)]);
+    assert.deepEqual(hookFiles(), []);
+  });
+
+  describe('upgrade from 0.1.4: a project hook that still uses the shared script', () => {
+    /** Turn the batch an apply just wrote into what 0.1.4 wrote: the shared script name in the hook, the file and the journal. */
+    function downgradeBatch(id, proj) {
+      const key = apply.projectKey(proj);
+      const unkeyed = (p) => p.replace(`.${key}.mjs`, '.mjs');
+      const settingsFile = path.join(proj, '.claude', 'settings.json');
+      writeText(settingsFile, read(settingsFile).split(`.${key}.mjs`).join('.mjs'));
+      const manifestFile = path.join(appliedDir(), id, 'manifest.json');
+      const manifest = readJson(manifestFile);
+      for (const r of manifest.recipes) {
+        for (const e of r.actions) {
+          if (e.type === 'file') {
+            const legacy = unkeyed(e.file);
+            fs.renameSync(e.file, legacy);
+            e.file = legacy;
+          }
+          if (e.type === 'settings.hook') e.identity = unkeyed(e.identity);
+        }
+      }
+      writeJson(manifestFile, manifest);
+    }
+    const hookCommands = (proj) => eventCommands(readJson(path.join(proj, '.claude', 'settings.json')), 'PostToolUse');
+
+    it('re-applying format-on-edit says which old batch to undo; undoing it leaves exactly the new hook', async () => {
+      await at(1, { recipe: 'hooks.format-on-edit', scope: 'project', project: projA(), param: ['hooks.format-on-edit.formatter=ruff'] });
+      downgradeBatch(batch(1), projA());
+      assert.equal(hookCommands(projA()).length, 1);
+      assert.deepEqual(hookFiles(), ['format-on-edit.mjs']);
+      const dry = await at(2, { recipe: 'hooks.format-on-edit', scope: 'project', project: projA(), param: ['hooks.format-on-edit.formatter=prettier'], 'dry-run': true });
+      assert.match(dry.stdout, new RegExp(`earlier version.*batch ${batch(1)}.*runs twice.*kaizen undo ${batch(1)}`));
+      const real = await at(2, { recipe: 'hooks.format-on-edit', scope: 'project', project: projA(), param: ['hooks.format-on-edit.formatter=prettier'] });
+      assert.match(real.stdout, new RegExp(`kaizen undo ${batch(1)}`));
+      assert.equal(hookCommands(projA()).length, 2, 'the old hook is not removed behind the journal');
+      await runUndo({}, [batch(1)]);
+      const left = hookCommands(projA());
+      assert.equal(left.length, 1);
+      assert.ok(scriptOf(left[0]).endsWith(`format-on-edit.${apply.projectKey(projA())}.mjs`));
+      assert.deepEqual(hookFiles(), [`format-on-edit.${apply.projectKey(projA())}.mjs`]);
+      assert.match(read(path.join(hooksDir(), hookFiles()[0])), /const FORMATTER_RAW = 'prettier';/);
+    });
+
+    it('the Russian run says it in Russian', async () => {
+      await at(1, { recipe: 'hooks.format-on-edit', scope: 'project', project: projA() });
+      downgradeBatch(batch(1), projA());
+      const out = await withFrozenDate('2026-10-30T14:00:02.000Z', () =>
+        captureOutput(() => apply.cmdApply({ _: ['apply'], flags: { recipe: 'hooks.format-on-edit', scope: 'project', project: projA() } }, { loadMeasure: () => fixtureMeasure, pickLang: () => 'ru' })),
+      );
+      assert.match(out.stdout, new RegExp(`прежней версии.*kaizen undo ${batch(1)}`));
+    });
+
+    it('no note when there is no old hook (a fresh project, or a second batch of the new kind)', async () => {
+      const first = await at(1, { recipe: 'hooks.format-on-edit', scope: 'project', project: projA() });
+      assert.ok(!/earlier version/.test(first.stdout), first.stdout);
+      const again = await at(2, { recipe: 'hooks.format-on-edit', scope: 'project', project: projA(), param: ['hooks.format-on-edit.formatter=black'] });
+      assert.ok(!/earlier version/.test(again.stdout), again.stdout);
+    });
   });
 
   it('the key is stable for a directory (also with a trailing slash) and differs between directories', () => {
@@ -2953,5 +3106,33 @@ describe('apply --dry-run simulates the whole batch', () => {
     const out = await captureOutput(() => apply.cmdApply({ _: ['apply'], flags: { ...flags, 'dry-run': true } }, { loadMeasure: () => fixtureMeasure, pickLang: () => 'ru' }));
     assert.match(out.stdout, /общий файл рецепта hooks\.session-context, оставлен как есть/);
     assert.match(out.stdout, /хук SessionStart уже установлен рецептом hooks\.session-context/);
+  });
+});
+
+describe('undo of a hook another batch adopted', () => {
+  const at = (n, flags) => withFrozenDate(`2026-10-30T16:00:0${n}.000Z`, () => runApply(flags));
+  const batch = (n) => `2026-10-30T16-00-0${n}`;
+  const preCompact = () => (readSettings().hooks.PreCompact || []).flatMap((g) => g.hooks.map((h) => h.command));
+
+  it('says the hook is kept (and by whom), not that it was removed, and the hook is still in settings.json', async () => {
+    await at(1, { recipe: 'hooks.precompact-handoff' });
+    await at(2, { recipe: 'hooks.precompact-handoff', param: ['hooks.precompact-handoff.maxPrompts=9'] });
+    const dry = await runUndo({ 'dry-run': true }, [batch(1)]);
+    const real = await runUndo({}, [batch(1)]);
+    assert.ok(!/remove (PreCompact|SessionStart) hook/.test(real.stdout), real.stdout);
+    assert.match(real.stdout, /settings\.hook: shared: .*settings\.json \[PreCompact\] still in use by hooks\.precompact-handoff/);
+    assert.equal(normalizeUndoOutput(dry.stdout), normalizeUndoOutput(real.stdout));
+    assert.equal(preCompact().length, 1, 'the newer batch still has its hook');
+    // the last batch really removes it, and says so
+    const last = await runUndo({}, [batch(2)]);
+    assert.match(last.stdout, /remove PreCompact hook/);
+    assert.deepEqual(preCompact(), []);
+  });
+
+  it('a hook nobody else needs is still reported as removed', async () => {
+    await at(1, { recipe: 'hooks.precompact-handoff' });
+    const out = await runUndo({}, [batch(1)]);
+    assert.match(out.stdout, /remove PreCompact hook/);
+    assert.ok(!/shared:/.test(out.stdout), out.stdout);
   });
 });
