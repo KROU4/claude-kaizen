@@ -21,3 +21,4 @@ Thumbs.db
 # test output
 coverage/
 evals/results/
+rtk/
