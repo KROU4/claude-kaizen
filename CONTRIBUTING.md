@@ -5,7 +5,7 @@ Thanks for helping make Claude Code setups better for everyone. Kaizen is small 
 ## Ground rules
 
 - **Zero dependencies.** No `npm install` for users, ever. Dev tooling that stays out of `dependencies` is fine.
-- **Local only.** Nothing may send data anywhere unless the user explicitly configures it (the Telegram notification channel is the only example today, and it is off by default).
+- **Local only.** Nothing may send data anywhere unless the user explicitly configures it (the Telegram notification channel and the claude.ai artifact console are the only examples today; both are opt-in and documented in `SECURITY.md`).
 - **Reversible.** Every write goes through `scripts/lib/apply.mjs` and gets a journal entry that `undo` can replay. A new action type needs a handler *and* an undo branch *and* a test.
 - **Evidence first.** A recipe is recommended only when a metric says so. If you cannot name the metric, it is advice, not a recipe.
 - **Bilingual.** `title`, `why`, `evidence` and parameter labels need `en` and `ru`. UI strings live in `locales/*.json`; `selfcheck` fails on missing keys.

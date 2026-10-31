@@ -33,13 +33,13 @@ measure  →  recommend  →  you choose  →  apply  →  verify  →  (undo)  
 | Stage | What happens | Where |
 |---|---|---|
 | **Measure** | Streams every transcript in `~/.claude/projects` (1 GB ≈ 10 s), reads `/insights` facets when present, inventories your settings, hooks, skills, agents, plugins and MCP servers. Produces `measure.json` and a 200-line digest `measure.md`. | `node scripts/kaizen.mjs measure` |
-| **Recommend** | Evaluates 30 evidence-based recipes against the measurement. Each recommendation carries the exact numbers that triggered it. | `… recommend` |
-| **Choose** | An interactive console: in the Claude desktop app it is a live artifact Claude reads back; in a terminal it is a local web page; over SSH it falls back to multiple-choice questions. | `… console` |
-| **Apply** | Writes hooks into `settings.json`, installs hook scripts, adds permission rules, creates skills and subagents, inserts marked blocks into `CLAUDE.md`, removes dead MCP servers — every write journaled with a backup. | `… apply` |
-| **Verify** | Self-tests every installed hook and the status line, parses every touched file, checks CLAUDE.md markers; the `kaizen-verifier` agent adds skill/agent validation. | `… verify` |
+| **Recommend** | Evaluates 31 evidence-based recipes in 12 categories against the measurement. Each recommendation carries the exact numbers that triggered it. | `… recommend` (`--add FILE` for extra recipes) |
+| **Choose** | An interactive console: in the Claude desktop app it is a live artifact Claude reads back; in a terminal it is a local web page; over SSH it falls back to multiple-choice questions. | `… console`, `… choices --import FILE` |
+| **Apply** | Writes hooks into `settings.json`, installs hook scripts, adds permission rules, creates skills and subagents, inserts marked blocks into `CLAUDE.md`, removes dead MCP servers — every write journaled with a backup. | `… apply` (`--param`, `--param-file recipe.name=path`, `--add FILE`) |
+| **Verify** | Self-tests every installed hook and the status line, parses the settings files it writes (`--project` adds the project's `.claude/settings*.json`), checks CLAUDE.md markers. `~/.claude.json` and created skills/agents are checked by the `kaizen-verifier` agent. | `… verify` |
 | **Undo** | Reverts a batch exactly, leaving anything you edited afterwards alone. | `… undo` |
 
-Everything runs on your machine. The only thing a model ever sees is the digest, and the digest is secret-scrubbed.
+Everything runs on your machine; the one exception is the optional artifact console in the desktop app (see [Privacy](#privacy)). The only thing a model ever sees is the digest (plus the short scrubbed prompt snippets stored beside it), and none of the agents reads your transcripts directly.
 
 ## Install
 
@@ -67,8 +67,10 @@ git clone https://github.com/KROU4/claude-kaizen && cd claude-kaizen
 node scripts/kaizen.mjs measure        # digest to stdout, files in ~/.claude/kaizen/
 node scripts/kaizen.mjs recommend      # what the data says you should change
 node scripts/kaizen.mjs console        # pick in the browser → choices.json
+node scripts/kaizen.mjs choices --import my-choices.json   # validate a choices file you wrote or got back from an artifact
 node scripts/kaizen.mjs apply          # journaled, reversible
-node scripts/kaizen.mjs verify         # self-test what was installed
+node scripts/kaizen.mjs apply --recipe claude-md.corrections --param-file claude-md.corrections.rules=rules.txt   # multi-line value from a file
+node scripts/kaizen.mjs verify         # self-test what was installed (--project DIR for project scope)
 node scripts/kaizen.mjs undo --last
 ```
 
@@ -82,7 +84,7 @@ Requirements: Node.js 18+ and Claude Code with some history (transcripts live fo
   <img src="docs/assets/console.jpg" alt="Kaizen console: recommendations grouped by category with evidence, impact and parameters" width="90%">
 </p>
 
-Recommendations are grouped by category with their evidence, impact and risk. Tick what you want, adjust parameters (which formatter, deny or ask, which MCP servers), add a note for Claude ("tests are `make check`"), press **Apply**. In the Claude desktop app the page is a published artifact backed by its database, so Claude reads your choices without you pasting anything. In a plain terminal it is a page on `127.0.0.1` that writes `choices.json` and exits.
+Recommendations are grouped by category with their evidence, impact and risk. Tick what you want, adjust parameters (which formatter, deny or ask, which MCP servers), add a note for Claude ("tests are `make check`"), press **Apply**. In the Claude desktop app the page is a published private artifact backed by its database, so Claude reads your choices (after you reply "done" in chat) without you pasting anything, shows you the selection and asks for a confirmation before applying. In a plain terminal it is a page on `127.0.0.1` that writes `choices.json` and exits.
 
 ## Recipes
 
@@ -105,7 +107,8 @@ Full list with definitions: [`docs/recipes.md#metrics-recipes-can-test`](docs/re
 
 ## Privacy
 
-- Nothing leaves your machine. There is no telemetry, no network call except the optional Telegram notification hook you configure yourself.
+- Nothing leaves your machine, with two opt-in exceptions. There is no telemetry; the only network calls are the optional Telegram notification hook you configure yourself and the artifact console below.
+- **Artifact console (desktop app only).** The page is published as a private claude.ai artifact: the recommendations are part of the page, and your ticks, parameters and note are stored in the artifact's database until Claude reads them and deletes the document. Do not share the link and do not type secrets there (Claude asks for a Telegram bot token in chat instead). The local browser console and the terminal flow upload nothing.
 - The digest keeps counts and short, secret-scrubbed snippets of your own prompts (needed to spot repeated instructions). Tool output and Claude's replies are never retained.
 - State lives in `~/.claude/kaizen/` (override with `KAIZEN_STATE_DIR`). Delete the folder to forget everything.
 - Every change is journaled under `~/.claude/kaizen/applied/<batch>/` with backups of the files it touched.

@@ -1,7 +1,7 @@
 ---
 name: kaizen-analyst
 description: Reads the Kaizen measurement digest and drafts the qualitative part of the recommendations — a short workflow profile, concrete CLAUDE.md rules distilled from the user's repeated corrections, and skill candidates from repeated prompts. Writes extra-recipes.json for the Kaizen CLI. Use during /kaizen:start when there are 20+ sessions.
-tools: Read, Write, Bash, Grep, Glob
+tools: Read, Write, Bash
 disallowedTools: Edit, MultiEdit, WebFetch, WebSearch
 model: inherit
 maxTurns: 20
@@ -28,7 +28,7 @@ Procedure:
   "recipes": []
 }
 ```
-`recipes` may contain additional custom recipes only when a pattern is strong and none of the catalog covers it; each must have `id` starting with `custom.`, bilingual `title`/`why`/`evidence` (`en` and `ru`), `impact`, `category`, `when: true`, and actions of type `claude-md.block` (with `content`) or `skill` (with `name` and `content`). Prefer `paramDefaults` over new recipes.
+`recipes` may contain additional custom recipes only when a pattern is strong and none of the catalog covers it; each must have `id` starting with `custom.`, bilingual `title`/`why`/`evidence` (`en` and `ru`), `impact`, `category`, `when: true`, and actions of type `claude-md.block` (with `content`) or `skill` (with `name` and `content`). Prefer `paramDefaults` over new recipes. The caller passes this one file with `--add` to both `recommend` and `apply` (Kaizen remembers the path, so the custom recipes can be ticked in the console and applied later); a custom recipe outside this file is unknown to `apply` and would be skipped, so never reference one from anywhere else.
 6. Reply with the profile text and a one-line list of what you drafted (rule count, skill names, custom recipe ids). Nothing else.
 
-Rules: do not read transcripts in `~/.claude/projects` directly — the digest is the boundary; do not modify any file other than the output; write rules in the user's language when it is Russian, otherwise in English.
+Rules: do not read transcripts in `~/.claude/projects` directly (no grep, no Read) — the digest and the scrubbed samples in `measure.json` are the boundary; do not modify any file other than the output; write rules in the user's language when it is Russian, otherwise in English.

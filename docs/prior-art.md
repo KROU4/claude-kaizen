@@ -5,7 +5,7 @@ Research notes gathered on 2026-10-31 while designing Kaizen. Star counts are fr
 
 Research date: 2026-10-31. Stars and "pushed" dates come from the GitHub API on that day (`gh search repos`, `gh api repos/...`). READMEs of ~60 repos were analysed; official behaviour was checked against code.claude.com docs (hooks, permissions, settings, skills, plugins), the `anthropics/claude-plugins-official` tree, and the local `~/.claude/usage-data` layout written by the built-in `/insights`.
 
-Our kit: (1) read local data (`~/.claude/projects/*.jsonl`, `history.jsonl`, `usage-data/facets`, settings, existing hooks/skills/agents), (2) short interactive dialog, (3) apply reversible config changes (hooks, skills, subagents, CLAUDE.md rules, permission allowlists, statusline, MCP cleanup) with markdown/JSON + Node only.
+Our kit: (1) read local data (`~/.claude/projects/*.jsonl`, `usage-data/facets`, settings, existing hooks/skills/agents), (2) short interactive dialog, (3) apply reversible config changes (hooks, skills, subagents, CLAUDE.md rules, permission allowlists, statusline, MCP cleanup) with markdown/JSON + Node only.
 
 ## 1. Transcript and usage analytics
 

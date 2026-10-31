@@ -275,6 +275,7 @@ const EN = {
   scope_user: 'user (~/.claude)', scope_project: 'this project (.claude)',
   selected: '{n} selected', empty: 'No recommendations to show.',
   footer: 'Local only: this page runs on your machine; nothing is uploaded.',
+  footer_artifact: 'This page is a private claude.ai artifact: your choices and parameters are stored in its database until Claude reads them. Do not enter secrets here.',
   copy_json: 'Copy choices as JSON', copied: 'Copied. Paste it into Claude Code.',
   offline_hint: "The page could not reach Claude Code's storage. Copy the JSON below and paste it into the chat.",
   cat_permissions: 'Permissions', cat_hooks: 'Hooks', cat_skills: 'Skills', cat_agents: 'Subagents',
@@ -287,7 +288,8 @@ const EN = {
 };
 const RU = { /* fallbacks for the optional keys, used only when lang is ru */
   stat_sessions: 'Сессии', stat_days: 'Дни', stat_prompts: 'Запросы', stat_recommendations: 'Рекомендации',
-  source: 'Источник', discuss: 'Отметьте, чтобы обсудить это с Claude'
+  source: 'Источник', discuss: 'Отметьте, чтобы обсудить это с Claude',
+  footer_artifact: 'Страница — приватный артефакт claude.ai: ваш выбор и параметры хранятся в его базе данных, пока Claude их не прочитает. Не вводите здесь секреты.'
 };
 
 /* demo dataset: used when the file is opened without data */
@@ -508,7 +510,7 @@ const cats = [...new Set(cards.map((c) => c.cat))].sort((a, b) => rankOf(a) - ra
 
 $('h1').textContent = t('title');
 $('sub').replaceChildren(...rich(t('subtitle', { sessions: num(stats.sessions), days: num(stats.days) })));
-$('ft').textContent = t('footer');
+$('ft').textContent = t(mode === 'artifact' ? 'footer_artifact' : 'footer');
 $('demo').hidden = !demo;
 [['sessions', stats.sessions], ['days', stats.days], ['prompts', stats.prompts], ['recommendations', stats.recommendations == null ? recs.length : stats.recommendations]]
   .filter(([, v]) => v != null)

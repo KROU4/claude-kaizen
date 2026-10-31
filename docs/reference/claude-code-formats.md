@@ -56,7 +56,7 @@ description: What it does and when to use it (the model matches on this)
 argument-hint: "[what to verify]"
 disable-model-invocation: false   # true = only the user can invoke
 user-invocable: true              # false = hidden from the / menu
-allowed-tools: Bash(git status *) Read   # pre-approved for the invoking turn
+allowed-tools: Bash(git status *) Read   # pre-approved for the invoking turn; space-separated; `*` may sit mid-pattern; never pre-approve a whole interpreter (`Bash(node *)`) - Kaizen's skills allow only `Bash(node *kaizen.mjs *)`, the hook self-tests and `claude plugin validate`
 context: fork                     # optional: run in a subagent
 agent: general-purpose            # subagent type when forked
 model: sonnet                     # optional
