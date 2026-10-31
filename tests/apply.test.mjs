@@ -1354,3 +1354,265 @@ describe('the recipe catalog against the apply engine', () => {
     assert.deepEqual(failures, []);
   });
 });
+
+// ------------------------------------------------------------------ code-review regressions
+
+describe('list parameters keep their items (settings.hook.remove, mcp.disable, plugins.disable)', () => {
+  it('settings.hook.remove removes every selected command, also the ones that start with a bare interpreter', () => {
+    const commands = ['node "C:/x/hooks/a.mjs"', 'bash ~/.claude/hooks/b.sh', 'python3 /opt/hooks/c.py', 'npx eslint --fix', 'uv run lint', 'pwsh -File d.ps1'];
+    writeSettings({ hooks: { PostToolUse: commands.map((command) => ({ hooks: [{ type: 'command', command }] })) } });
+    const { entry } = run('settings.hook.remove', { type: 'settings.hook.remove', commands: '{params.hooks}' }, { params: { hooks: commands } });
+    assert.equal(entry.removed.length, commands.length);
+    assert.deepEqual(readSettings().hooks ?? {}, {});
+  });
+
+  it('a literal string is split on newlines only, so commas inside a command survive', () => {
+    writeSettings({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'echo a, b' }] }, { hooks: [{ type: 'command', command: 'bash c.sh' }] }] } });
+    const { entry } = run('settings.hook.remove', { type: 'settings.hook.remove', commands: 'echo a, b\nbash c.sh' });
+    assert.equal(entry.removed.length, 2);
+  });
+
+  it('mcp.disable takes a parameter array as it is', () => {
+    const { entry } = run('mcp.disable', { type: 'mcp.disable', servers: '{params.servers}' }, { params: { servers: ['dead-srv', 'used-srv'] } });
+    assert.deepEqual(entry.removed.map((r) => r.name), ['dead-srv', 'used-srv']);
+  });
+});
+
+describe('mcp.disable: servers outside the user scope', () => {
+  const action = (servers) => ({ type: 'mcp.disable', servers });
+  const proj = () => path.join(ctx.root, 'proj');
+  const seedLocal = () => {
+    const cfg = readJson(ctx.claudeJson);
+    cfg.projects = { [toPosix(proj())]: { mcpServers: { 'local-srv': { type: 'stdio', command: 'node', args: ['local.mjs'] } } } };
+    writeJson(ctx.claudeJson, cfg);
+    return cfg;
+  };
+
+  it('removes a local-scope server of the project, journals it and puts it back on undo', () => {
+    const original = seedLocal();
+    const { entry, io } = run('mcp.disable', action(['dead-srv', 'local-srv']), { projectDir: proj() });
+    assert.deepEqual(entry.removed.map((r) => [r.name, r.where || 'user']), [['dead-srv', 'user'], ['local-srv', 'local']]);
+    const after = readJson(ctx.claudeJson);
+    assert.deepEqual(after.projects[toPosix(proj())].mcpServers, {});
+    assert.ok(!('dead-srv' in after.mcpServers));
+    assert.deepEqual(io.notes, []);
+    assert.equal(undoEntry(entry).result, 'ok');
+    assert.deepEqual(readJson(ctx.claudeJson), original);
+  });
+
+  it('says which selected servers it did not remove instead of dropping them silently', () => {
+    const { entry, io } = run('mcp.disable', action(['dead-srv', 'ghost']));
+    assert.deepEqual(entry.removed.map((r) => r.name), ['dead-srv']);
+    assert.ok(io.notes.some((n) => /not removed.*ghost/.test(n)), io.notes.join('|'));
+  });
+
+  it('names the missing servers in the skip reason', () => {
+    const { entry } = run('mcp.disable', action(['ghost', 'phantom']));
+    assert.equal(entry.skipped, true);
+    assert.match(entry.reason, /servers not found.*ghost, phantom/);
+  });
+
+  it('leaves a server of the shared .mcp.json alone and tells the user', () => {
+    writeJson(path.join(proj(), '.mcp.json'), { mcpServers: { 'team-srv': { command: 'node' } } });
+    const before = read(path.join(proj(), '.mcp.json'));
+    const { entry, io } = run('mcp.disable', action(['dead-srv', 'team-srv']), { projectDir: proj() });
+    assert.deepEqual(entry.removed.map((r) => r.name), ['dead-srv']);
+    assert.ok(io.notes.some((n) => /team-srv/.test(n) && /\.mcp\.json/.test(n)), io.notes.join('|'));
+    assert.equal(read(path.join(proj(), '.mcp.json')), before);
+  });
+
+  it('cmdApply prints those notes under the recipe', async () => {
+    seedState();
+    const { stdout } = await runApply({ recipe: 'context.mcp-unused', param: 'context.mcp-unused.servers=dead-srv,ghost' });
+    assert.match(stdout, /· context\.mcp-unused: not removed .*ghost/);
+  });
+});
+
+describe('claude-md.block undo respects edits made after apply', () => {
+  const action = (over = {}) => ({ type: 'claude-md.block', id: 'language', content: 'Answer in Russian.', ...over });
+  const claudeMd = () => path.join(ctx.configDir, 'CLAUDE.md');
+
+  it('journals a hash of the block and removes an untouched block', () => {
+    writeText(claudeMd(), 'Top.\n');
+    const { entry } = run('claude-md.block', action());
+    assert.match(entry.hash, /^[0-9a-f]{16}$/);
+    assert.equal(undoEntry(entry).result, 'ok');
+    assert.equal(read(claudeMd()), 'Top.\n');
+  });
+
+  it('keeps the block (and says so) when the user edited it', () => {
+    writeText(claudeMd(), 'Top.\n');
+    const { entry } = run('claude-md.block', action());
+    const edited = read(claudeMd()).replace('Answer in Russian.', 'Answer in Russian.\nUse formal address.');
+    writeText(claudeMd(), edited);
+    const { result } = undoEntry(entry);
+    assert.match(result, /^kept: .*CLAUDE\.md block "language" modified since apply/);
+    assert.equal(read(claudeMd()), edited);
+  });
+
+  it('is not fooled by CRLF line endings the editor wrote', () => {
+    writeText(claudeMd(), 'Top.\n');
+    const { entry } = run('claude-md.block', action());
+    writeText(claudeMd(), read(claudeMd()).replace(/\n/g, '\r\n'));
+    assert.equal(undoEntry(entry).result, 'ok');
+  });
+
+  it('still undoes journals written before the hash existed', () => {
+    writeText(claudeMd(), 'Top.\n');
+    const { entry } = run('claude-md.block', action());
+    delete entry.hash;
+    writeText(claudeMd(), read(claudeMd()).replace('Answer in Russian.', 'Edited.'));
+    assert.equal(undoEntry(entry).result, 'ok');
+  });
+});
+
+describe('backups of a batch', () => {
+  it('keep the file as it was before the batch when a second recipe touches the same file', async () => {
+    seedState();
+    const original = read(ctx.settingsFile);
+    await runApply({ recipe: 'settings.cleanup-period,permissions.deny-secrets' });
+    const [id] = manifestIds();
+    const dir = path.join(appliedDir(), id, 'backups');
+    const copies = fs.readdirSync(dir).filter((f) => /settings\.json$/.test(f));
+    assert.equal(copies.length, 1);
+    assert.equal(read(path.join(dir, copies[0])), original);
+  });
+});
+
+describe('cmdApply: scope', () => {
+  for (const scope of ['local', 'projekt', 'Project', true]) {
+    it(`refuses scope ${JSON.stringify(scope)} before writing anything`, async () => {
+      seedState();
+      const before = snapshotDir(ctx.root);
+      await assert.rejects(runApply({ recipe: 'settings.cleanup-period', scope }), /bad scope/);
+      assert.deepEqual(snapshotDir(ctx.root), before);
+    });
+  }
+
+  it('refuses a scope from choices.json too', async () => {
+    seedState();
+    writeJson(path.join(ctx.stateDir, 'choices.json'), { version: 1, selected: [{ id: 'settings.cleanup-period', scope: 'local', params: {} }], discuss: [], notes: '' });
+    await assert.rejects(runApply({}), /bad scope "local" for settings\.cleanup-period/);
+    assert.ok(!fs.existsSync(appliedDir()));
+  });
+
+  it('warns when the scope is not one the recipe lists, and still applies', async () => {
+    seedState();
+    const proj = path.join(ctx.root, 'proj');
+    fs.mkdirSync(proj, { recursive: true });
+    const { stdout } = await runApply({ recipe: 'settings.cleanup-period', scope: 'project', project: proj });
+    assert.match(stdout, /! settings\.cleanup-period: scope project is not one of the scopes this recipe lists/);
+  });
+});
+
+describe('cmdApply: recipes that wrote nothing are not recorded as applied', () => {
+  it('keeps them out of last-apply.json (the manifest still shows what was skipped)', async () => {
+    seedState();
+    await runApply({ recipe: 'settings.cleanup-period' });
+    await runApply({ recipe: 'settings.cleanup-period,permissions.deny-secrets' });
+    const last = readJson(path.join(ctx.stateDir, 'last-apply.json'));
+    assert.deepEqual(last.recipes, ['permissions.deny-secrets']);
+    assert.deepEqual(readManifest(last.id).recipes.map((r) => r.id), ['settings.cleanup-period', 'permissions.deny-secrets']);
+  });
+});
+
+describe('cmdApply: --param-file', () => {
+  const customFile = () => path.join(ctx.root, 'extra.json');
+  const custom = () => ({
+    id: 'custom.house-rules',
+    category: 'claude-md',
+    impact: 'medium',
+    title: { en: 'House rules', ru: 'Правила' },
+    why: { en: 'w', ru: 'п' },
+    evidence: { en: 'e', ru: 'д' },
+    when: true,
+    params: [{ name: 'rules', type: 'text', default: '', label: { en: 'Rules', ru: 'Правила' } }],
+    actions: [{ type: 'claude-md.block', id: 'house-rules', content: '{params.rules}' }],
+  });
+
+  it('uses the file content as the value, multi-line and with commas, and strips a BOM', async () => {
+    seedState();
+    writeJson(customFile(), { recipes: [custom()] });
+    const rules = path.join(ctx.root, 'rules.md');
+    fs.writeFileSync(rules, '\uFEFFRule one, with a comma.\n\nRule two: "quoted" \\ backslash.\n', 'utf8');
+    await runApply({ recipe: 'custom.house-rules', add: customFile(), 'param-file': `custom.house-rules.rules=${rules}` });
+    const text = read(path.join(ctx.configDir, 'CLAUDE.md'));
+    assert.ok(text.includes('Rule one, with a comma.\n\nRule two: "quoted" \\ backslash.'), text);
+    assert.ok(!text.includes('\uFEFF'));
+  });
+
+  it('rejects an unreadable file, a recipe that is not selected and a malformed spec', async () => {
+    seedState();
+    writeJson(customFile(), { recipes: [custom()] });
+    const missing = path.join(ctx.root, 'missing.md');
+    await assert.rejects(runApply({ recipe: 'custom.house-rules', add: customFile(), 'param-file': `custom.house-rules.rules=${missing}` }), /--param-file custom\.house-rules\.rules: cannot read/);
+    const rules = path.join(ctx.root, 'r.md');
+    writeText(rules, 'x');
+    await assert.rejects(runApply({ recipe: 'custom.house-rules', add: customFile(), 'param-file': `other.recipe.rules=${rules}` }), /not among the selected recipes/);
+    await assert.rejects(runApply({ recipe: 'custom.house-rules', add: customFile(), 'param-file': 'garbage' }), /--param-file expects/);
+  });
+
+  it('a plain --param still splits on commas', async () => {
+    seedState();
+    const { manifest } = await runApply({ recipe: 'context.mcp-unused', param: 'context.mcp-unused.servers=dead-srv,ghost' });
+    assert.deepEqual(manifest.recipes[0].params.servers, ['dead-srv', 'ghost']);
+  });
+});
+
+describe('cmdApply: extra (custom) recipes', () => {
+  const customFile = () => path.join(ctx.root, 'extra.json');
+  const custom = () => ({
+    id: 'custom.cleanup',
+    category: 'settings',
+    impact: 'low',
+    title: { en: 'Custom cleanup', ru: 'Своя очистка' },
+    why: { en: 'w', ru: 'п' },
+    evidence: { en: 'e', ru: 'д' },
+    when: true,
+    actions: [{ type: 'settings.set', path: 'cleanupPeriodDays', value: 14 }],
+  });
+
+  it('applies a custom recipe from --add', async () => {
+    seedState();
+    writeJson(customFile(), { recipes: [custom()] });
+    await runApply({ recipe: 'custom.cleanup', add: customFile() });
+    assert.equal(readSettings().cleanupPeriodDays, 14);
+  });
+
+  it('finds the extra file recorded in recommendations.json when --add is not given', async () => {
+    seedState();
+    writeJson(customFile(), { recipes: [custom()] });
+    const recFile = path.join(ctx.stateDir, 'recommendations.json');
+    writeJson(recFile, { ...readJson(recFile), extraFile: customFile() });
+    await runApply({ recipe: 'custom.cleanup' });
+    assert.equal(readSettings().cleanupPeriodDays, 14);
+  });
+
+  it('prints a visible warning for an unknown id, with a hint for custom ones', async () => {
+    seedState();
+    const { stdout } = await runApply({ recipe: 'custom.cleanup,settings.cleanup-period' });
+    assert.match(stdout, /! unknown recipe custom\.cleanup \(skipped\) - custom recipes need --add FILE/);
+    assert.equal(readSettings().cleanupPeriodDays, 90);
+  });
+
+  it('ignores a recorded extra file that is gone, but fails on a --add file that cannot be read', async () => {
+    seedState();
+    const recFile = path.join(ctx.stateDir, 'recommendations.json');
+    writeJson(recFile, { ...readJson(recFile), extraFile: path.join(ctx.root, 'gone.json') });
+    const { stdout } = await runApply({ recipe: 'settings.cleanup-period' });
+    assert.ok(stdout.includes(prefixOf('cli.apply_done', { n: 1 })), stdout);
+    await assert.rejects(runApply({ recipe: 'settings.cleanup-period', add: path.join(ctx.root, 'gone.json') }), /--add: cannot read/);
+  });
+});
+
+describe('loadChoices reads recommendations.all.json for ids the normal file does not have', () => {
+  it('takes the parameter values from the --all listing', () => {
+    seedState();
+    const rec = readJson(path.join(ctx.stateDir, 'recommendations.json'));
+    const hidden = rec.recommendations.find((r) => r.id === 'settings.cleanup-period');
+    writeJson(path.join(ctx.stateDir, 'recommendations.json'), { ...rec, recommendations: rec.recommendations.filter((r) => r.id !== hidden.id) });
+    writeJson(path.join(ctx.stateDir, 'recommendations.all.json'), { ...rec, recommendations: [{ ...hidden, scope: 'project', params: [{ name: 'days', value: 7 }] }] });
+    const choices = apply.loadChoices({ _: ['apply'], flags: { recipe: 'settings.cleanup-period' } });
+    assert.deepEqual(choices.selected[0].params, { days: 7 });
+  });
+});

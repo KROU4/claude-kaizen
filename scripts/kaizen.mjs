@@ -5,14 +5,15 @@
 //   kaizen measure   [--days N|--all] [--project DIR] [--lang en|ru] [--no-cache] [--quiet]
 //   kaizen recommend [--lang en|ru] [--top N] [--json] [--all]
 //   kaizen console   [--mode local|render] [--port N] [--no-open] [--out FILE] [--lang]
-//   kaizen apply     [FILE|--recipe id,id] [--dry-run] [--scope user|project] [--project DIR]
+//   kaizen choices   --import FILE|-
+//   kaizen apply     [FILE|--recipe id,id] [--dry-run] [--scope user|project] [--project DIR] [--param r.p=v] [--param-file r.p=PATH] [--add FILE]
 //   kaizen undo      [ID|--last|--all] [--dry-run]
 //   kaizen status | doctor | selfcheck | docs | nudge | help | --version
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { configDir, ensureDir, exists, kitRoot, projectsDir, readJsonSafe, settingsFiles, stateDir, usageDataDir, writeJsonAtomic } from './lib/paths.mjs';
+import { configDir, ensureDir, exists, expandHome, kitRoot, projectsDir, readJsonSafe, settingsFiles, stateDir, usageDataDir, writeJsonAtomic } from './lib/paths.mjs';
 import { scanTranscripts } from './lib/transcripts.mjs';
 import { inventory } from './lib/inventory.mjs';
 import { readInsights } from './lib/insights.mjs';
@@ -20,9 +21,15 @@ import { buildMeasure, METRIC_DOCS } from './lib/metrics.mjs';
 import { renderDigest } from './lib/digest.mjs';
 import { translator, SUPPORTED } from './lib/i18n.mjs';
 import { claudeVersion, platformSummary } from './lib/platform.mjs';
-import { loadCatalog, recommend, validateCatalog } from './lib/recipes.mjs';
+import { addExtraRecipes, loadCatalog, readExtraRecipes, recommend, resolveExtraFile, validateCatalog } from './lib/recipes.mjs';
 
 const VERSION = JSON.parse(fs.readFileSync(path.join(kitRoot(), 'package.json'), 'utf8')).version;
+
+/**
+ * Flags that take a value. Only these consume the next argument; every other flag (--dry-run, --force, --json, --all,
+ * --last ...) is a boolean and never swallows the positional argument that follows it.
+ */
+export const VALUE_FLAGS = new Set(['days', 'project', 'lang', 'scope', 'param', 'param-file', 'recipe', 'top', 'add', 'mode', 'port', 'out', 'timeout', 'transport', 'import']);
 
 export function parseArgs(argv) {
   const args = { _: [], flags: {} };
@@ -38,7 +45,7 @@ export function parseArgs(argv) {
       } else {
         key = a.slice(2);
         const next = argv[i + 1];
-        if (next !== undefined && !next.startsWith('--')) {
+        if (VALUE_FLAGS.has(key) && next !== undefined && !next.startsWith('--')) {
           value = next;
           i++;
         } else {
@@ -88,7 +95,9 @@ function appliedIds() {
   if (!exists(journalDir)) return ids;
   for (const d of fs.readdirSync(journalDir)) {
     const man = readJsonSafe(path.join(journalDir, d, 'manifest.json'));
-    if (man && !man.undone) for (const r of man.recipes || []) ids.add(r.id);
+    // A recipe whose every action was skipped (text parameter left empty, settings file unreadable, servers not found)
+    // wrote nothing, so it must stay open for a re-apply. Advice recipes have no actions by design and count as handled.
+    if (man && !man.undone) for (const r of man.recipes || []) if (r.advice || (Array.isArray(r.actions) && r.actions.length)) ids.add(r.id);
   }
   return ids;
 }
@@ -100,7 +109,7 @@ async function cmdMeasure(flags) {
   const since = new Date(Date.now() - windowDays * 86400000);
   const cfg = configDir();
   const state = ensureDir(stateDir());
-  const projectDir = flags.project ? path.resolve(String(flags.project)) : process.env.CLAUDE_PROJECT_DIR || null;
+  const projectDir = flags.project ? path.resolve(expandHome(String(flags.project))) : process.env.CLAUDE_PROJECT_DIR || null;
   const t = translator(pickLang(flags, null));
   if (!quiet) err(t('cli.measuring', { days: windowDays, dir: cfg }));
   const t0 = Date.now();
@@ -171,9 +180,10 @@ function cmdRecommend(flags) {
   const measure = loadMeasure();
   const lang = pickLang(flags, measure);
   const catalog = loadCatalog();
-  const extra = flags.add ? readJsonSafe(path.resolve(String(flags.add))) : null;
+  const extraFile = flags.add && flags.add !== true ? resolveExtraFile(flags.add) : null;
+  const extra = extraFile ? readExtraRecipes(extraFile) : null;
   if (flags.add && !extra) throw new Error(`--add: cannot read ${flags.add}`);
-  if (extra && Array.isArray(extra.recipes)) catalog.recipes.push(...extra.recipes);
+  addExtraRecipes(catalog, extra);
   const res = recommend(catalog, measure, { lang, applied: appliedIds(), includeAll: !!flags.all });
   if (extra && extra.paramDefaults && typeof extra.paramDefaults === 'object') {
     for (const r of res.recommended) {
@@ -195,7 +205,11 @@ function cmdRecommend(flags) {
     alreadyApplied: res.alreadyApplied,
     notApplicable: res.notApplicable.length,
   };
-  writeJsonAtomic(path.join(stateDir(), 'recommendations.json'), payload);
+  // where the custom recipes came from, so `apply` can find them again when it is not given --add
+  if (extraFile) payload.extraFile = extraFile;
+  // `--all` lists every recipe in the catalog (browsing, id mapping). It must not replace the real recommendations that
+  // status, the SessionStart nudge, the console and `apply --recipe` read.
+  writeJsonAtomic(path.join(stateDir(), flags.all ? 'recommendations.all.json' : 'recommendations.json'), payload);
   const t = translator(lang);
   if (flags.json) {
     out(JSON.stringify(payload, null, 2));
@@ -217,6 +231,40 @@ function cmdRecommend(flags) {
     out(`Already applied: ${res.alreadyApplied.map((a) => a.id).join(', ')}`);
   }
   return payload;
+}
+
+// ---------------------------------------------------------------- choices
+/**
+ * `kaizen choices --import FILE|-` : take a choices document (what the console would have submitted) from a file or
+ * stdin, validate it and store it as <state>/choices.json, the file `apply` reads by default.
+ */
+async function cmdChoices(args) {
+  const src = args.flags.import;
+  if (!src || src === true) {
+    err('kaizen choices: usage: choices --import <FILE|->');
+    process.exitCode = 2;
+    return null;
+  }
+  try {
+    const { validateChoices } = await import('./lib/console.mjs');
+    const raw = src === '-' ? fs.readFileSync(0, 'utf8') : fs.readFileSync(path.resolve(expandHome(String(src))), 'utf8');
+    let doc;
+    try {
+      doc = JSON.parse(raw.replace(/^﻿/, ''));
+    } catch (e) {
+      throw new Error(`not valid JSON (${e.message})`);
+    }
+    const choices = validateChoices(doc);
+    const file = path.join(ensureDir(stateDir()), 'choices.json');
+    writeJsonAtomic(file, choices);
+    const summary = { ok: true, file, selected: choices.selected.length, discuss: choices.discuss.length, notes: choices.notes.length > 0 };
+    out(JSON.stringify(summary));
+    return summary;
+  } catch (e) {
+    err(`kaizen choices --import: ${e.message}`);
+    process.exitCode = 1;
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------- status / doctor
@@ -393,7 +441,7 @@ function cmdVerify(flags) {
     else add(false, t('verify.statusline_fail', { detail: (r.stderr || `exit ${r.status}`).trim().slice(0, 160) }));
   }
   // 3. settings files parse and reference existing hook files
-  const projectDir = flags.project ? path.resolve(String(flags.project)) : process.env.CLAUDE_PROJECT_DIR || null;
+  const projectDir = flags.project ? path.resolve(expandHome(String(flags.project))) : process.env.CLAUDE_PROJECT_DIR || null;
   for (const { file } of settingsFiles(projectDir)) {
     if (!exists(file)) continue;
     try {
@@ -405,6 +453,9 @@ function cmdVerify(flags) {
       for (const c of ours) {
         const m = c.match(/"([^"]*kaizen[\\/][^"]*\.mjs)"/i) || c.match(/(\S*kaizen[\\/]\S*\.mjs)/i);
         if (m && !exists(m[1])) add(false, t('verify.hook_missing', { file, path: m[1] }));
+        // the interpreter is pinned by absolute path too; a node that moved (version manager, upgrade) breaks every hook
+        const exe = c.match(/^\s*"([^"]+)"/) || c.match(/^\s*(\S+)/);
+        if (exe && path.isAbsolute(exe[1]) && !exists(exe[1])) add(false, t('verify.hook_missing', { file, path: exe[1] }));
       }
     } catch (err) {
       add(false, t('verify.settings_fail', { file, detail: err.message.slice(0, 120) }));
@@ -460,7 +511,9 @@ function cmdNudge() {
       return;
     }
     if (rec && rec.generatedAt !== seen.recommendationsAt) {
-      const high = rec.recommendations.filter((r) => r.impact === 'high').length;
+      // recipes the user already applied are not "new", even though recommendations.json is only rewritten by `recommend`
+      const applied = appliedIds();
+      const high = rec.recommendations.filter((r) => r.impact === 'high' && !applied.has(r.id)).length;
       writeJsonAtomic(path.join(state, 'nudge-seen.json'), { ...seen, recommendationsAt: rec.generatedAt });
       if (high > 0) {
         const t = translator(rec.lang || 'en');
@@ -480,11 +533,16 @@ Usage: node scripts/kaizen.mjs <command> [options]
   measure    Scan local Claude Code data and write measure.json + measure.md
              --days N (default 30) | --all   --project DIR   --lang en|ru   --no-cache   --json   --quiet
   recommend  Evaluate the recipe catalog against the measurement
-             --lang en|ru   --top N   --json   --all   --add FILE (extra recipes)
+             --lang en|ru   --top N   --json   --add FILE (extra recipes; remembered for apply)
+             --all lists every recipe and writes recommendations.all.json, leaving recommendations.json alone
   console    Interactive selection UI
              --mode local|render   --port N   --no-open   --out FILE   --lang en|ru
+  choices    Store a choices document as choices.json (what the console submits)
+             --import FILE|-   (JSON from a file or stdin; prints {ok,file,selected,discuss,notes})
   apply      Apply chosen recipes (choices.json by default)
-             [FILE | --recipe id,id]   --dry-run   --scope user|project   --project DIR   --param recipe.name=value
+             [FILE | --recipe id,id]   --dry-run   --force   --scope user|project   --project DIR
+             --param recipe.name=value   --param-file recipe.name=PATH (file content, multi-line, becomes the value)
+             --add FILE (extra recipes, e.g. custom.*; defaults to the file recorded by recommend --add)
   undo       Revert an applied batch   [ID | --last | --all]   --dry-run
   status     Show state: last measurement, recommendations, applied batches
   verify     Self-test installed hooks and status line, parse touched settings, check CLAUDE.md markers
@@ -517,6 +575,8 @@ export async function main(argv = process.argv.slice(2)) {
       const { cmdConsole } = await import('./lib/console.mjs');
       return cmdConsole(args.flags, { loadMeasure, pickLang, stateDir, readJsonSafe });
     }
+    case 'choices':
+      return cmdChoices(args);
     case 'apply': {
       const { cmdApply } = await import('./lib/apply.mjs');
       return cmdApply(args, { loadMeasure, pickLang });

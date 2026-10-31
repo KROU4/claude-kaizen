@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { ensureDir, kitRoot, readJsonSafe, stateDir, writeJsonAtomic } from './paths.mjs';
+import { ensureDir, expandHome, kitRoot, readJsonSafe, stateDir, writeJsonAtomic } from './paths.mjs';
 import { loadLocale, translator } from './i18n.mjs';
 import { openInBrowser } from './platform.mjs';
 
@@ -56,12 +56,23 @@ export function validateChoices(obj) {
   if (!Array.isArray(obj.selected)) throw new Error('choices.selected must be an array');
   for (const s of obj.selected) {
     if (!s || typeof s.id !== 'string' || !/^[a-z0-9.-]+$/.test(s.id)) throw new Error(`bad recipe id in choices: ${JSON.stringify(s && s.id)}`);
-    if (s.scope && !['user', 'project', 'local'].includes(s.scope)) throw new Error(`bad scope for ${s.id}`);
+    // apply only knows user and project; any other scope would silently land in the user files
+    if (s.scope && !['user', 'project'].includes(s.scope)) throw new Error(`bad scope for ${s.id}`);
     if (s.params && typeof s.params !== 'object') throw new Error(`params for ${s.id} must be an object`);
   }
   if (obj.notes && typeof obj.notes !== 'string') throw new Error('notes must be a string');
   if (obj.notes && obj.notes.length > 20000) obj.notes = obj.notes.slice(0, 20000);
   return { version: 1, submittedAt: obj.submittedAt || new Date().toISOString(), lang: obj.lang || 'en', selected: obj.selected, discuss: Array.isArray(obj.discuss) ? obj.discuss.filter((x) => typeof x === 'string') : [], notes: obj.notes || '' };
+}
+
+/** True for `127.0.0.1:<port>` / `localhost:<port>` (what the browser sends for the URL we print). */
+export function isLoopbackHost(host, port) {
+  if (typeof host !== 'string' || !port) return false;
+  return host.toLowerCase() === `127.0.0.1:${port}` || host.toLowerCase() === `localhost:${port}`;
+}
+
+export function isLoopbackOrigin(origin, port) {
+  return typeof origin === 'string' && (origin === `http://127.0.0.1:${port}` || origin.toLowerCase() === `http://localhost:${port}`);
 }
 
 export async function cmdConsole(flags, { loadMeasure, pickLang }) {
@@ -82,7 +93,7 @@ export async function cmdConsole(flags, { loadMeasure, pickLang }) {
   if (mode === 'render') {
     const data = buildConsoleData({ recommendations: rec, lang, mode: transport, submitUrl: null, measure });
     const html = renderConsole(data);
-    const out = flags.out ? path.resolve(String(flags.out)) : path.join(state, 'console.html');
+    const out = flags.out && flags.out !== true ? path.resolve(expandHome(String(flags.out))) : path.join(state, 'console.html');
     ensureDir(path.dirname(out));
     fs.writeFileSync(out, html, 'utf8');
     process.stdout.write(out + '\n');
@@ -100,6 +111,27 @@ export async function cmdConsole(flags, { loadMeasure, pickLang }) {
   return new Promise((resolve) => {
     let done = false;
     const server = http.createServer((req, res) => {
+      // DNS rebinding: a page on attacker.example whose name was re-pointed at 127.0.0.1 is same-origin for the browser and
+      // could read the token from the HTML. Only our own loopback host names (with our port) are served, and a POST must
+      // not come from another origin or be a "simple" cross-site request.
+      if (!isLoopbackHost(req.headers.host, server.address() && server.address().port)) {
+        res.writeHead(403, { 'Content-Type': 'text/plain' });
+        res.end('forbidden host');
+        return;
+      }
+      if (req.method === 'POST') {
+        const origin = req.headers.origin;
+        if (origin !== undefined && !isLoopbackOrigin(origin, server.address().port)) {
+          res.writeHead(403, { 'Content-Type': 'text/plain' });
+          res.end('forbidden origin');
+          return;
+        }
+        if (!/^application\/json\b/i.test(String(req.headers['content-type'] || ''))) {
+          res.writeHead(415, { 'Content-Type': 'text/plain' });
+          res.end('application/json required');
+          return;
+        }
+      }
       if (req.method === 'GET' && (req.url === '/' || req.url.startsWith('/?'))) {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
         res.end(html);

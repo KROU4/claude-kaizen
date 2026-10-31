@@ -2,6 +2,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 
 export function isWSL() {
   if (process.platform !== 'linux') return false;
@@ -12,7 +13,29 @@ export function isWSL() {
   }
 }
 
-/** Fire-and-forget open of a URL in the default browser. Returns false when no opener exists. */
+/** Absolute path of an executable found on PATH (honours PATHEXT on Windows), or null. Pure Node, no `which` binary needed. */
+export function findOnPath(bin) {
+  const exts = process.platform === 'win32' ? ['', ...(process.env.PATHEXT || '.EXE;.CMD;.BAT').split(';').filter(Boolean)] : [''];
+  for (const dir of (process.env.PATH || process.env.Path || '').split(path.delimiter)) {
+    if (!dir) continue;
+    for (const ext of exts) {
+      const candidate = path.join(dir, bin + ext);
+      try {
+        if (!fs.statSync(candidate).isFile()) continue;
+        if (process.platform !== 'win32') fs.accessSync(candidate, fs.constants.X_OK);
+        return candidate;
+      } catch {
+        /* not here */
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Fire-and-forget open of a URL in the default browser. Returns false when no opener exists: spawn() reports a missing
+ * executable asynchronously, after the call has returned, so the opener is looked up on PATH first.
+ */
 export function openInBrowser(url) {
   try {
     let cmd;
@@ -30,6 +53,7 @@ export function openInBrowser(url) {
       cmd = 'xdg-open';
       args = [url];
     }
+    if (process.platform !== 'win32' && !findOnPath(cmd)) return false;
     const child = spawn(cmd, args, { stdio: 'ignore', detached: true, windowsHide: true });
     child.on('error', () => {});
     child.unref();
@@ -62,7 +86,17 @@ export function claudeVersion() {
 
 /** Shell-quoted path to the running Node binary, for hook commands that must survive PATH differences. */
 export function nodeCommand() {
-  const exe = process.execPath;
+  let exe = process.execPath;
+  // fnm on Windows starts node through a per-shell junction (...\fnm_multishells\<pid>_<time>\node.exe) that is deleted
+  // once that shell is gone; a hook pinned to it would fail with ENOENT from then on. Pin the real installation instead.
+  // Other launchers (nvm-windows, Homebrew, volta shims) use stable link locations and are kept as they are.
+  if (/fnm_multishells/i.test(exe)) {
+    try {
+      exe = fs.realpathSync.native(exe);
+    } catch {
+      /* keep the path as it is */
+    }
+  }
   return /\s/.test(exe) ? `"${exe}"` : exe;
 }
 

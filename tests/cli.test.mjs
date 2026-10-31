@@ -652,3 +652,270 @@ describe('kaizen docs', () => {
     assert.equal(generated, committed);
   });
 });
+
+// ------------------------------------------------------------------ code-review regressions
+
+describe('parseArgs: only value flags take the next argument', () => {
+  it('boolean flags never swallow a positional argument', () => {
+    assert.deepEqual(parseArgs(['apply', '--force', 'my-choices.json']), { _: ['apply', 'my-choices.json'], flags: { force: true } });
+    assert.deepEqual(parseArgs(['undo', '--dry-run', '2026-10-31T10-00-00']), { _: ['undo', '2026-10-31T10-00-00'], flags: { 'dry-run': true } });
+    assert.deepEqual(parseArgs(['status', '--json', 'x']), { _: ['status', 'x'], flags: { json: true } });
+    assert.deepEqual(parseArgs(['recommend', '--all', 'x', '--last', 'y']), { _: ['recommend', 'x', 'y'], flags: { all: true, last: true } });
+  });
+
+  it('an unknown flag is a boolean too', () => {
+    assert.deepEqual(parseArgs(['--whatever', 'x']), { _: ['x'], flags: { whatever: true } });
+  });
+
+  it('the value flags still take their value', () => {
+    const { flags } = parseArgs(['--days', '7', '--project', 'p', '--lang', 'ru', '--scope', 'user', '--recipe', 'a,b', '--top', '3', '--add', 'f.json', '--mode', 'render', '--port', '0', '--out', 'o', '--timeout', '1', '--transport', 'artifact', '--param-file', 'a.b=c', '--import', '-']);
+    assert.deepEqual(flags, { days: '7', project: 'p', lang: 'ru', scope: 'user', recipe: 'a,b', top: '3', add: 'f.json', mode: 'render', port: '0', out: 'o', timeout: '1', transport: 'artifact', 'param-file': 'a.b=c', import: '-' });
+  });
+
+  it('a value flag followed by another flag, or at the end, is true', () => {
+    assert.deepEqual(parseArgs(['--scope', '--dry-run']).flags, { scope: true, 'dry-run': true });
+    assert.deepEqual(parseArgs(['--import']).flags, { import: true });
+  });
+
+  it('apply --dry-run FILE plans the named file, not the default choices.json', () => {
+    const home = measured();
+    json(cli(home, ['recommend', '--json']));
+    writeJson(path.join(home.stateDir, 'choices.json'), { version: 1, selected: [{ id: 'permissions.deny-secrets', scope: 'user', params: {} }], discuss: [], notes: '' });
+    const mine = path.join(home.root, 'mine.json');
+    writeJson(mine, { version: 1, selected: [{ id: 'settings.cleanup-period', scope: 'user', params: {} }], discuss: [], notes: '' });
+    for (const argv of [['apply', '--dry-run', mine], ['apply', '--force', '--dry-run', mine], ['apply', mine, '--dry-run']]) {
+      const r = cli(home, argv);
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stdout, /cleanupPeriodDays/, argv.join(' '));
+      assert.ok(!/permissions\.deny/.test(r.stdout), argv.join(' '));
+    }
+  });
+
+  it('undo --dry-run ID previews the named batch, not the last one', () => {
+    const home = measured();
+    const first = '2026-10-01T10-00-00';
+    const second = '2026-10-31T10-00-00';
+    for (const [id, recipe] of [[first, 'settings.cleanup-period'], [second, 'permissions.deny-secrets']]) {
+      writeJson(path.join(home.stateDir, 'applied', id, 'manifest.json'), { id, at: '2026-10-01T10:00:00.000Z', recipes: [{ id: recipe, scope: 'user', params: {}, actions: [{ type: 'settings.set', file: home.settingsFile, path: 'cleanupPeriodDays', previous: null, hadPrevious: false, value: 90 }], advice: false }] });
+    }
+    const r = cli(home, ['undo', '--dry-run', first]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(r.stdout.includes(first), r.stdout);
+    assert.ok(!r.stdout.includes(second), r.stdout);
+  });
+});
+
+describe('kaizen recommend --all', () => {
+  it('does not overwrite recommendations.json (status and the nudge keep seeing the real recommendations)', () => {
+    const home = measured();
+    const normal = json(cli(home, ['recommend', '--json']));
+    const file = path.join(home.stateDir, 'recommendations.json');
+    const before = fs.readFileSync(file, 'utf8');
+    const status = json(cli(home, ['status'])).recommendations;
+    const all = json(cli(home, ['recommend', '--json', '--all']));
+    assert.ok(all.recommendations.length > normal.recommendations.length);
+    assert.equal(fs.readFileSync(file, 'utf8'), before);
+    assert.deepEqual(json(cli(home, ['status'])).recommendations, status);
+    assert.equal(readJson(path.join(home.stateDir, 'recommendations.all.json')).recommendations.length, all.recommendations.length);
+  });
+
+  it('apply --recipe can use an id that only the --all listing has', () => {
+    const home = measured();
+    json(cli(home, ['recommend', '--json']));
+    const all = json(cli(home, ['recommend', '--json', '--all']));
+    const hiddenId = all.recommendations.find((r) => r.matched === false && r.kind === 'recipe').id;
+    const r = cli(home, ['apply', '--recipe', hiddenId, '--dry-run']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(!r.stdout.includes('unknown recipe'), r.stdout);
+  });
+});
+
+describe('kaizen: custom recipes, --add and --param-file', () => {
+  const rulesRecipe = {
+    id: 'custom.house-rules',
+    category: 'claude-md',
+    impact: 'high',
+    risk: 'low',
+    title: { en: 'House rules', ru: 'Правила' },
+    why: { en: 'w', ru: 'п' },
+    evidence: { en: 'e', ru: 'д' },
+    when: true,
+    params: [{ name: 'rules', type: 'text', default: '', label: { en: 'Rules', ru: 'Правила' } }],
+    actions: [{ type: 'claude-md.block', id: 'house-rules', content: '{params.rules}' }],
+  };
+  const withExtra = () => {
+    const home = measured();
+    const extra = path.join(home.root, 'extra.json');
+    writeJson(extra, { recipes: [rulesRecipe] });
+    return { home, extra };
+  };
+
+  it('recommend --add records the absolute path as extraFile, and apply finds the custom recipe without --add', () => {
+    const { home, extra } = withExtra();
+    const payload = json(cli(home, ['recommend', '--json', '--add', extra]));
+    assert.equal(payload.extraFile, path.resolve(extra));
+    assert.equal(readJson(path.join(home.stateDir, 'recommendations.json')).extraFile, path.resolve(extra));
+    const rules = path.join(home.root, 'rules.md');
+    writeText(rules, 'Always run the tests.\n\nNever commit to main.\n');
+    const r = cli(home, ['apply', '--recipe', 'custom.house-rules', '--param-file', `custom.house-rules.rules=${rules}`]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(!r.stdout.includes('unknown recipe'), r.stdout);
+    const md = fs.readFileSync(path.join(home.configDir, 'CLAUDE.md'), 'utf8');
+    assert.ok(md.includes('Always run the tests.\n\nNever commit to main.'), md);
+  });
+
+  it('a plain recommend (no --add) does not claim an extra file', () => {
+    const { home, extra } = withExtra();
+    json(cli(home, ['recommend', '--json', '--add', extra]));
+    assert.equal(json(cli(home, ['recommend', '--json'])).extraFile, undefined);
+  });
+
+  it('apply --add FILE works without recommend --add, and an unknown id is a visible warning', () => {
+    const { home, extra } = withExtra();
+    json(cli(home, ['recommend', '--json']));
+    const rules = path.join(home.root, 'rules.md');
+    writeText(rules, 'One rule.');
+    const unknown = cli(home, ['apply', '--recipe', 'custom.house-rules', '--dry-run']);
+    assert.equal(unknown.status, 0, unknown.stderr);
+    assert.match(unknown.stdout, /! unknown recipe custom\.house-rules \(skipped\)/);
+    const known = cli(home, ['apply', '--recipe', 'custom.house-rules', '--add', extra, '--param-file', `custom.house-rules.rules=${rules}`]);
+    assert.equal(known.status, 0, known.stderr);
+    assert.ok(fs.readFileSync(path.join(home.configDir, 'CLAUDE.md'), 'utf8').includes('One rule.'));
+  });
+
+  it('a recipe that skipped everything (empty text) stays open: it is recommended again, not "already applied"', () => {
+    const { home, extra } = withExtra();
+    json(cli(home, ['recommend', '--json', '--add', extra]));
+    const empty = cli(home, ['apply', '--recipe', 'custom.house-rules']);
+    assert.equal(empty.status, 0, empty.stderr);
+    assert.match(empty.stdout, /text parameter not filled in/);
+    const again = json(cli(home, ['recommend', '--json', '--add', extra]));
+    assert.ok(again.recommendations.some((r) => r.id === 'custom.house-rules'));
+    assert.ok(!again.alreadyApplied.some((a) => a.id === 'custom.house-rules'));
+    const rules = path.join(home.root, 'rules.md');
+    writeText(rules, 'Filled in.');
+    assert.equal(cli(home, ['apply', '--recipe', 'custom.house-rules', '--param-file', `custom.house-rules.rules=${rules}`]).status, 0);
+    const done = json(cli(home, ['recommend', '--json', '--add', extra]));
+    assert.ok(done.alreadyApplied.some((a) => a.id === 'custom.house-rules'));
+  });
+
+  it('expands ~ in --add (PowerShell and cmd hand it over literally)', () => {
+    const { home, extra } = withExtra();
+    const inHome = path.join(home.home, 'extra-in-home.json');
+    fs.copyFileSync(extra, inHome);
+    const payload = json(cli(home, ['recommend', '--json', '--add', '~/extra-in-home.json']));
+    assert.ok(payload.recommendations.some((r) => r.id === 'custom.house-rules'));
+    assert.equal(payload.extraFile, inHome);
+  });
+});
+
+describe('kaizen choices --import', () => {
+  const doc = { version: 1, selected: [{ id: 'settings.cleanup-period', scope: 'user', params: {} }, { id: 'hooks.guard-destructive', scope: 'user', params: { mode: 'ask' } }], discuss: ['claude-md.diet'], notes: 'tests are `make check`' };
+
+  it('is listed in help', () => {
+    assert.match(runCli(['help']).stdout, /choices\s+.*\n.*--import FILE\|-/);
+  });
+
+  it('stores a file as choices.json and prints a one-line JSON summary', () => {
+    const home = materializeHome();
+    const src = path.join(home.root, 'in.json');
+    writeJson(src, doc);
+    const r = cli(home, ['choices', '--import', src]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout.trim().split('\n').length, 1);
+    assert.deepEqual(JSON.parse(r.stdout), { ok: true, file: path.join(home.stateDir, 'choices.json'), selected: 2, discuss: 1, notes: true });
+    const saved = readJson(path.join(home.stateDir, 'choices.json'));
+    assert.deepEqual(saved.selected, doc.selected);
+    assert.equal(saved.version, 1);
+  });
+
+  it('reads stdin with "-"', () => {
+    const home = materializeHome();
+    const r = cli(home, ['choices', '--import', '-'], { input: JSON.stringify({ selected: [] }) });
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout), { ok: true, file: path.join(home.stateDir, 'choices.json'), selected: 0, discuss: 0, notes: false });
+  });
+
+  it('exits non-zero with the validation error and writes nothing for invalid input', () => {
+    const home = materializeHome();
+    const bad = cli(home, ['choices', '--import', '-'], { input: JSON.stringify({ selected: [{ id: 'Bad Id' }] }) });
+    assert.equal(bad.status, 1);
+    assert.match(bad.stderr, /bad recipe id/);
+    const notJson = cli(home, ['choices', '--import', '-'], { input: 'not json' });
+    assert.equal(notJson.status, 1);
+    assert.match(notJson.stderr, /not valid JSON/);
+    const missing = cli(home, ['choices', '--import', path.join(home.root, 'nope.json')]);
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /ENOENT|no such file/i);
+    assert.ok(!fs.existsSync(path.join(home.stateDir, 'choices.json')));
+  });
+
+  it('refuses to run without --import', () => {
+    const home = materializeHome();
+    const r = cli(home, ['choices']);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /usage: choices --import/);
+  });
+
+  it('what it stores is what apply reads', () => {
+    const home = measured();
+    json(cli(home, ['recommend', '--json']));
+    const r = cli(home, ['choices', '--import', '-'], { input: JSON.stringify(doc) });
+    assert.equal(r.status, 0, r.stderr);
+    const dry = cli(home, ['apply', '--dry-run']);
+    assert.equal(dry.status, 0, dry.stderr);
+    assert.match(dry.stdout, /cleanupPeriodDays/);
+  });
+});
+
+describe('kaizen nudge and the journal', () => {
+  it('does not announce recipes that were already applied as new', () => {
+    const home = measured();
+    const payload = json(cli(home, ['recommend', '--json']));
+    const high = payload.recommendations.filter((r) => r.impact === 'high');
+    assert.ok(high.length > 0);
+    writeJson(path.join(home.stateDir, 'applied', '2026-10-30T10-00-00', 'manifest.json'), {
+      id: '2026-10-30T10-00-00',
+      at: '2026-10-30T10:00:00.000Z',
+      recipes: high.map((r) => ({ id: r.id, scope: 'user', params: {}, actions: [{ type: 'file', file: path.join(home.root, 'x'), hash: 'h' }], advice: false })),
+    });
+    assert.equal(cli(home, ['nudge']).stdout, '');
+  });
+
+  it('still counts a high-impact recipe whose apply wrote nothing', () => {
+    const home = measured();
+    const payload = json(cli(home, ['recommend', '--json']));
+    const high = payload.recommendations.filter((r) => r.impact === 'high');
+    writeJson(path.join(home.stateDir, 'applied', '2026-10-30T10-00-00', 'manifest.json'), {
+      id: '2026-10-30T10-00-00',
+      at: '2026-10-30T10:00:00.000Z',
+      recipes: high.map((r) => ({ id: r.id, scope: 'user', params: {}, actions: [], advice: false })),
+    });
+    assert.match(JSON.parse(cli(home, ['nudge']).stdout).systemMessage, new RegExp(`${high.length} new high-impact`));
+  });
+});
+
+describe('kaizen verify: the interpreter of a hook', () => {
+  it('fails when the node binary a Kaizen hook command pins no longer exists', () => {
+    const home = materializeHome({ defaultState: true });
+    writeText(path.join(home.stateDir, 'hooks', 'ok.mjs'), "console.log('ok');\n");
+    const posix = (p) => p.replace(/\\/g, '/');
+    const gone = posix(path.join(home.root, 'gone', 'node.exe'));
+    const settings = readJson(home.settingsFile);
+    settings.hooks.PreToolUse = [{ matcher: 'Bash', hooks: [{ type: 'command', command: `"${gone}" "${posix(home.stateDir)}/hooks/ok.mjs"` }] }];
+    writeJson(home.settingsFile, settings);
+    const r = cli(home, ['verify', '--json']);
+    assert.equal(r.status, 1);
+    assert.ok(JSON.parse(r.stdout).checks.some((c) => !c.ok && c.text.includes(gone)), r.stdout);
+  });
+
+  it('passes when the pinned node exists', () => {
+    const home = materializeHome({ defaultState: true });
+    writeText(path.join(home.stateDir, 'hooks', 'ok.mjs'), "console.log('ok');\n");
+    const posix = (p) => p.replace(/\\/g, '/');
+    const settings = readJson(home.settingsFile);
+    settings.hooks.PreToolUse = [{ matcher: 'Bash', hooks: [{ type: 'command', command: `"${posix(process.execPath)}" "${posix(home.stateDir)}/hooks/ok.mjs"` }] }];
+    writeJson(home.settingsFile, settings);
+    assert.equal(json(cli(home, ['verify', '--json'])).ok, true);
+  });
+});

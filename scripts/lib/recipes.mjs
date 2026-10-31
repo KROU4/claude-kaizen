@@ -9,7 +9,7 @@
 // works on arrays, strings and plain objects (key count).
 import fs from 'node:fs';
 import path from 'node:path';
-import { kitRoot } from './paths.mjs';
+import { expandHome, kitRoot, readJsonSafe } from './paths.mjs';
 import { interpolate, pick } from './i18n.mjs';
 
 export const IMPACT_WEIGHT = { high: 3, medium: 2, low: 1 };
@@ -19,6 +19,26 @@ export function loadCatalog(file = path.join(kitRoot(), 'recipes', 'catalog.json
   const cat = JSON.parse(fs.readFileSync(file, 'utf8'));
   if (!Array.isArray(cat.recipes)) throw new Error('catalog.json: recipes[] missing');
   return cat;
+}
+
+/** Absolute path of a user-supplied extra-recipes file (`~` expanded, relative paths resolved against the cwd). */
+export function resolveExtraFile(value) {
+  return path.resolve(expandHome(String(value)));
+}
+
+/**
+ * Read an extra-recipes file (the format `recommend --add` and `apply --add` take: {recipes: [...], paramDefaults?, profile?}).
+ * Returns the parsed object, or null when the file is missing or is not a JSON object.
+ */
+export function readExtraRecipes(file) {
+  const extra = readJsonSafe(file);
+  return extra && typeof extra === 'object' && !Array.isArray(extra) ? extra : null;
+}
+
+/** Append the extra recipes to a loaded catalog. Built-in recipes keep their place, so a built-in id wins a lookup. */
+export function addExtraRecipes(catalog, extra) {
+  if (extra && Array.isArray(extra.recipes)) catalog.recipes.push(...extra.recipes);
+  return catalog;
 }
 
 export function resolvePath(obj, dotted) {

@@ -225,6 +225,7 @@
     },
     "empty": "No recommendations to show.",
     "footer": "Local only: this page runs on your machine; nothing is uploaded.",
+    "footer_artifact": "This page is a private claude.ai artifact: your choices and parameters are stored in its database until Claude reads them. Do not enter secrets here.",
     "copy_json": "Copy choices as JSON",
     "copied": "Copied. Paste it into Claude Code.",
     "offline_hint": "The page could not reach Claude Code's storage. Copy the JSON below and paste it into the chat.",

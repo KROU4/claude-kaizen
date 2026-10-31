@@ -199,8 +199,9 @@ describe('validateChoices', () => {
     assert.equal(out.notes, '');
   });
 
-  it('accepts all three scopes', () => {
-    for (const scope of ['user', 'project', 'local']) assert.doesNotThrow(() => validateChoices({ selected: [{ id: 'a.b', scope }] }));
+  it('accepts the two scopes apply understands and rejects the rest (local used to be let through and landed in the user files)', () => {
+    for (const scope of ['user', 'project']) assert.doesNotThrow(() => validateChoices({ selected: [{ id: 'a.b', scope }] }));
+    for (const scope of ['local', 'projekt', 'Project']) assert.throws(() => validateChoices({ selected: [{ id: 'a.b', scope }] }), /bad scope for a\.b/, scope);
   });
 
   it('rejects anything that is not an object with a selected array', () => {
@@ -393,5 +394,119 @@ describe('kaizen console (other modes)', () => {
     assert.equal(data.mode, 'artifact');
     assert.equal(data.submitUrl, null);
     assert.equal(data.i18n.impact_high, loadLocale('ru').console.impact.high);
+  });
+});
+
+// ---------------------------------------------------------------- DNS rebinding / cross-origin protection
+
+function rawRequest(url, { method = 'GET', body, headers = {} } = {}) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const h = { Connection: 'close', ...headers };
+    if (body !== undefined) h['Content-Length'] = Buffer.byteLength(body);
+    const req = http.request({ hostname: u.hostname, port: u.port, path: u.pathname + u.search, method, headers: h }, (res) => {
+      let data = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => (data += c));
+      res.on('end', () => resolve({ status: res.statusCode, body: data }));
+    });
+    req.on('error', reject);
+    if (body !== undefined) req.write(body);
+    req.end();
+  });
+}
+
+describe('kaizen console: Host and Origin checks', () => {
+  let home;
+  let child;
+  let exited;
+  let info;
+  let submitUrl;
+  let stdout = '';
+  let stderr = '';
+
+  before(async () => {
+    home = materializeHome();
+    writeJson(path.join(home.stateDir, 'recommendations.json'), { generatedAt: '2026-10-30T10:00:00.000Z', lang: 'en', windowDays: 30, sessions: 3, recommendations: [recommendation()], alreadyApplied: [], notApplicable: 0 });
+    child = spawn(process.execPath, [CLI, 'console', '--no-open', '--port', '0', '--lang', 'en'], { env: childEnv(home.env), cwd: os.tmpdir(), windowsHide: true });
+    exited = new Promise((resolve) => child.on('exit', (code) => resolve(code)));
+    info = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`console did not start. stdout=${stdout} stderr=${stderr}`)), 20000);
+      child.stdout.on('data', (d) => {
+        stdout += d;
+        const m = stdout.match(/\{"url":"[^\n]+\}/);
+        if (m) {
+          clearTimeout(timer);
+          resolve(JSON.parse(m[0]));
+        }
+      });
+      child.stderr.on('data', (d) => (stderr += d));
+      child.on('exit', (code) => {
+        clearTimeout(timer);
+        reject(new Error(`console exited early (${code}). stderr=${stderr}`));
+      });
+    });
+    const page = await rawRequest(info.url);
+    submitUrl = extractData(page.body).submitUrl;
+  });
+
+  after(async () => {
+    if (child && child.exitCode === null) child.kill();
+    if (exited) await exited;
+  });
+
+  const port = () => new URL(info.url).port;
+  const json = { 'Content-Type': 'application/json' };
+  const choices = JSON.stringify({ selected: [{ id: 'settings.cleanup-period', scope: 'user', params: {} }] });
+
+  it('refuses a request whose Host is not our loopback address (a rebound attacker domain), for the page and for a POST', async () => {
+    const page = await rawRequest(info.url, { headers: { Host: `attacker.example:${port()}` } });
+    assert.equal(page.status, 403);
+    assert.ok(!page.body.includes('submitUrl'));
+    const post = await rawRequest(new URL(submitUrl, info.url).href, { method: 'POST', body: choices, headers: { ...json, Host: `attacker.example:${port()}` } });
+    assert.equal(post.status, 403);
+    assert.ok(!fs.existsSync(path.join(home.stateDir, 'choices.json')));
+  });
+
+  it('refuses the right host name on the wrong port', async () => {
+    const res = await rawRequest(info.url, { headers: { Host: '127.0.0.1:1' } });
+    assert.equal(res.status, 403);
+  });
+
+  it('refuses a POST that carries a foreign Origin', async () => {
+    const res = await rawRequest(new URL(submitUrl, info.url).href, { method: 'POST', body: choices, headers: { ...json, Origin: 'https://attacker.example' } });
+    assert.equal(res.status, 403);
+    assert.ok(!fs.existsSync(path.join(home.stateDir, 'choices.json')));
+  });
+
+  it('refuses a POST that is not application/json (a cross-site "simple" request)', async () => {
+    for (const type of ['text/plain', 'application/x-www-form-urlencoded', undefined]) {
+      const headers = type ? { 'Content-Type': type } : {};
+      const res = await rawRequest(new URL(submitUrl, info.url).href, { method: 'POST', body: choices, headers });
+      assert.equal(res.status, 415, String(type));
+    }
+    assert.ok(!fs.existsSync(path.join(home.stateDir, 'choices.json')));
+  });
+
+  it('serves localhost:<port> and accepts a same-origin POST', async () => {
+    const page = await rawRequest(info.url, { headers: { Host: `localhost:${port()}` } });
+    assert.equal(page.status, 200);
+    const res = await rawRequest(new URL(submitUrl, info.url).href, { method: 'POST', body: choices, headers: { ...json, Origin: `http://127.0.0.1:${port()}` } });
+    assert.equal(res.status, 200);
+    assert.equal(JSON.parse(res.body).ok, true);
+    assert.equal(await exited, 0);
+  });
+});
+
+describe('isLoopbackHost / isLoopbackOrigin', () => {
+  it('match only 127.0.0.1 and localhost with the server port', async () => {
+    const { isLoopbackHost, isLoopbackOrigin } = await import('../scripts/lib/console.mjs');
+    assert.equal(isLoopbackHost('127.0.0.1:5000', 5000), true);
+    assert.equal(isLoopbackHost('LOCALHOST:5000', 5000), true);
+    for (const bad of ['127.0.0.1', '127.0.0.1:5001', 'evil.example:5000', 'localhost.evil.example:5000', undefined, '']) assert.equal(isLoopbackHost(bad, 5000), false, String(bad));
+    assert.equal(isLoopbackHost('127.0.0.1:0', 0), false);
+    assert.equal(isLoopbackOrigin('http://127.0.0.1:5000', 5000), true);
+    assert.equal(isLoopbackOrigin('http://localhost:5000', 5000), true);
+    for (const bad of ['https://127.0.0.1:5000', 'http://127.0.0.1:5001', 'null', 'http://evil.example:5000', undefined]) assert.equal(isLoopbackOrigin(bad, 5000), false, String(bad));
   });
 });

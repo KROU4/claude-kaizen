@@ -6,8 +6,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { loadLocale } from '../scripts/lib/i18n.mjs';
-import { IMPACT_WEIGHT, RISK_PENALTY, actionApplies, defaultParams, evaluate, loadCatalog, recommend, renderText, resolvePath, score, validateCatalog } from '../scripts/lib/recipes.mjs';
-import { KIT_ROOT, buildFixtureMeasure, cleanupTempDirs, makeTempDir, writeJson, writeText } from './helpers.mjs';
+import { IMPACT_WEIGHT, RISK_PENALTY, actionApplies, addExtraRecipes, readExtraRecipes, resolveExtraFile, defaultParams, evaluate, loadCatalog, recommend, renderText, resolvePath, score, validateCatalog } from '../scripts/lib/recipes.mjs';
+import { KIT_ROOT, buildFixtureMeasure, cleanupTempDirs, makeTempDir, setEnv, writeJson, writeText } from './helpers.mjs';
 
 after(() => cleanupTempDirs());
 
@@ -710,5 +710,41 @@ describe('the local measurement of the person running the tests (optional)', () 
     const catalog = loadCatalog();
     for (const r of catalog.recipes) assert.doesNotThrow(() => evaluate(r.when, real), r.id);
     assert.doesNotThrow(() => recommend(catalog, real));
+  });
+});
+
+// ---------------------------------------------------------------- extra (custom) recipes files
+
+describe('extra recipes files (recommend --add / apply --add)', () => {
+
+  it('readExtraRecipes returns the parsed object, and null for a missing, corrupt or non-object file', () => {
+    const dir = makeTempDir('kaizen-extra-');
+    writeJson(path.join(dir, 'ok.json'), { recipes: [{ id: 'custom.a' }] });
+    assert.deepEqual(readExtraRecipes(path.join(dir, 'ok.json')), { recipes: [{ id: 'custom.a' }] });
+    assert.equal(readExtraRecipes(path.join(dir, 'missing.json')), null);
+    writeText(path.join(dir, 'bad.json'), '{ nope');
+    assert.equal(readExtraRecipes(path.join(dir, 'bad.json')), null);
+    writeText(path.join(dir, 'list.json'), '[1,2]');
+    assert.equal(readExtraRecipes(path.join(dir, 'list.json')), null);
+  });
+
+  it('addExtraRecipes appends after the built-in recipes (a built-in id still wins a lookup) and tolerates no recipes', () => {
+    const cat = { recipes: [{ id: 'a' }] };
+    addExtraRecipes(cat, { recipes: [{ id: 'a', extra: true }, { id: 'custom.b' }] });
+    assert.deepEqual(cat.recipes.map((r) => r.id), ['a', 'a', 'custom.b']);
+    assert.equal(cat.recipes.find((r) => r.id === 'a').extra, undefined);
+    assert.equal(addExtraRecipes(cat, null), cat);
+    assert.equal(addExtraRecipes(cat, { profile: 'x' }).recipes.length, 3);
+  });
+
+  it('resolveExtraFile makes the path absolute and expands ~ (PowerShell passes it literally)', () => {
+    const home = makeTempDir('kaizen-home-');
+    const undo = setEnv({ HOME: home, USERPROFILE: home });
+    try {
+      assert.equal(resolveExtraFile('~/x/extra.json'), path.join(home, 'x', 'extra.json'));
+      assert.equal(resolveExtraFile('rel/extra.json'), path.resolve('rel/extra.json'));
+    } finally {
+      undo();
+    }
   });
 });

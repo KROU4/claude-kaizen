@@ -6,9 +6,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { configDir, ensureDir, exists, expandHome, homeDir, kitRoot, readJsonSafe, settingsFiles, stateDir, toPosix, writeJsonAtomic } from './paths.mjs';
 import { nodeCommand } from './platform.mjs';
-import { actionApplies, loadCatalog, resolvePath } from './recipes.mjs';
+import { actionApplies, addExtraRecipes, loadCatalog, readExtraRecipes, resolveExtraFile, resolvePath } from './recipes.mjs';
 import { translator } from './i18n.mjs';
 
+const SCOPES = ['user', 'project'];
 const TEMPLATES = path.join(kitRoot(), 'recipes', 'templates');
 
 function sha(text) {
@@ -82,6 +83,22 @@ export function fill(str, ctx) {
     if (v === undefined || v === null) return '';
     return Array.isArray(v) ? v.join(',') : String(v);
   });
+}
+
+/**
+ * The items of a list-valued action field (servers, plugins, hook commands). A literal array is taken as it is. A field
+ * that is exactly one `{params.x}` placeholder whose parameter is an array uses that array directly: joining it with
+ * commas and splitting again would glue together items that are not comma-delimited (hook commands such as
+ * `bash x.sh` or `npx eslint --fix`). Any other string is split with `splitter`.
+ */
+function listParam(value, ctx, splitter) {
+  let items;
+  if (Array.isArray(value)) items = value;
+  else {
+    const m = typeof value === 'string' ? value.match(/^\{params\.([a-zA-Z0-9_]+)\}$/) : null;
+    items = m && Array.isArray(ctx.params[m[1]]) ? ctx.params[m[1]] : String(fill(value, ctx)).split(splitter);
+  }
+  return items.map((s) => String(s).trim()).filter(Boolean);
 }
 
 function fillDeep(value, ctx) {
@@ -224,29 +241,49 @@ const handlers = {
       fs.writeFileSync(target, next, 'utf8');
     }
     // tail: the whitespace an append trimmed from the end of the file, so that undo can give it back exactly
-    return { type: 'claude-md.block', file: target, id, existedBefore: exists(target) && existing.length > 0, previousBlock: had ? existing.match(re)[0] : null, tail: had ? null : existing.match(/\s*$/)[0] };
+    // hash: of the block as written, so that undo can tell whether the user edited it since
+    return { type: 'claude-md.block', file: target, id, existedBefore: exists(target) && existing.length > 0, previousBlock: had ? existing.match(re)[0] : null, tail: had ? null : existing.match(/\s*$/)[0], hash: sha(block) };
   },
 
   'mcp.disable'(a, ctx, io) {
-    const servers = (Array.isArray(a.servers) ? a.servers : String(fill(a.servers, ctx)).split(',')).map((s) => s.trim()).filter(Boolean);
+    const servers = listParam(a.servers, ctx, /[,\n]/);
     if (!servers.length) return { skipped: true, reason: 'no servers selected' };
     const file = ctx.globalConfig;
     const cfg = io.load(file);
+    // Servers can live in three places: user scope (mcpServers), local scope (projects[<dir>].mcpServers, the default of
+    // `claude mcp add`) and the shared project file <dir>/.mcp.json. The first two sit in ~/.claude.json and are removed
+    // (with the definition kept in the journal); .mcp.json belongs to the repository and is never edited.
+    const localKey = ctx.projectDir ? findProjectKey(cfg, ctx.projectDir) : null;
+    const local = localKey ? cfg.projects[localKey].mcpServers : null;
+    const projectFile = ctx.projectDir ? path.join(ctx.projectDir, '.mcp.json') : null;
+    const projectServers = projectFile ? (readJsonSafe(projectFile, null) || {}).mcpServers : null;
     const removed = [];
+    const inProjectFile = [];
+    const notFound = [];
     for (const name of servers) {
       if (cfg.mcpServers && cfg.mcpServers[name]) {
-        removed.push({ name, config: cfg.mcpServers[name] });
+        removed.push({ name, config: cfg.mcpServers[name] }); // user scope: no `where`, as in older journals
         if (!io.dry) delete cfg.mcpServers[name];
-      }
+      } else if (local && local[name]) {
+        removed.push({ name, config: local[name], where: 'local', projectKey: localKey });
+        if (!io.dry) delete local[name];
+      } else if (projectServers && projectServers[name]) {
+        inProjectFile.push(name);
+      } else notFound.push(name);
     }
-    if (!removed.length) return { skipped: true, reason: 'servers not found in ~/.claude.json mcpServers', file };
-    io.describe(`${file}: remove MCP servers ${removed.map((r) => r.name).join(', ')} (definitions kept in the journal)`);
+    if (inProjectFile.length) io.note(`not removed (defined in the shared ${projectFile}, which Kaizen does not edit; use \`claude mcp remove\` or disable it for this project): ${inProjectFile.join(', ')}`);
+    if (!removed.length) {
+      const why = [...notFound, ...inProjectFile.map((n) => `${n} (project .mcp.json)`)];
+      return { skipped: true, reason: `servers not found in ~/.claude.json mcpServers (user scope or this project's local scope): ${why.join(', ')}`, file };
+    }
+    if (notFound.length) io.note(`not removed (not found in ~/.claude.json, user or local scope): ${notFound.join(', ')}`);
+    io.describe(`${file}: remove MCP servers ${removed.map((r) => (r.where === 'local' ? `${r.name} (local scope)` : r.name)).join(', ')} (definitions kept in the journal)`);
     if (!io.dry) io.save(file, cfg);
     return { type: 'mcp.disable', file, removed };
   },
 
   'settings.hook.remove'(a, ctx, io) {
-    const commands = (Array.isArray(a.commands) ? a.commands : String(fill(a.commands, ctx)).split(/\n|,(?=\S*(?:node|"|\/|[A-Za-z]:))/)).map((s) => s.trim()).filter(Boolean);
+    const commands = listParam(a.commands, ctx, /\r?\n/);
     if (!commands.length) return { skipped: true, reason: 'no hooks selected' };
     const norm = (c) => String(c).replace(/\s+/g, ' ').trim();
     const wanted = new Set(commands.map(norm));
@@ -280,7 +317,7 @@ const handlers = {
   },
 
   'plugins.disable'(a, ctx, io) {
-    const plugins = (Array.isArray(a.plugins) ? a.plugins : String(fill(a.plugins, ctx)).split(',')).map((s) => s.trim()).filter(Boolean);
+    const plugins = listParam(a.plugins, ctx, /[,\n]/);
     if (!plugins.length) return { skipped: true, reason: 'no plugins selected' };
     const file = path.join(configDir(), 'settings.json');
     const settings = io.load(file);
@@ -297,6 +334,17 @@ const handlers = {
     return { type: 'plugins.disable', file, changed };
   },
 };
+
+/** The key of ~/.claude.json `projects` that stands for this directory (Claude Code writes forward slashes, Windows paths differ in case). */
+function findProjectKey(cfg, projectDir) {
+  if (!cfg.projects || typeof cfg.projects !== 'object') return null;
+  const norm = (p) => {
+    const s = toPosix(p).replace(/\/+$/, '');
+    return process.platform === 'win32' ? s.toLowerCase() : s;
+  };
+  const want = norm(projectDir);
+  return Object.keys(cfg.projects).find((k) => cfg.projects[k] && cfg.projects[k].mcpServers && norm(k) === want) || null;
+}
 
 function escapeRe(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -358,6 +406,7 @@ function ownedFiles() {
 function makeIo({ dry, force, measure, batchDir, recipeId }) {
   const cache = new Map();
   const described = [];
+  const notes = [];
   const backedUp = new Set();
   return {
     dry,
@@ -366,8 +415,13 @@ function makeIo({ dry, force, measure, batchDir, recipeId }) {
     recipeId,
     ownedFiles: ownedFiles(),
     described,
+    notes,
     describe(line) {
       described.push(line);
+    },
+    /** A message for the user that is not a change (something left alone, something not found). */
+    note(line) {
+      notes.push(line);
     },
     load(file) {
       if (!cache.has(file)) cache.set(file, readJsonOrEmpty(file));
@@ -382,6 +436,9 @@ function makeIo({ dry, force, measure, batchDir, recipeId }) {
       if (dry || backedUp.has(file) || !exists(file)) return;
       backedUp.add(file);
       const dest = path.join(batchDir, 'backups', file.replace(/[:\\/]/g, '_'));
+      // makeIo() is created once per recipe but the backup folder is shared by the whole batch: the first copy is the
+      // file as it was before the batch, and a later recipe touching the same file must not replace it
+      if (exists(dest)) return;
       ensureDir(path.dirname(dest));
       fs.copyFileSync(file, dest);
     },
@@ -392,12 +449,15 @@ function makeIo({ dry, force, measure, batchDir, recipeId }) {
 
 export function loadChoices(args) {
   const state = stateDir();
-  const file = args._[1] ? path.resolve(args._[1]) : path.join(state, 'choices.json');
+  const file = args._[1] ? path.resolve(expandHome(args._[1])) : path.join(state, 'choices.json');
   if (args.flags.recipe) {
     const rec = readJsonSafe(path.join(state, 'recommendations.json'));
+    // ids that only appear in a `recommend --all` listing take their parameter values from there
+    const recAll = readJsonSafe(path.join(state, 'recommendations.all.json'));
     const ids = String(args.flags.recipe).split(',').map((s) => s.trim()).filter(Boolean);
     const selected = ids.map((id) => {
-      const r = rec && rec.recommendations.find((x) => x.id === id);
+      const find = (x) => x && Array.isArray(x.recommendations) && x.recommendations.find((y) => y.id === id);
+      const r = find(rec) || find(recAll);
       return { id, scope: args.flags.scope || (r && r.scope) || 'user', params: Object.fromEntries((r ? r.params : []).map((p) => [p.name, p.value])) };
     });
     return { version: 1, source: 'cli', selected, discuss: [], notes: '' };
@@ -410,10 +470,27 @@ export function loadChoices(args) {
 function applyParamOverrides(selected, flags) {
   const list = Array.isArray(flags.param) ? flags.param : flags.param ? [flags.param] : [];
   for (const spec of list) {
-    const m = String(spec).match(/^([a-z0-9.-]+)\.([a-zA-Z0-9_]+)=(.*)$/);
+    const m = String(spec).match(/^([a-z0-9.-]+)\.([a-zA-Z0-9_]+)=([\s\S]*)$/);
     if (!m) throw new Error(`--param expects recipe.id.param=value, got: ${spec}`);
     const sel = selected.find((s) => s.id === m[1]);
     if (sel) sel.params = { ...(sel.params || {}), [m[2]]: m[3].includes(',') ? m[3].split(',') : m[3] };
+  }
+  // --param-file recipe.id.param=PATH : the UTF-8 content of the file is the value as it is (multi-line text, commas
+  // included), which is how a drafted rules block or skill body reaches a recipe without shell quoting
+  const files = Array.isArray(flags['param-file']) ? flags['param-file'] : flags['param-file'] ? [flags['param-file']] : [];
+  for (const spec of files) {
+    const m = String(spec).match(/^([a-z0-9.-]+)\.([a-zA-Z0-9_]+)=([\s\S]+)$/);
+    if (!m) throw new Error(`--param-file expects recipe.id.param=PATH, got: ${spec}`);
+    const file = path.resolve(expandHome(m[3]));
+    let text;
+    try {
+      text = fs.readFileSync(file, 'utf8');
+    } catch (err) {
+      throw new Error(`--param-file ${m[1]}.${m[2]}: cannot read ${file} (${err.code || err.message})`);
+    }
+    const sel = selected.find((s) => s.id === m[1]);
+    if (!sel) throw new Error(`--param-file ${m[1]}.${m[2]}: recipe ${m[1]} is not among the selected recipes`);
+    sel.params = { ...(sel.params || {}), [m[2]]: text.replace(/^﻿/, '') };
   }
 }
 
@@ -425,12 +502,30 @@ export async function cmdApply(args, { loadMeasure, pickLang }) {
   const t = translator(lang);
   const catalog = loadCatalog();
   const rec = readJsonSafe(path.join(stateDir(), 'recommendations.json'));
+  // Custom recipes (ids like custom.*) drafted for this run live in an extra-recipes file: the one given with --add, or
+  // else the one `recommend --add` recorded in recommendations.json (when it is still there).
+  let extraFile = null;
+  if (flags.add && flags.add !== true) extraFile = resolveExtraFile(flags.add);
+  else if (flags.add === true) throw new Error('--add expects a file');
+  else if (rec && typeof rec.extraFile === 'string' && exists(rec.extraFile)) extraFile = rec.extraFile;
+  if (extraFile) {
+    const extra = readExtraRecipes(extraFile);
+    if (!extra) {
+      if (flags.add) throw new Error(`--add: cannot read ${flags.add}`);
+    } else addExtraRecipes(catalog, extra);
+  }
   const choices = loadChoices(args);
   applyParamOverrides(choices.selected || [], flags);
-  const projectDir = flags.project ? path.resolve(String(flags.project)) : process.env.CLAUDE_PROJECT_DIR || measure.env.projectDir || process.cwd();
+  const projectDir = flags.project ? path.resolve(expandHome(String(flags.project))) : process.env.CLAUDE_PROJECT_DIR || measure.env.projectDir || process.cwd();
   if (!choices.selected || !choices.selected.length) {
     process.stdout.write(t('cli.apply_nothing') + '\n');
     return { applied: 0 };
+  }
+  // Validate every scope before the first write: anything but user|project would silently resolve to the user files.
+  const scopeOf = (sel, recipe) => flags.scope || sel.scope || (recipe && recipe.defaultScope) || 'user';
+  for (const sel of choices.selected) {
+    const scope = scopeOf(sel, catalog.recipes.find((r) => r.id === sel.id));
+    if (!SCOPES.includes(scope)) throw new Error(`bad scope ${JSON.stringify(scope)}${sel && sel.id ? ` for ${sel.id}` : ''}: expected ${SCOPES.join(' or ')}`);
   }
   // One journal directory per apply. The id has a resolution of one second, so a second apply in the same second
   // gets a numeric suffix instead of overwriting (and losing) the first batch's manifest and backups.
@@ -443,7 +538,7 @@ export async function cmdApply(args, { loadMeasure, pickLang }) {
   for (const sel of choices.selected) {
     const recipe = catalog.recipes.find((r) => r.id === sel.id);
     if (!recipe) {
-      lines.push(`! unknown recipe ${sel.id} (skipped)`);
+      lines.push(`! unknown recipe ${sel.id} (skipped)${/^custom\./.test(sel.id) ? ' - custom recipes need --add FILE (the extra-recipes file given to recommend --add)' : ''}`);
       continue;
     }
     const recommended = rec && rec.recommendations.find((r) => r.id === sel.id);
@@ -451,7 +546,9 @@ export async function cmdApply(args, { loadMeasure, pickLang }) {
     for (const p of recipe.params || []) params[p.name] = p.default;
     if (recommended) for (const p of recommended.params || []) params[p.name] = p.value;
     Object.assign(params, sel.params || {});
-    const scope = flags.scope || sel.scope || recipe.defaultScope || 'user';
+    const scope = scopeOf(sel, recipe);
+    const allowed = Array.isArray(recipe.scope) ? recipe.scope : [recipe.scope || recipe.defaultScope || 'user'];
+    if (!allowed.includes(scope)) lines.push(`! ${recipe.id}: scope ${scope} is not one of the scopes this recipe lists (${allowed.join(', ')}); applying anyway`);
     const ctx = buildContext({ scope, projectDir, params });
     const io = makeIo({ dry, force: !!flags.force, measure, batchDir, recipeId: recipe.id });
     const entries = [];
@@ -474,12 +571,14 @@ export async function cmdApply(args, { loadMeasure, pickLang }) {
       }
     }
     for (const d of io.described) lines.push(`  ${dry ? '→' : '✓'} ${d}`);
+    for (const n of io.notes) lines.push(`  · ${recipe.id}: ${n}`);
     manifest.recipes.push({ id: recipe.id, scope, params, actions: entries, advice: !(recipe.actions && recipe.actions.length) });
   }
   if (!dry) {
     ensureDir(batchDir);
     writeJsonAtomic(path.join(batchDir, 'manifest.json'), manifest);
-    writeJsonAtomic(path.join(stateDir(), 'last-apply.json'), { id: batchId, at: manifest.at, recipes: manifest.recipes.map((r) => r.id) });
+    // only recipes that changed something (or are advice) count as applied; the rest stay open for a re-apply
+    writeJsonAtomic(path.join(stateDir(), 'last-apply.json'), { id: batchId, at: manifest.at, recipes: manifest.recipes.filter((r) => r.advice || r.actions.length).map((r) => r.id) });
   }
   const out = lines.join('\n');
   if (out) process.stdout.write(out + '\n');
@@ -548,6 +647,11 @@ function undoEntry(e, io) {
       const end = `<!-- kaizen:end ${e.id} -->`;
       const m = new RegExp(`(\\n?\\n?)${escapeRe(start)}[\\s\\S]*?${escapeRe(end)}(\\n?)`).exec(text);
       if (!m) return 'block already gone';
+      // like `file` and `settings.set`: leave alone what the user edited after apply (journals from before the hash was recorded skip this check)
+      if (e.hash) {
+        const current = m[0].slice(m[1].length, m[0].length - m[2].length).replace(/\r\n/g, '\n');
+        if (sha(current) !== e.hash) return `kept: ${e.file} block "${e.id}" modified since apply`;
+      }
       const before = text.slice(0, m.index);
       const after = text.slice(m.index + m[0].length);
       // Exact inverse of apply, with no blank-line clean-up elsewhere in the file:
@@ -566,9 +670,17 @@ function undoEntry(e, io) {
       const cfg = io.load(e.file);
       cfg.mcpServers ||= {};
       let restored = 0;
-      for (const r of e.removed) if (!cfg.mcpServers[r.name]) {
-        cfg.mcpServers[r.name] = r.config;
-        restored++;
+      for (const r of e.removed) {
+        let bucket = cfg.mcpServers;
+        if (r.where === 'local' && r.projectKey) {
+          cfg.projects ||= {};
+          cfg.projects[r.projectKey] ||= {};
+          bucket = cfg.projects[r.projectKey].mcpServers ||= {};
+        }
+        if (!bucket[r.name]) {
+          bucket[r.name] = r.config;
+          restored++;
+        }
       }
       io.describe(`${e.file}: restore MCP servers ${e.removed.map((r) => r.name).join(', ')}`);
       if (!io.dry) io.save(e.file, cfg);
