@@ -1,0 +1,24 @@
+{
+  "name": "kaizen",
+  "displayName": "Kaizen",
+  "version": "0.1.0",
+  "description": "Continuous improvement for Claude Code: measures how you really work from local transcripts, lets you pick fixes in an interactive console, then configures hooks, skills, subagents, rules and permissions for you. Reversible, local-only, bilingual (en/ru).",
+  "author": {
+    "name": "KROU4",
+    "url": "https://github.com/KROU4"
+  },
+  "homepage": "https://github.com/KROU4/claude-kaizen",
+  "repository": "https://github.com/KROU4/claude-kaizen",
+  "license": "MIT",
+  "keywords": [
+    "productivity",
+    "insights",
+    "hooks",
+    "skills",
+    "subagents",
+    "permissions",
+    "configuration",
+    "self-improvement",
+    "kaizen"
+  ]
+}

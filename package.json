@@ -1,0 +1,58 @@
+{
+  "name": "claude-kaizen",
+  "version": "0.1.0",
+  "description": "Continuous improvement for Claude Code: measure how you really work, pick the fixes, let it configure hooks, skills, agents and rules for you.",
+  "type": "module",
+  "license": "MIT",
+  "private": false,
+  "homepage": "https://github.com/KROU4/claude-kaizen#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KROU4/claude-kaizen.git"
+  },
+  "bugs": {
+    "url": "https://github.com/KROU4/claude-kaizen/issues"
+  },
+  "keywords": [
+    "claude-code",
+    "claude",
+    "anthropic",
+    "plugin",
+    "hooks",
+    "skills",
+    "agents",
+    "developer-tools",
+    "productivity",
+    "kaizen"
+  ],
+  "engines": {
+    "node": ">=18.17"
+  },
+  "bin": {
+    "kaizen": "./scripts/kaizen.mjs"
+  },
+  "files": [
+    ".claude-plugin",
+    "skills",
+    "agents",
+    "hooks",
+    "scripts",
+    "recipes",
+    "console",
+    "locales",
+    "README.md",
+    "README.ru.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test tests/",
+    "lint": "node scripts/kaizen.mjs selfcheck",
+    "measure": "node scripts/kaizen.mjs measure",
+    "recommend": "node scripts/kaizen.mjs recommend",
+    "console": "node scripts/kaizen.mjs console",
+    "apply": "node scripts/kaizen.mjs apply",
+    "undo": "node scripts/kaizen.mjs undo"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

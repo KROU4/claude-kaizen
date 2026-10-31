@@ -1,0 +1,22 @@
+# dependencies (the kit has none, but contributors may add dev tooling locally)
+node_modules/
+
+# local state produced while developing against a real ~/.claude
+.kaizen/
+tmp/
+*.log
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# OMC / Claude Code operational artifacts
+.omc/
+.claude/settings.local.json
+.claude/docker-keep-running
+
+# test output
+coverage/

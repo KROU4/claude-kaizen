@@ -1,0 +1,18 @@
+{
+  "name": "claude-kaizen",
+  "description": "Kaizen: measure how you use Claude Code, choose improvements in an interactive console, apply them reversibly.",
+  "owner": {
+    "name": "KROU4",
+    "url": "https://github.com/KROU4"
+  },
+  "plugins": [
+    {
+      "name": "kaizen",
+      "source": "./",
+      "description": "Continuous improvement for Claude Code: measure → choose → apply → undo. Hooks, skills, subagents, CLAUDE.md rules, permissions, MCP cleanup, status line. Local-only, en/ru.",
+      "version": "0.1.0",
+      "category": "productivity",
+      "tags": ["insights", "hooks", "skills", "permissions", "configuration", "self-improvement"]
+    }
+  ]
+}
