@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [0.1.2] — 2026-11-01
+
+### Fixed
+- Console: a secret parameter (Telegram bot token) was dropped from the submission whenever its recipe was not the first one selected.
+- MCP servers whose names contain characters Claude Code rewrites in tool names (dots, spaces) were reported unused and preselected for removal; names are now compared the way Claude Code builds them.
+- With `CLAUDE_CONFIG_DIR` set, the global `.claude.json` is read and written in the right place.
+- Inventory: hooks shipped by enabled plugins count as installed (no duplicate hook suggestions), disabled plugins are ignored, managed settings are read, `AGENTS.md` and path-scoped rules are counted only when Claude Code would load them, dangling symlinks, BOM files and YAML block scalars no longer break `measure`.
+- Recipes: `session-context` and `precompact-handoff` share one SessionStart matcher cleanly; `format-on-edit` supports dotnet format, rubocop, php-cs-fixer, swiftformat, ktlint, google-java-format, terraform fmt and shfmt; `skills.prune-unused` and ratio-based recipes fire only on real data; `.mcp.json` servers that are not enabled are not "unused".
+- Metrics: test runs made by subagents count; waiting for a permission answer is not a slow command; documentation-only edits are not "edits without tests"; the slow-command total is no longer capped.
+- `undo --dry-run` says what would be reverted instead of "Reverted"; the undo and start skills no longer suggest hand edits and explain how to undo several batches.
+
 ## [0.1.1] — 2026-11-01
 
 ### Added
