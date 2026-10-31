@@ -221,6 +221,9 @@ function cmdRecommend(flags) {
       if (!defaults) continue;
       for (const p of r.params) if (defaults[p.name] !== undefined) p.value = defaults[p.name];
     }
+    const shown = new Set(res.recommended.map((r) => r.id));
+    const dropped = Object.keys(extra.paramDefaults).filter((id) => !shown.has(id));
+    if (dropped.length) err(translator(lang)('cli.param_defaults_dropped', { ids: dropped.join(', ') }));
   }
   if (extra && typeof extra.profile === 'string') writeJsonAtomic(path.join(stateDir(), 'profile.json'), { generatedAt: new Date().toISOString(), profile: extra.profile });
   const top = flags.top ? Number(flags.top) : 0;

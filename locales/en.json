@@ -16,6 +16,7 @@
     "undo_done": "Reverted {n} change(s) from {id}.",
     "undo_dry": "Dry run: nothing reverted. {n} change(s) from {id} would be reverted.",
     "undo_nothing": "Nothing to undo.",
+    "param_defaults_dropped": "  ! paramDefaults ignored for recipes that are not recommended: {ids}",
     "undo_partial": "  ! {n} change(s) were left in place (see \"kept\"/\"error\" above), so {id} is only partly undone and stays in the journal.\n    Review them, then run `undo {id}` again, or `undo {id} --force` to revert them anyway (every file is backed up first, in a new folder under {dir}).",
     "undo_partial_before": "    The files as they were before apply are in {before}.",
     "nudge": "Kaizen: {n} new high-impact suggestion(s) found. Run /kaizen:start to review them.",

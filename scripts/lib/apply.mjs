@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { configDir, ensureDir, exists, expandHome, globalConfigPath, kitRoot, readJsonSafe, settingsFiles, stateDir, toPosix, writeJsonAtomic } from './paths.mjs';
+import { configDir, ensureDir, exists, expandHome, globalConfigPath, kitRoot, projectConfigKey, readJsonSafe, settingsFiles, stateDir, toPosix, writeJsonAtomic } from './paths.mjs';
 import { nodeCommand } from './platform.mjs';
 import { actionApplies, addExtraRecipes, closeMatches, loadCatalog, readExtraRecipes, rememberedExtraFile, resolveExtraFile, resolvePath } from './recipes.mjs';
 import { UserError, translator } from './i18n.mjs';
@@ -394,15 +394,9 @@ const handlers = {
   },
 };
 
-/** The key of ~/.claude.json `projects` that stands for this directory (Claude Code writes forward slashes, Windows paths differ in case). */
+/** The key of ~/.claude.json `projects` that stands for this directory and has servers (same lookup as inventory). */
 function findProjectKey(cfg, projectDir) {
-  if (!cfg.projects || typeof cfg.projects !== 'object') return null;
-  const norm = (p) => {
-    const s = toPosix(p).replace(/\/+$/, '');
-    return process.platform === 'win32' ? s.toLowerCase() : s;
-  };
-  const want = norm(projectDir);
-  return Object.keys(cfg.projects).find((k) => cfg.projects[k] && cfg.projects[k].mcpServers && norm(k) === want) || null;
+  return projectConfigKey(cfg.projects, projectDir, (v) => v && v.mcpServers);
 }
 
 function escapeRe(s) {

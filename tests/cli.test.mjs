@@ -380,6 +380,16 @@ describe('kaizen recommend', () => {
     assert.equal(readJson(path.join(home.stateDir, 'profile.json')).profile, 'Prefers terse answers.');
   });
 
+  it('--add warns about paramDefaults for recipes that are not recommended', () => {
+    const home = measured();
+    const extra = path.join(home.root, 'extra.json');
+    writeJson(extra, { recipes: [], paramDefaults: { 'no.such-recipe': { x: 1 } } });
+    const r = cli(home, ['recommend', '--json', '--lang', 'en', '--add', extra]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /paramDefaults ignored .*no\.such-recipe/);
+    JSON.parse(r.stdout);
+  });
+
   it('--add with an unreadable file is an error', () => {
     const home = measured();
     const r = cli(home, ['recommend', '--add', path.join(home.root, 'missing.json')]);
