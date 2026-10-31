@@ -36,26 +36,36 @@ function riskyTarget(raw) {
   t = t.replace(/^(?:\.\/)+/, '');
   const home = /^(?:~|\$\{?(?:HOME|USERPROFILE)\}?|\$env:USERPROFILE|%(?:USERPROFILE|HOME)%)(?=\/|$)/i.exec(t);
   const drive = home ? null : /^[a-z]:(?=\/|$)/i.exec(t);
-  const segs = t.slice(home ? home[0].length : drive ? drive[0].length : 0).split('/').filter((s) => s && s !== '.');
-  if (home) return segs.length <= 1 ? 'your home directory' : null;
+  // Collapse "..": popping past the start leaves `up` > 0 (above home, or above the relative start; at / or C:\ it stays put).
+  const segs = [];
+  let up = 0;
+  for (const s of t.slice(home ? home[0].length : drive ? drive[0].length : 0).split('/')) {
+    if (!s || s === '.') continue;
+    if (s !== '..') segs.push(s);
+    else if (segs.length) segs.pop();
+    else up++;
+  }
+  if (home) return segs.length <= 1 || up ? 'your home directory' : null;
   // A bare variable ("$tmp") is unknown, not provably broad; "$tmp/" and "$tmp/*" are the classic empty-variable disaster.
   if (/^(?:\$\{?\w*\}?|\$env:\w+|%\w+%)$/i.test(t.replace(/\/$/, ''))) return glob || t.endsWith('/') ? 'a variable directory that may be empty' : null;
   if (drive || t.startsWith('/')) {
     if (segs.length <= 1) return segs.length ? 'a top-level directory' : 'a filesystem root';
     return segs.length === 2 && (/^(?:home|users)$/i.test(segs[0]) || SYSTEM_DIR.test(segs[0])) ? 'a home or system directory' : null;
   }
-  if (segs.every((s) => s === '..')) return 'the current or a parent directory';
+  if (!segs.length) return 'the current or a parent directory';
+  if (up) return null;
   if (segs.length + (glob ? 1 : 0) >= 2 || WELL_KNOWN.has(segs[0].toLowerCase()) || /[*?]/.test(segs[0])) return null;
   return `a single top-level path (${segs[0]})`;
 }
 
-// Heredoc bodies are data for cat/psql, not commands: drop them before tokenizing.
-const stripHeredocs = (t) => t.replace(/(<<-?[ \t]*(['"]?)([A-Za-z_][\w-]*)\2[^\n]*)\n[\s\S]*?\n[ \t]*\3[ \t]*(?=\n|$)/g, '$1');
+// Heredoc bodies are data for cat/psql, not commands: drop them before tokenizing, but keep them in `bodies`
+// so analyze() can still inspect them when the heredoc feeds a shell (bash <<EOF ... EOF).
+const stripHeredocs = (t, bodies) => t.replace(/(<<-?[ \t]*(['"]?)([A-Za-z_][\w-]*)\2[^\n]*)\n([\s\S]*?)\n[ \t]*\3[ \t]*(?=\n|$)/g, (m, head, q, d, body) => { bodies.push(body); return head; });
 
 // Shell-ish tokenizer: one token array per simple command (quotes removed, operators split).
-function tokenize(cmd, ps) {
+function tokenize(cmd, ps, bodies) {
   const esc = ps ? '`' : '\\';
-  const text = stripHeredocs(cmd.replace(/\r\n?/g, '\n'));
+  const text = stripHeredocs(cmd.replace(/\r\n?/g, '\n'), bodies);
   const segs = [];
   let toks = [], cur = '', has = false, q = null;
   const word = () => { if (has) toks.push(cur); cur = ''; has = false; };
@@ -154,19 +164,46 @@ function nested(name, args) {
   return null;
 }
 
+// A shell that reads its script from stdin (bash <<EOF, bash <<< "...", ... | bash): returns { ps, strs } or null.
+function stdinScript(name, args) {
+  const ps = /^(?:powershell|pwsh)$/.test(name);
+  if (name !== 'eval' && !ps && !/^(?:bash|sh|zsh|dash|ksh)$/.test(name)) return null;
+  const strs = [];
+  let s = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (/^-[a-z]*c(?:ommand)?$/i.test(a) && name !== 'eval') return null;
+    if (a === '-s') s = true;
+    else if (a === '<<<') strs.push(args[++i] || '');
+    else if (a.startsWith('<<<')) strs.push(a.slice(3));
+    else if (/^\d*<<-?$/.test(a)) i++;
+    else if (!a.startsWith('-') && !/^\d*<<-?./.test(a) && !s && name !== 'eval') return null; // a script file, not stdin
+  }
+  return { ps, strs };
+}
+
 function analyze(cmd, ps, ctx, depth = 0) {
-  const names = [];
-  for (const raw of tokenize(cmd, ps)) {
+  const names = [], bodies = [];
+  let feed = null;
+  for (const raw of tokenize(cmd, ps, bodies)) {
     const toks = unwrap(raw);
     if (!toks.length) continue;
     const name = toks[0].split(/[\\/]/).pop().toLowerCase().replace(/\.(?:exe|com|cmd|bat)$/, '');
     names.push(name);
+    const f = stdinScript(name, toks.slice(1));
+    if (f) feed = { ps: f.ps, strs: [...(feed ? feed.strs : []), ...f.strs] };
     const toDevice = raw.some((t, i) => (/^\d*>>?$/.test(t) && DEVICE.test(raw[i + 1] || '')) || (/^\d*>>?\/dev\//.test(t) && DEVICE.test(t)));
     const hit = checkCommand(name, toks.slice(1), ctx) || (toDevice ? 'redirecting output onto a raw disk device destroys its data' : null);
     if (hit) return hit;
     const inner = depth < 2 ? nested(name, toks.slice(1)) : null;
     const sub = inner && analyze(inner[0], inner[1], ctx, depth + 1);
     if (sub) return sub;
+  }
+  if (feed && depth < 2) {
+    for (const b of [...bodies, ...feed.strs]) {
+      const sub = analyze(b, feed.ps, ctx, depth + 1);
+      if (sub) return sub;
+    }
   }
   if (SQL_RE.test(cmd) && (SQL_CLIENT.test(cmd) || names.some((n) => !TEXT_ONLY.has(n)))) return 'SQL DROP/TRUNCATE cannot be undone';
   return null;
@@ -194,16 +231,21 @@ function selftest() {
     'git checkout -- .', `git push --force origin ${PROTECTED[0]}`, 'git push -f', `git push origin +${PROTECTED[0]}`, 'git branch -D old', 'psql -c "DROP TABLE users"',
     'echo "TRUNCATE TABLE a;" | mysql', 'del /s /q C:\\', 'rmdir /s /q D:\\', 'format D:', 'mkfs.ext4 /dev/sdb1', 'dd if=/dev/zero of=/dev/sda', 'chmod -R 777 /',
     'cat x > /dev/sda', 'bash -c "rm -rf /"', 'ls && rm -rf ~/', 'rm -rf "$tmp"/', 'rm -rf $VAR/*',
+    'rm -rf ~/../..', 'rm -rf /opt/..', 'rm -rf ~/proj/..', 'rm -rf /home/u/..', 'rm -rf "$PROJECT/.."', 'rm -rf ./build/../..',
+    "bash <<'EOF'\nrm -rf /\nEOF", 'sh <<EOF\nrm -rf ~\nEOF', 'sudo bash <<-EOF\n\tgit reset --hard\n\tEOF', 'cat <<EOF | bash\ngit clean -fdx\nEOF',
+    'bash <<< "rm -rf /"', 'eval "$(cat <<EOF\nrm -rf /\nEOF\n)"', 'cd x && bash -e <<EOF\nset -e\ngit branch -D old\nEOF',
   ];
   const good = [
     'ls -la', 'rm -rf node_modules', 'rm -rf dist/', 'rm -rf ./tmp/foo', 'rm file.txt', 'rm -rf build/*', 'git push --force-with-lease origin feature/x', 'git push origin main',
     'git status && git log --oneline', 'git commit -m "docs: never run rm -rf / or DROP TABLE"', 'git checkout -b feature', 'git reset --soft HEAD~1', 'echo "DROP TABLE x" > notes.txt',
     'cat <<EOF > a.md\nrm -rf /\nEOF', 'chmod -R 755 ./public/assets', 'dd if=a.iso of=b.img', 'rm -rf "$tmp"', 'rm -rf $(mktemp -d)',
+    'rm -rf ./build/../dist', 'rm -rf ../out', "bash <<'EOF'\necho hi\nls\nEOF", 'cat <<EOF | tee a.sh\nrm -rf /\nEOF', 'bash run.sh <<EOF\nrm -rf /\nEOF',
+    'git commit -m "$(cat <<\'EOF\'\nfix: never rm -rf /\nEOF\n)"',
   ];
   let failed = 0;
   const run = (tool, command, branch = () => null) => evaluate({ tool_name: tool, tool_input: { command } }, { branch });
   const check = (name, ok, why) => { console.log(ok ? `ok ${name}` : `FAIL ${name} ${why}`); if (!ok) failed++; };
-  for (const c of bad) check(c, run('Bash', c)?.hookSpecificOutput.permissionDecision === MODE, 'expected a block');
+  for (const c of bad) check(c.replace(/\n/g, '\\n'), run('Bash', c)?.hookSpecificOutput.permissionDecision === MODE, 'expected a block');
   for (const c of good) check(c.replace(/\n/g, '\\n'), run('Bash', c) === null, 'expected silence');
   check('ps Remove-Item C:\\', !!run('PowerShell', 'Remove-Item -Recurse -Force C:\\'), 'expected a block');
   check('ps Remove-Item .\\build', run('PowerShell', 'Remove-Item -Recurse -Force -ErrorAction SilentlyContinue .\\build') === null, 'expected silence');

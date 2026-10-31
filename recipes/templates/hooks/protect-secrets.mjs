@@ -3,7 +3,7 @@
 //   *.kdbx, id_rsa*, id_ed25519*, anything under .ssh/, .aws/credentials, .netrc, .pypirc, secrets.yml|yaml|json,
 //   credentials.json, service-account*.json) and Bash commands that print them (cat .env, type, Get-Content,
 //   printenv, bare env, echo $API_TOKEN). Allowed: .env.example/.sample/.template and public keys (*.pub).
-// Registered for: PreToolUse, matcher "Read|Edit|Write|MultiEdit|Bash".
+// Registered for: PreToolUse, matcher "Read|Edit|Write|MultiEdit|Bash|PowerShell" (shell commands are checked for both shells).
 // Parameters (substituted by Kaizen at install time): extraPatterns (comma list of extra glob-ish patterns,
 //   e.g. "*.secret,config/prod.yml,vault/"; a pattern without "/" matches the file name only).
 // Remove: delete the PreToolUse entry that runs this file from settings.json, or run `kaizen undo`.
@@ -29,7 +29,7 @@ function isSecretPath(file, extras = EXTRA) {
   const base = (parts[parts.length - 1] || '').toLowerCase();
   const dirs = parts.slice(0, -1).map((s) => s.toLowerCase());
   if (!base) return false;
-  if (/^\.env(?:\..+)?$/.test(base)) return !/\.(?:example|sample|template)$/.test(base);
+  if (/^\.env(?:[.*?].*)?$/.test(base)) return !/\.(?:example|sample|template)$/.test(base);
   if (dirs.includes('.ssh')) return true;
   if (base === 'credentials' && dirs[dirs.length - 1] === '.aws') return true;
   if (/^id_(?:rsa|ed25519|ecdsa|dsa)/.test(base)) return !base.endsWith('.pub');
@@ -85,13 +85,14 @@ function evaluate(payload, extras = EXTRA) {
   const input = payload.tool_input || {};
   const file = input.file_path || input.notebook_path;
   if (typeof file === 'string' && file) return isSecretPath(file, extras) ? deny(file) : null;
-  const hit = payload.tool_name === 'Bash' && typeof input.command === 'string' ? bashHit(input.command, extras) : null;
+  const hit = (payload.tool_name === 'Bash' || payload.tool_name === 'PowerShell') && typeof input.command === 'string' ? bashHit(input.command, extras) : null;
   return hit ? deny(hit) : null;
 }
 
 function selftest() {
   const file = (tool, p) => ({ tool_name: tool, tool_input: { file_path: p } });
   const bash = (command) => ({ tool_name: 'Bash', tool_input: { command } });
+  const ps = (command) => ({ tool_name: 'PowerShell', tool_input: { command } });
   const cases = [
     [file('Read', '/app/.env'), true], [file('Read', 'C:\\proj\\.env.production'), true], [file('Read', '/home/u/.ssh/id_rsa'), true], [file('Read', '/home/u/.aws/credentials'), true],
     [file('Read', '/x/server.pem'), true], [file('Read', '/x/id_ed25519'), true], [file('Read', '/x/.netrc'), true], [file('Read', 'config/secrets.yaml'), true],
@@ -103,6 +104,11 @@ function selftest() {
     [bash('printenv'), true], [bash('env | sort'), true], [bash('echo $GITHUB_TOKEN'), true], [bash('cat < .env'), true], [bash('grep API_KEY .env'), true],
     [bash('cat README.md'), false], [bash('ls -la'), false], [bash('cat .env.example'), false], [bash('echo $PATH'), false], [bash('grep -r ".env" src'), false],
     [bash('cp .env.example .env'), false], [bash('printenv PATH'), false], [bash('env FOO=1 node a.js'), false], [bash('git status'), false],
+    [bash('cat .env*'), true],
+    [ps('Get-Content .env'), true], [ps('Get-Content -Path .\\.env'), true], [ps('type .\\.env'), true], [ps('gc C:\\proj\\.env.production'), true], [ps('cat ~/.ssh/id_rsa'), true],
+    [ps('Get-ChildItem env:'), true], [ps('Write-Host $env:GITHUB_TOKEN'), true], [ps('Get-Content .env; ls'), true],
+    [ps('Get-Content README.md'), false], [ps('Get-Content .env.example'), false], [ps('Write-Host $env:PATH'), false], [ps('Get-ChildItem'), false],
+    [{ tool_name: 'WebFetch', tool_input: { command: 'cat .env' } }, false],
   ];
   let failed = 0;
   const check = (name, ok, why) => { console.log(ok ? `ok ${name}` : `FAIL ${name} ${why}`); if (!ok) failed++; };

@@ -1,0 +1,111 @@
+// Behaviour of the guard-destructive and protect-secrets hook templates, run as real child processes
+// with a PreToolUse payload on stdin (the way Claude Code runs them), rendered the way `apply` renders them.
+import { test, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const HOOKS = path.join(ROOT, 'recipes', 'templates', 'hooks');
+let tmp;
+let renderTemplate;
+const scripts = {};
+
+function render(name, params = {}) {
+  const text = fs.readFileSync(path.join(HOOKS, name), 'utf8');
+  const file = path.join(tmp, `${Object.values(params).join('_').replace(/[^\w-]/g, '') || 'default'}-${name}`);
+  fs.writeFileSync(file, renderTemplate(text, params, { js: true }));
+  return file;
+}
+
+before(async () => {
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kaizen-hooks-'));
+  process.env.CLAUDE_CONFIG_DIR = path.join(tmp, 'claude');
+  process.env.KAIZEN_STATE_DIR = path.join(tmp, 'state');
+  ({ renderTemplate } = await import('../scripts/lib/apply.mjs'));
+  scripts.guard = render('guard-destructive.mjs', { mode: 'deny', protectedBranches: 'main,master' });
+  scripts.guardAsk = render('guard-destructive.mjs', { mode: 'ask', protectedBranches: 'main,master' });
+  scripts.secrets = render('protect-secrets.mjs', { extraPatterns: '*.secret' });
+});
+
+after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+
+function run(script, payload) {
+  const r = spawnSync(process.execPath, [script], { input: JSON.stringify(payload), encoding: 'utf8', timeout: 15000, windowsHide: true });
+  assert.equal(r.status, 0, r.stderr);
+  return r.stdout.trim() ? JSON.parse(r.stdout).hookSpecificOutput : null;
+}
+const shell = (tool, command) => ({ tool_name: tool, tool_input: { command } });
+
+test('rendered templates pass their own --selftest', () => {
+  for (const script of [scripts.guard, scripts.guardAsk, scripts.secrets]) {
+    const r = spawnSync(process.execPath, [script, '--selftest'], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.ok(!/^FAIL/m.test(r.stdout), r.stdout);
+  }
+});
+
+test('protect-secrets: PowerShell tool commands are checked like Bash ones', () => {
+  for (const c of ['Get-Content .env', 'Get-Content -Path .\\.env', 'type .\\.env', 'gc C:\\proj\\.env.production', 'cat ~/.ssh/id_rsa', 'Get-ChildItem env:', 'Write-Host $env:GITHUB_TOKEN']) {
+    const out = run(scripts.secrets, shell('PowerShell', c));
+    assert.equal(out && out.permissionDecision, 'deny', c);
+    assert.equal(run(scripts.secrets, shell('Bash', c.replace(/\\/g, '/'))) !== null, true, `Bash twin of ${c}`);
+  }
+  for (const c of ['Get-Content README.md', 'Get-Content .env.example', 'Write-Host $env:PATH', 'Get-ChildItem']) {
+    assert.equal(run(scripts.secrets, shell('PowerShell', c)), null, c);
+  }
+});
+
+test('protect-secrets: a glob over .env files is a secret read; unrelated tools are ignored', () => {
+  assert.equal(run(scripts.secrets, shell('Bash', 'cat .env*')).permissionDecision, 'deny');
+  assert.equal(run(scripts.secrets, shell('Bash', 'cat .envrc')), null);
+  assert.equal(run(scripts.secrets, shell('WebFetch', 'cat .env')), null);
+});
+
+test('guard-destructive: heredoc bodies are scanned when the heredoc feeds a shell', () => {
+  const bad = [
+    "bash <<'EOF'\nrm -rf /\nEOF",
+    'sh <<EOF\nrm -rf ~\nEOF',
+    'sudo bash <<-EOF\n\tgit reset --hard\n\tEOF',
+    'bash -e <<EOF\nset -e\nrm -rf "$BUILD_DIR"/\nEOF',
+    'cd repo && bash <<EOF\ngit clean -fdx\nEOF',
+    'cat <<EOF | bash\nrm -rf /\nEOF',
+    'bash <<< "rm -rf /"',
+    'eval "$(cat <<EOF\nrm -rf /\nEOF\n)"',
+    'zsh << EOF\ngit branch -D old\nEOF',
+  ];
+  for (const c of bad) {
+    const out = run(scripts.guard, shell('Bash', c));
+    assert.equal(out && out.permissionDecision, 'deny', JSON.stringify(c));
+  }
+  assert.equal(run(scripts.guardAsk, shell('Bash', bad[0])).permissionDecision, 'ask');
+  const pwsh = run(scripts.guard, shell('PowerShell', "pwsh <<'EOF'\nRemove-Item -Recurse -Force C:\\\nEOF"));
+  assert.equal(pwsh && pwsh.permissionDecision, 'deny');
+});
+
+test('guard-destructive: heredocs that are plain data stay allowed', () => {
+  const good = [
+    'cat <<EOF > a.md\nrm -rf /\nEOF',
+    'cat <<EOF | tee a.sh\nrm -rf /\nEOF',
+    "bash <<'EOF'\necho hi\nls\nEOF",
+    'bash run.sh <<EOF\nrm -rf /\nEOF',
+    'git commit -m "$(cat <<\'EOF\'\nfix: never rm -rf /\nEOF\n)"',
+  ];
+  for (const c of good) assert.equal(run(scripts.guard, shell('Bash', c)), null, JSON.stringify(c));
+});
+
+test('guard-destructive: ".." is collapsed before judging an rm target', () => {
+  const bad = ['rm -rf ~/../..', 'rm -rf /opt/..', 'rm -rf /tmp/..', 'rm -rf ~/proj/..', 'rm -rf $HOME/x/..', 'rm -rf /home/alice/..', 'rm -rf C:/Users/me/..', 'rm -rf "$PROJECT/.."', 'rm -rf foo/..', 'rm -rf ./build/../..', 'chmod -R 777 /opt/..'];
+  for (const c of bad) {
+    const out = run(scripts.guard, shell('Bash', c));
+    assert.equal(out && out.permissionDecision, 'deny', c);
+  }
+  const ps = run(scripts.guard, shell('PowerShell', 'Remove-Item -Recurse -Force C:\\Users\\me\\..'));
+  assert.equal(ps && ps.permissionDecision, 'deny');
+  for (const c of ['rm -rf ./build/../dist', 'rm -rf ../out', 'rm -rf node_modules', 'rm -rf ./tmp/foo', 'rm -rf ~/proj/build']) {
+    assert.equal(run(scripts.guard, shell('Bash', c)), null, c);
+  }
+});
