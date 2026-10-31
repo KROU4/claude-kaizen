@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [0.1.3] — 2026-11-01
+
+### Fixed
+- Apply and undo: `session-context` and `precompact-handoff` share one hook script and one SessionStart matcher across batches. Applying the second recipe keeps the first one's parameters, and undoing either batch, in any order, leaves the script and the matcher alternatives the other batch still uses.
+- `format-on-edit`: Python files get `ruff format` only (no `ruff check --fix`, which could change code); `dotnet format` gets an `--include` path relative to the project or solution and runs in its folder; `timeoutSec` is capped below the hook's own timeout.
+- `session-context` shows non-ASCII file names in `git status` as they are, not as octal escapes.
+- `long-command-nudge` works for the PowerShell tool too: long `Start-Sleep`, endless `while ($true)` loops, `Get-Content -Wait`, `ping -t`, watch modes.
+- `kaizen-verifier` validates created skills and subagents with `claude plugin validate --strict` in a temporary plugin folder (the CLI cannot validate a single skill or `agents/` folder) and checks removals (`settings.hook.remove`, `plugins.disable`, local-scope `mcp.disable`).
+- `kaizen-analyst` drafts rules and skills as `custom.*` recipes in `extra-recipes.json`, so drafted rules replace the `corrections` block instead of duplicating it and drafted skills are offered even when catalog thresholds are not met.
+- Inventory: `.claude.json` project keys match Windows paths written in any form, plugins installed at local scope for another project are ignored, failing hooks from managed settings or plugins are reported but not offered for removal, servers turned off with `/mcp` are not "unused", hooks declared in `plugin.json` count, a non-empty `.config.json` wins over `.claude.json`, nested rule folders and ancestor `CLAUDE.md` files are counted.
+- `recommend --add` warns about `paramDefaults` for recipes that were not recommended instead of dropping them silently.
+
 ## [0.1.2] — 2026-11-01
 
 ### Fixed
