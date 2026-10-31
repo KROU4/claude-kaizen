@@ -409,10 +409,10 @@
       "risk": "low",
       "scope": ["user"],
       "defaultScope": "user",
-      "title": { "en": "Some hooks take seconds on every run", "ru": "Некоторые хуки отрабатывают по несколько секунд при каждом запуске" },
-      "why": { "en": "Hooks run synchronously unless marked async. Anything averaging over ~1.5 s on Stop or PreToolUse is felt on every turn; make it async, cache its work, or drop it.", "ru": "Хуки выполняются синхронно, если не помечены async. Всё, что в среднем дольше ~1,5 с на Stop или PreToolUse, ощущается на каждом ходу: сделайте async, кэшируйте работу или уберите." },
-      "evidence": { "en": "Slow hooks: {friction.slowHooks}.", "ru": "Медленные хуки: {friction.slowHooks}." },
-      "when": { "metric": "friction.slowHooks.length", "gte": 1 },
+      "title": { "en": "Some hooks take seconds or hit their timeout", "ru": "Некоторые хуки работают по несколько секунд или упираются в таймаут" },
+      "why": { "en": "Hooks run synchronously unless marked async. Anything averaging over ~1.5 s on Stop or PreToolUse is felt on every turn, and a hook killed by its timeout both delays the turn by the full limit and silently skips its check. Make it async, cache its work, raise a too-tight timeout, or drop it.", "ru": "Хуки выполняются синхронно, если не помечены async. Всё, что в среднем дольше ~1,5 с на Stop или PreToolUse, ощущается на каждом ходу, а хук, убитый по таймауту, задерживает ход на весь лимит и молча пропускает свою проверку. Сделайте его async, кэшируйте работу, увеличьте слишком тесный таймаут или уберите хук." },
+      "evidence": { "en": "Slow hooks: {friction.slowHooks}. Killed by timeout: {friction.hookTimeouts}.", "ru": "Медленные хуки: {friction.slowHooks}. Прерваны по таймауту: {friction.hookTimeouts}." },
+      "when": { "any": [ { "metric": "friction.slowHooks.length", "gte": 1 }, { "metric": "friction.hookTimeouts.length", "gte": 1 } ] },
       "actions": []
     },
     {

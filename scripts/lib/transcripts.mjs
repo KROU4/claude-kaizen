@@ -12,7 +12,7 @@ import { readJsonl } from './jsonl.mjs';
 import { redact, snippet } from './redact.mjs';
 import { ensureDir, readJsonSafe, writeJsonAtomic } from './paths.mjs';
 
-export const SUMMARY_VERSION = 14;
+export const SUMMARY_VERSION = 16;
 
 const INTERRUPT_RE = /\[Request interrupted by user/;
 const COMPACT_RE = /^This session is being continued from a previous conversation/;
@@ -215,7 +215,7 @@ export function newSessionSummary(file) {
     costUSD: null,
     linesAdded: 0,
     linesRemoved: 0,
-    hooks: { summaries: 0, hookRuns: 0, errors: 0, events: {}, durations: {}, nonBlockingErrors: 0, errorSamples: [], errorsByCommand: {} },
+    hooks: { summaries: 0, hookRuns: 0, errors: 0, events: {}, durations: {}, timeouts: {}, nonBlockingErrors: 0, errorSamples: [], errorsByCommand: {} },
     attachments: {},
     toolTimeouts: 0,
     toolInterrupted: 0,
@@ -313,7 +313,16 @@ export async function summarizeTranscript(file) {
       // command and duration. Stop / SubagentStop runs also arrive as hook_* attachments, but the stop_hook_summary
       // system line above already counted them (same command and duration), so they are skipped here.
       const stopEvent = a.hookEvent === 'Stop' || a.hookEvent === 'SubagentStop';
-      if (typeof a.type === 'string' && a.type.startsWith('hook_') && typeof a.command === 'string' && !stopEvent) {
+      if (a.type === 'hook_cancelled' && typeof a.command === 'string') {
+        // A cancelled run's durationMs is the time until it was killed, not how long the hook takes, so it never feeds
+        // the averages. Cancellation by timeout is a finding of its own (the hook keeps hitting its limit).
+        if (a.timedOut) {
+          const tk = (s.hooks.timeouts[hookKey(a.command)] ||= { n: 0, limitMs: 0 });
+          tk.n++;
+          if (typeof a.timeoutMs === 'number' && a.timeoutMs > tk.limitMs) tk.limitMs = a.timeoutMs;
+        }
+        if (!stopEvent) s.hooks.hookRuns++;
+      } else if (typeof a.type === 'string' && a.type.startsWith('hook_') && typeof a.command === 'string' && !stopEvent) {
         s.hooks.hookRuns++;
         const d = (s.hooks.durations[hookKey(a.command)] ||= { n: 0, ms: 0, max: 0 });
         d.n++;
@@ -549,6 +558,10 @@ export function hookKey(command) {
   const base = target.replace(/^.*[\\/]/, '');
   // Prompt-type hooks carry prose instead of a command
   if (!/[.\-_/\\]/.test(base) && tokens.length > 4 && !interp.test(tokens[0])) return '(prompt hook)';
+  // A short capitalised label with no path or file name in it ("Design deep pass", "Preparing build session") is the
+  // hook's status message, not a command: keep the whole label so different hooks do not collapse into one word.
+  const label = tokens.length >= 2 && /^\p{Lu}/u.test(tokens[0]) && !interp.test(tokens[0]) && !tokens.some((x) => /[\\/=$|<>]|\.\w{1,5}$/.test(x));
+  if (label) return c.slice(0, 60);
   return base.slice(0, 60) || c.slice(0, 60);
 }
 

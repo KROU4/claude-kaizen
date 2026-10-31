@@ -728,6 +728,19 @@ describe('summarizeTranscript: edge cases on inline transcripts', () => {
     assert.deepEqual(s.hooks.durations['notify.mjs'], { n: 2, ms: 2100, max: 2000 });
   });
 
+  it('records hooks killed by their timeout separately and keeps cancelled runs out of the duration averages', async () => {
+    const cmd = 'node "/x/block-push.mjs"';
+    const s = await summarizeLines([
+      { type: 'attachment', uuid: 'c1', attachment: { type: 'hook_cancelled', hookEvent: 'PreToolUse', command: cmd, durationMs: 18000, timedOut: true, timeoutMs: 5000 } },
+      { type: 'attachment', uuid: 'c2', attachment: { type: 'hook_cancelled', hookEvent: 'PreToolUse', command: cmd, durationMs: 9000, timedOut: true, timeoutMs: 5000 } },
+      { type: 'attachment', uuid: 'c3', attachment: { type: 'hook_cancelled', hookEvent: 'PreToolUse', command: cmd, durationMs: 300, timedOut: false } },
+      { type: 'attachment', uuid: 'c4', attachment: { type: 'hook_success', hookEvent: 'PreToolUse', command: cmd, durationMs: 200 } },
+    ]);
+    assert.equal(s.hooks.hookRuns, 4);
+    assert.deepEqual(s.hooks.timeouts['block-push.mjs'], { n: 2, limitMs: 5000 });
+    assert.deepEqual(s.hooks.durations['block-push.mjs'], { n: 1, ms: 200, max: 200 });
+  });
+
   it('treats a user line with a <command-args> body as one user message but not as a free-form prompt', async () => {
     const s = await summarizeLines([
       userLine('<command-message>fix</command-message>\n<command-name>/fix</command-name>\n<command-args>the login bug</command-args>', { uuid: 'u1' }),
@@ -865,6 +878,17 @@ describe('humanText', () => {
 });
 
 describe('hookKey', () => {
+  it('keeps a short status-message label whole instead of its first word', () => {
+    assert.equal(hookKey('Design deep pass'), 'Design deep pass');
+    assert.equal(hookKey('Preparing build session'), 'Preparing build session');
+    assert.equal(hookKey('Подготовка сессии'), 'Подготовка сессии');
+    // real commands are unaffected
+    assert.equal(hookKey('Get-Date'), 'Get-Date');
+    assert.equal(hookKey('Prettier --write src/a.ts'), 'Prettier');
+    assert.equal(hookKey('node "C:/x/Fmt Hook.mjs"'), 'Fmt Hook.mjs');
+    assert.equal(hookKey('Long prose about many different things here'), '(prompt hook)');
+  });
+
   it('uses the script basename after a quoted node path with spaces', () => {
     assert.equal(hookKey('node "C:/Program Files/nodejs/node.exe" "C:/x/y/keyword.mjs"'), 'keyword.mjs');
   });

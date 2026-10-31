@@ -293,6 +293,7 @@ describe('friction', () => {
     assert.equal(measure.friction.hookErrors, 1);
     assert.equal(measure.friction.hookNonBlockingErrors, 2);
     assert.deepEqual(measure.friction.slowHooks, [{ hook: 'x.mjs', runs: 2, avgMs: 2000, maxMs: 2500 }]);
+    assert.deepEqual(measure.friction.hookTimeouts, []); // the fixtures have no hook killed by its timeout
     assert.equal(measure.friction.slowCommands, 3);
   });
 

@@ -282,13 +282,13 @@ Generated from `recipes/catalog.json` (31 recipes). Do not edit by hand; run `no
 - Actions: advice only (Claude discusses it with you)
 - Inspired by: yurukusa/cc-safe-setup --verify (hook failure taxonomy)
 
-### `advice.slow-hooks` — Some hooks take seconds on every run
+### `advice.slow-hooks` — Some hooks take seconds or hit their timeout
 
-*Некоторые хуки отрабатывают по несколько секунд при каждом запуске*
+*Некоторые хуки работают по несколько секунд или упираются в таймаут*
 
 - Impact: **medium**, risk: low, scope: user
-- Why: Hooks run synchronously unless marked async. Anything averaging over ~1.5 s on Stop or PreToolUse is felt on every turn; make it async, cache its work, or drop it.
-- Trigger: `{"metric":"friction.slowHooks.length","gte":1}`
+- Why: Hooks run synchronously unless marked async. Anything averaging over ~1.5 s on Stop or PreToolUse is felt on every turn, and a hook killed by its timeout both delays the turn by the full limit and silently skips its check. Make it async, cache its work, raise a too-tight timeout, or drop it.
+- Trigger: `{"any":[{"metric":"friction.slowHooks.length","gte":1},{"metric":"friction.hookTimeouts.length","gte":1}]}`
 - Actions: advice only (Claude discusses it with you)
 
 ### `advice.subagent-models` — Route mechanical subagent work to cheaper models
@@ -341,7 +341,8 @@ Generated from `recipes/catalog.json` (31 recipes). Do not edit by hand; run `no
 | `friction.timeouts` | Timed-out tool calls plus timeout-looking errors |
 | `friction.hookNonBlockingErrors` | Hook runs that reported an error (non-blocking) |
 | `friction.failingHookCommands` | Configured hook commands that failed 20+ times in the window |
-| `friction.slowHooks` | Hooks averaging 1.5 s+ or peaking at 10 s+ |
+| `friction.slowHooks` | Hooks averaging 1.5 s+ or peaking at 10 s+ (completed runs only) |
+| `friction.hookTimeouts` | Hooks that were killed for exceeding their timeout: count and the configured limit |
 | `autonomy.askUserQuestions` | AskUserQuestion tool uses |
 | `delegation.share` | Share of sessions that spawned subagents |
 | `skills.unusedCount` | Installed skills never invoked in the window (0 when the window has fewer than 3 sessions) |

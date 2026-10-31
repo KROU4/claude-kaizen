@@ -280,6 +280,7 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
   // ---- friction
   const permissionDecisions = {};
   const hookDurations = {};
+  const hookTimeoutMap = {};
   const hookErrorSamples = [];
   let hookRuns = 0;
   let hookErrors = 0;
@@ -295,8 +296,17 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
       x.ms += d.ms;
       if (d.max > x.max) x.max = d.max;
     }
+    for (const [k, d] of Object.entries(s.hooks.timeouts || {})) {
+      const x = (hookTimeoutMap[k] ||= { n: 0, limitMs: 0 });
+      x.n += d.n;
+      if (d.limitMs > x.limitMs) x.limitMs = d.limitMs;
+    }
     for (const e of s.hooks.errorSamples || []) if (hookErrorSamples.length < 12) hookErrorSamples.push(e);
   }
+  const hookTimeouts = Object.entries(hookTimeoutMap)
+    .map(([hook, d]) => ({ hook, timeouts: d.n, limitMs: d.limitMs }))
+    .sort((a, b) => b.timeouts - a.timeouts || a.hook.localeCompare(b.hook))
+    .slice(0, 10);
   // failing hooks: errors per configured hook command (only hooks still present in settings are actionable)
   const errorsByCommand = {};
   for (const s of S) merge(errorsByCommand, s.hooks.errorsByCommand);
@@ -369,6 +379,7 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
     failingHooks,
     failingHookCommands: failingHooks.filter((h) => h.configured && h.errors >= 20).map((h) => h.configuredCommand),
     slowHooks,
+    hookTimeouts,
     slowCommands: tools.slowCommandsTotal,
     backgroundTasks: sum(S, (s) => s.backgroundTasks),
   };
@@ -688,7 +699,8 @@ export const METRIC_DOCS = {
   'friction.timeouts': 'Timed-out tool calls plus timeout-looking errors',
   'friction.hookNonBlockingErrors': 'Hook runs that reported an error (non-blocking)',
   'friction.failingHookCommands': 'Configured hook commands that failed 20+ times in the window',
-  'friction.slowHooks': 'Hooks averaging 1.5 s+ or peaking at 10 s+',
+  'friction.slowHooks': 'Hooks averaging 1.5 s+ or peaking at 10 s+ (completed runs only)',
+  'friction.hookTimeouts': 'Hooks that were killed for exceeding their timeout: count and the configured limit',
   'autonomy.askUserQuestions': 'AskUserQuestion tool uses',
   'delegation.share': 'Share of sessions that spawned subagents',
   'skills.unusedCount': 'Installed skills never invoked in the window (0 when the window has fewer than 3 sessions)',

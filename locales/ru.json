@@ -108,6 +108,8 @@
     "non_blocking": "неблокирующих",
     "error_classes": "Классы ошибок",
     "slow_hooks": "Медленные хуки",
+    "hook_timeouts": "Хуки, прерванные по таймауту",
+    "timed_out": "упирался в таймаут {n} раз (лимит {limit})",
     "hook_error_samples": "Примеры ошибок хуков",
     "correction_samples": "Примеры исправлений (очищены)"
   },

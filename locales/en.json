@@ -108,6 +108,8 @@
     "non_blocking": "non-blocking",
     "error_classes": "Error classes",
     "slow_hooks": "Slow hooks",
+    "hook_timeouts": "Hooks killed by their timeout",
+    "timed_out": "timed out {n}× (limit {limit})",
     "hook_error_samples": "Hook error samples",
     "correction_samples": "Correction samples (scrubbed)"
   },

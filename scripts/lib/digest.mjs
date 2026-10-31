@@ -147,6 +147,11 @@ export function renderDigest(m, lang = m.locale?.lang || 'en', previous = null) 
     L.push(`${t('f.slow_hooks')}:`);
     for (const h of F.slowHooks) L.push(`- \`${h.hook}\`: ${h.runs} ${t('digest.runs')}, avg ${h.avgMs} ms, max ${h.maxMs} ms`);
   }
+  if ((F.hookTimeouts || []).length) {
+    L.push('');
+    L.push(`${t('f.hook_timeouts')}:`);
+    for (const h of F.hookTimeouts) L.push(`- \`${h.hook}\`: ${t('f.timed_out', { n: h.timeouts, limit: h.limitMs ? `${h.limitMs / 1000} s` : '?' })}`);
+  }
   if (F.hookErrorSamples.length) {
     L.push('');
     L.push(`${t('f.hook_error_samples')}:`);

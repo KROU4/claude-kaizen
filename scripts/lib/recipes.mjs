@@ -92,9 +92,20 @@ function templateVars(measure) {
   return measure;
 }
 
+// One list element in evidence text: a hook entry reads "hook (avg 2300 ms)" or "hook (12× > 5 s)", never raw JSON.
+function fmtItem(x) {
+  if (!x || typeof x !== 'object') return String(x);
+  if (x.hook && typeof x.timeouts === 'number') return `${x.hook} (${x.timeouts}× > ${x.limitMs ? x.limitMs / 1000 : '?'} s)`;
+  if (x.hook && typeof x.avgMs === 'number') return `${x.hook} (avg ${x.avgMs} ms, max ${x.maxMs} ms)`;
+  return x.name || x.server || x.command || x.hook || x.id || JSON.stringify(x);
+}
+
 function fmt(v) {
   if (typeof v === 'number') return Number.isInteger(v) ? String(v) : v.toFixed(2);
-  if (Array.isArray(v)) return v.slice(0, 5).map((x) => (typeof x === 'object' ? x.name || x.server || x.command || JSON.stringify(x) : String(x))).join(', ');
+  if (Array.isArray(v)) {
+    if (!v.length) return '—';
+    return v.slice(0, 5).map(fmtItem).join(', ');
+  }
   if (v && typeof v === 'object') return Object.keys(v).slice(0, 5).join(', ');
   return v === undefined || v === null ? '?' : String(v);
 }

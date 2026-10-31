@@ -228,6 +228,17 @@ describe('renderText', () => {
     assert.equal(renderText('{a.f}', m), '1.50');
   });
 
+  it('prints hook entries readably and an empty list as a dash, never raw JSON', () => {
+    const hm = {
+      slow: [{ hook: 'fmt.mjs', runs: 4, avgMs: 2300, maxMs: 9100 }],
+      killed: [{ hook: 'push-guard.mjs', timeouts: 12, limitMs: 5000 }],
+      none: [],
+    };
+    assert.equal(renderText('{slow}', hm), 'fmt.mjs (avg 2300 ms, max 9100 ms)');
+    assert.equal(renderText('{killed}', hm), 'push-guard.mjs (12× > 5 s)');
+    assert.equal(renderText('{none}', hm), '—');
+  });
+
   it('|pct rounds a fraction to a percentage', () => {
     assert.equal(renderText('{a.ratio|pct}', m), '26%');
   });
