@@ -10,7 +10,8 @@
 //   kaizen status | doctor | selfcheck | docs | nudge | help | --version
 import fs from 'node:fs';
 import path from 'node:path';
-import { configDir, ensureDir, exists, kitRoot, projectsDir, readJsonSafe, stateDir, usageDataDir, writeJsonAtomic } from './lib/paths.mjs';
+import { spawnSync } from 'node:child_process';
+import { configDir, ensureDir, exists, kitRoot, projectsDir, readJsonSafe, settingsFiles, stateDir, usageDataDir, writeJsonAtomic } from './lib/paths.mjs';
 import { scanTranscripts } from './lib/transcripts.mjs';
 import { inventory } from './lib/inventory.mjs';
 import { readInsights } from './lib/insights.mjs';
@@ -135,10 +136,15 @@ async function cmdMeasure(flags) {
   measure.models = Object.fromEntries(Object.entries(models).sort((a, b) => b[1].messages - a[1].messages));
 
   const lang = pickLang(flags, measure);
-  const digest = renderDigest(measure, lang);
-  // keep the previous digest so a later measure can show what moved
-  const prevMd = path.join(state, 'measure.md');
-  if (exists(prevMd)) fs.copyFileSync(prevMd, path.join(state, 'measure.previous.md'));
+  // keep the previous measurement so this digest can show what moved
+  const prevJson = path.join(state, 'measure.json');
+  const previous = readJsonSafe(prevJson);
+  if (previous && previous.generatedAt !== measure.generatedAt) {
+    fs.copyFileSync(prevJson, path.join(state, 'measure.previous.json'));
+    const prevMd = path.join(state, 'measure.md');
+    if (exists(prevMd)) fs.copyFileSync(prevMd, path.join(state, 'measure.previous.md'));
+  }
+  const digest = renderDigest(measure, lang, previous && previous.version === measure.version ? previous : null);
   writeJsonAtomic(path.join(state, 'measure.json'), measure);
   fs.writeFileSync(path.join(state, 'measure.md'), digest, 'utf8');
   writeJsonAtomic(path.join(state, 'last-measure.json'), { at: measure.generatedAt, windowDays, sessions: measure.totals.sessions, kitVersion: VERSION });
@@ -347,6 +353,86 @@ function cmdDocs() {
   out(`wrote ${file}`);
 }
 
+// ---------------------------------------------------------------- verify
+function cmdVerify(flags) {
+  const state = stateDir();
+  let measure = null;
+  try {
+    measure = loadMeasure();
+  } catch {
+    /* optional */
+  }
+  const t = translator(pickLang(flags, measure));
+  const checks = [];
+  const add = (ok, text, extra = {}) => checks.push({ ok, text, ...extra });
+  const run = (file, args, input) => spawnSync(process.execPath, [file, ...args], { input, encoding: 'utf8', timeout: 20000 });
+
+  // 1. hook scripts installed by Kaizen
+  const hooksDir = path.join(state, 'hooks');
+  const hookFiles = exists(hooksDir) ? fs.readdirSync(hooksDir).filter((f) => f.endsWith('.mjs')) : [];
+  for (const f of hookFiles) {
+    const r = run(path.join(hooksDir, f), ['--selftest']);
+    const out = `${r.stdout || ''}${r.stderr || ''}`;
+    const failLine = out.split(/\r?\n/).find((l) => /^FAIL/.test(l));
+    if (r.status === 0 && !failLine) add(true, t('verify.hook_ok', { name: f }));
+    else add(false, t('verify.hook_fail', { name: f, detail: failLine || (r.error ? r.error.message : `exit ${r.status}`) }));
+  }
+  // 2. status line script
+  const statusline = path.join(state, 'statusline.mjs');
+  if (exists(statusline)) {
+    const r = run(statusline, [], JSON.stringify({ model: { display_name: 'Kaizen check' }, context_window: { used_percentage: 42 } }));
+    const line = (r.stdout || '').trim().split(/\r?\n/)[0] || '';
+    if (r.status === 0 && line.includes('Kaizen check')) add(true, t('verify.statusline_ok', { line: line.replace(/\x1b\[[0-9;]*m/g, '') }));
+    else add(false, t('verify.statusline_fail', { detail: (r.stderr || `exit ${r.status}`).trim().slice(0, 160) }));
+  }
+  // 3. settings files parse and reference existing hook files
+  const projectDir = flags.project ? path.resolve(String(flags.project)) : process.env.CLAUDE_PROJECT_DIR || null;
+  for (const { file } of settingsFiles(projectDir)) {
+    if (!exists(file)) continue;
+    try {
+      const s = JSON.parse(fs.readFileSync(file, 'utf8'));
+      const cmds = [];
+      for (const groups of Object.values(s.hooks || {})) for (const g of groups || []) for (const h of g.hooks || []) if (typeof h.command === 'string') cmds.push(h.command);
+      const ours = cmds.filter((c) => /kaizen[\\/](hooks|statusline)/i.test(c));
+      add(true, t('verify.settings_ok', { file, hooks: ours.length }));
+      for (const c of ours) {
+        const m = c.match(/"([^"]*kaizen[\\/][^"]*\.mjs)"/i) || c.match(/(\S*kaizen[\\/]\S*\.mjs)/i);
+        if (m && !exists(m[1])) add(false, t('verify.hook_missing', { file, path: m[1] }));
+      }
+    } catch (err) {
+      add(false, t('verify.settings_fail', { file, detail: err.message.slice(0, 120) }));
+    }
+  }
+  // 4. CLAUDE.md markers balanced
+  const mdFiles = [path.join(configDir(), 'CLAUDE.md'), projectDir ? path.join(projectDir, 'CLAUDE.md') : null].filter((f) => f && exists(f));
+  for (const file of mdFiles) {
+    const text = fs.readFileSync(file, 'utf8');
+    const start = (text.match(/<!-- kaizen:start /g) || []).length;
+    const end = (text.match(/<!-- kaizen:end /g) || []).length;
+    if (!start && !end) continue;
+    if (start === end) add(true, t('verify.claude_md_ok', { file, n: start }));
+    else add(false, t('verify.claude_md_fail', { file, start, end }));
+  }
+  // 5. journal
+  const last = readJsonSafe(path.join(state, 'last-apply.json'));
+  if (last) {
+    const man = readJsonSafe(path.join(state, 'applied', last.id, 'manifest.json'));
+    add(true, t('verify.journal', { id: last.id, recipes: (last.recipes || []).join(', '), undone: man && man.undone ? ' — undone' : '' }), { info: true });
+  }
+  const real = checks.filter((c) => !c.info);
+  const failed = real.filter((c) => !c.ok).length;
+  if (flags.json) {
+    out(JSON.stringify({ ok: failed === 0, checks }, null, 2));
+  } else {
+    out(t('verify.header'));
+    if (!checks.length) out(`  ${t('verify.nothing')}`);
+    for (const c of checks) out(`  ${c.info ? '·' : c.ok ? '✓' : '✗'} ${c.text}`);
+    out(failed ? t('verify.summary_fail', { failed, n: real.length }) : t('verify.summary_ok', { n: real.length }));
+  }
+  if (failed) process.exitCode = 1;
+  return { ok: failed === 0, checks };
+}
+
 // ---------------------------------------------------------------- nudge (SessionStart hook)
 function cmdNudge() {
   // Must be fast and silent unless there is something to say. Never throws.
@@ -394,6 +480,8 @@ Usage: node scripts/kaizen.mjs <command> [options]
              [FILE | --recipe id,id]   --dry-run   --scope user|project   --project DIR   --param recipe.name=value
   undo       Revert an applied batch   [ID | --last | --all]   --dry-run
   status     Show state: last measurement, recommendations, applied batches
+  verify     Self-test installed hooks and status line, parse touched settings, check CLAUDE.md markers
+             --project DIR   --json
   doctor     Environment diagnostics (no transcript content)
   selfcheck  Validate catalog, locales, templates, manifests (CI)
   docs       Regenerate docs/recipes.md from the catalog
@@ -438,6 +526,8 @@ export async function main(argv = process.argv.slice(2)) {
     }
     case 'status':
       return cmdStatus();
+    case 'verify':
+      return cmdVerify(args.flags);
     case 'doctor':
       return cmdDoctor();
     case 'selfcheck':

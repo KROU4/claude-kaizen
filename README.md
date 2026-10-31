@@ -36,7 +36,7 @@ measure  →  recommend  →  you choose  →  apply  →  verify  →  (undo)  
 | **Recommend** | Evaluates 30 evidence-based recipes against the measurement. Each recommendation carries the exact numbers that triggered it. | `… recommend` |
 | **Choose** | An interactive console: in the Claude desktop app it is a live artifact Claude reads back; in a terminal it is a local web page; over SSH it falls back to multiple-choice questions. | `… console` |
 | **Apply** | Writes hooks into `settings.json`, installs hook scripts, adds permission rules, creates skills and subagents, inserts marked blocks into `CLAUDE.md`, removes dead MCP servers — every write journaled with a backup. | `… apply` |
-| **Verify** | Self-tests every installed hook, parses every touched file, validates created skills. | `kaizen-verifier` agent |
+| **Verify** | Self-tests every installed hook and the status line, parses every touched file, checks CLAUDE.md markers; the `kaizen-verifier` agent adds skill/agent validation. | `… verify` |
 | **Undo** | Reverts a batch exactly, leaving anything you edited afterwards alone. | `… undo` |
 
 Everything runs on your machine. The only thing a model ever sees is the digest, and the digest is secret-scrubbed.
@@ -68,15 +68,18 @@ node scripts/kaizen.mjs measure        # digest to stdout, files in ~/.claude/ka
 node scripts/kaizen.mjs recommend      # what the data says you should change
 node scripts/kaizen.mjs console        # pick in the browser → choices.json
 node scripts/kaizen.mjs apply          # journaled, reversible
+node scripts/kaizen.mjs verify         # self-test what was installed
 node scripts/kaizen.mjs undo --last
 ```
+
+Run `measure` again a week later: the digest ends with a **what moved** table (interruptions, permission prompts, timeouts, compactions, corrections, cost…) comparing the two measurements.
 
 Requirements: Node.js 18+ and Claude Code with some history (transcripts live for `cleanupPeriodDays`, 30 by default).
 
 ## The console
 
 <p align="center">
-  <img src="docs/assets/console.png" alt="Kaizen console: recommendations grouped by category with evidence, impact and parameters" width="90%">
+  <img src="docs/assets/console.jpg" alt="Kaizen console: recommendations grouped by category with evidence, impact and parameters" width="90%">
 </p>
 
 Recommendations are grouped by category with their evidence, impact and risk. Tick what you want, adjust parameters (which formatter, deny or ask, which MCP servers), add a note for Claude ("tests are `make check`"), press **Apply**. In the Claude desktop app the page is a published artifact backed by its database, so Claude reads your choices without you pasting anything. In a plain terminal it is a page on `127.0.0.1` that writes `choices.json` and exits.

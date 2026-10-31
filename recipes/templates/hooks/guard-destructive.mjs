@@ -17,7 +17,7 @@ const MODE = !unset(MODE_RAW) && MODE_RAW.trim() === 'ask' ? 'ask' : 'deny';
 const BRANCH_LIST = (unset(BRANCHES_RAW) ? '' : BRANCHES_RAW).split(',').map((s) => s.trim()).filter(Boolean);
 const PROTECTED = BRANCH_LIST.length ? BRANCH_LIST : ['main', 'master', 'production'];
 
-const WELL_KNOWN = new Set(['node_modules', 'dist', 'build', 'out', 'target', 'coverage', 'tmp', 'temp', '.tmp', '.cache', '.next', '.nuxt', '.output', '.svelte-kit', '.turbo', '.parcel-cache', '.angular', '.gradle', '.terraform', '.nyc_output', '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache', '.tox', '.venv', 'venv', 'obj']);
+const WELL_KNOWN = new Set(['node_modules', 'dist', 'build', 'out', 'target', 'coverage', 'tmp', 'temp', '.tmp', '.cache', '.next', '.nuxt', '.output', '.svelte-kit', '.turbo', '.parcel-cache', '.angular', '.gradle', '.terraform', '.nyc_output', '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache', '.tox', '.venv', 'venv', 'obj', '.vite', '.docusaurus', '.serverless', '.dart_tool', 'deriveddata', 'storybook-static', 'htmlcov', '.hypothesis', '.eggs', '.pnpm-store']);
 const SYSTEM_DIR = /^(?:bin|boot|dev|etc|lib|lib32|lib64|proc|root|sbin|sys|usr|var|windows|program files|program files \(x86\)|programdata|system|library|applications)$/i;
 const SQL_RE = /\b(?:drop\s+(?:table|database|schema)|truncate\s+table)\b/i;
 const SQL_CLIENT = /\b(?:psql|mysql|mariadb|sqlite3?|sqlcmd|sqlplus|mongosh?|duckdb|clickhouse-client|cockroach|snowsql|invoke-sqlcmd|prisma|alembic|knex|sequelize)\b/i;
@@ -36,6 +36,8 @@ function riskyTarget(raw) {
   const drive = home ? null : /^[a-z]:(?=\/|$)/i.exec(t);
   const segs = t.slice(home ? home[0].length : drive ? drive[0].length : 0).split('/').filter((s) => s && s !== '.');
   if (home) return segs.length <= 1 ? 'your home directory' : null;
+  // A bare variable ("$tmp") is unknown, not provably broad; "$tmp/" and "$tmp/*" are the classic empty-variable disaster.
+  if (/^(?:\$\{?\w*\}?|\$env:\w+|%\w+%)$/i.test(t.replace(/\/$/, ''))) return glob || t.endsWith('/') ? 'a variable directory that may be empty' : null;
   if (drive || t.startsWith('/')) {
     if (segs.length <= 1) return segs.length ? 'a top-level directory' : 'a filesystem root';
     return segs.length === 2 && (/^(?:home|users)$/i.test(segs[0]) || SYSTEM_DIR.test(segs[0])) ? 'a home or system directory' : null;
@@ -189,12 +191,12 @@ function selftest() {
     'rm -rf /', 'rm -rf ~', 'sudo rm -fr $HOME/', 'rm -rf *', 'rm -rf .', 'rm -rf C:\\', 'rm -rf /usr/lib', 'rm -rf foo', 'git reset --hard HEAD~1', 'git clean -fdx',
     'git checkout -- .', `git push --force origin ${PROTECTED[0]}`, 'git push -f', `git push origin +${PROTECTED[0]}`, 'git branch -D old', 'psql -c "DROP TABLE users"',
     'echo "TRUNCATE TABLE a;" | mysql', 'del /s /q C:\\', 'rmdir /s /q D:\\', 'format D:', 'mkfs.ext4 /dev/sdb1', 'dd if=/dev/zero of=/dev/sda', 'chmod -R 777 /',
-    'cat x > /dev/sda', 'bash -c "rm -rf /"', 'ls && rm -rf ~/',
+    'cat x > /dev/sda', 'bash -c "rm -rf /"', 'ls && rm -rf ~/', 'rm -rf "$tmp"/', 'rm -rf $VAR/*',
   ];
   const good = [
     'ls -la', 'rm -rf node_modules', 'rm -rf dist/', 'rm -rf ./tmp/foo', 'rm file.txt', 'rm -rf build/*', 'git push --force-with-lease origin feature/x', 'git push origin main',
     'git status && git log --oneline', 'git commit -m "docs: never run rm -rf / or DROP TABLE"', 'git checkout -b feature', 'git reset --soft HEAD~1', 'echo "DROP TABLE x" > notes.txt',
-    'cat <<EOF > a.md\nrm -rf /\nEOF', 'chmod -R 755 ./public/assets', 'dd if=a.iso of=b.img',
+    'cat <<EOF > a.md\nrm -rf /\nEOF', 'chmod -R 755 ./public/assets', 'dd if=a.iso of=b.img', 'rm -rf "$tmp"', 'rm -rf $(mktemp -d)',
   ];
   let failed = 0;
   const run = (tool, command, branch = () => null) => evaluate({ tool_name: tool, tool_input: { command } }, { branch });

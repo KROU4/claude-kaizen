@@ -44,7 +44,28 @@
     "none": "none",
     "yes": "yes",
     "no": "no",
-    "footer": "Full data: {file}. Counts only; prompt snippets are secret-scrubbed. Nothing here left this machine."
+    "footer": "Full data: {file}. Counts only; prompt snippets are secret-scrubbed. Nothing here left this machine.",
+    "delta": "What moved since the previous measurement",
+    "delta_intro": "Previous measurement: {prev} ({prev_days}-day window) vs now ({now_days}-day window). ✓ improved, ✗ worsened (5%+ change); overlapping windows dampen the differences.",
+    "before": "Before",
+    "now": "Now",
+    "change": "Change"
+  },
+  "verify": {
+    "header": "Kaizen verify",
+    "hook_ok": "hook {name}: self-test ok",
+    "hook_fail": "hook {name}: self-test FAILED — {detail}",
+    "hook_missing": "hook file referenced in {file} is missing: {path}",
+    "statusline_ok": "status line script ok: {line}",
+    "statusline_fail": "status line script FAILED: {detail}",
+    "settings_ok": "{file}: valid JSON ({hooks} Kaizen hook(s))",
+    "settings_fail": "{file}: INVALID JSON — {detail}",
+    "claude_md_ok": "{file}: {n} Kaizen block(s), markers balanced",
+    "claude_md_fail": "{file}: unbalanced Kaizen markers (start {start}, end {end})",
+    "journal": "last batch: {id} ({recipes}){undone}",
+    "nothing": "Nothing installed by Kaizen yet.",
+    "summary_ok": "verify: all {n} checks passed",
+    "summary_fail": "verify: {failed} of {n} checks failed"
   },
   "m": {
     "sessions_per_active_day": "Sessions per active day",

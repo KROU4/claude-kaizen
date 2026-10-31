@@ -12,6 +12,8 @@ You verify; you do not fix. Report precisely so the caller can fix.
 
 Input (from the brief): the batch manifest path (`~/.claude/kaizen/applied/<id>/manifest.json`) and the user's language for the final summary.
 
+Start with `node "<kit root>/scripts/kaizen.mjs" verify --json` (kit root = `${CLAUDE_PLUGIN_ROOT}` or the clone path; add `--project <dir>` for project-scoped batches). It covers checks 1–3 below for everything Kaizen installed; use the manual steps to confirm the specific batch and to cover skills, agents and MCP changes.
+
 Checks, in order:
 1. Read the manifest. For every action of type `file` whose path ends in `.mjs` under `~/.claude/kaizen/hooks/` or is a statusline script: run `node "<file>" --selftest` (10 s timeout) → must exit 0 and print only `ok …` lines. For the statusline script: `echo '{"model":{"display_name":"Test"},"context_window":{"used_percentage":42}}' | node "<file>"` → exactly one line containing `Test`.
 2. For every `settings.*` or `plugins.disable` action: `node -e "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'))" "<file>"` → must parse; then confirm the entry exists (the hook command string under `hooks.<event>`, the key for `settings.set`, the items for `settings.append`).

@@ -29,7 +29,55 @@ function hourBar(hours) {
   return hours.map((v) => blocks[Math.min(8, Math.round((v / max) * 8))]).join('');
 }
 
-export function renderDigest(m, lang = m.locale?.lang || 'en') {
+/** Metrics compared between two measurements: [path, label key, lowerIsBetter, format]. */
+export const DELTA_METRICS = [
+  ['totals.sessions', 'digest.sessions', null, 'int'],
+  ['totals.userMessages', 'digest.prompts', null, 'int'],
+  ['friction.interruptionsPerSession', 'f.interruptions', true, 'num'],
+  ['friction.permissionPrompts', 'f.permission_prompts', true, 'int'],
+  ['friction.compactionShare', 'm.compaction_share', true, 'pct'],
+  ['friction.correctionsPerSession', 'f.corrections', true, 'num'],
+  ['friction.editMismatches', 'f.edit_mismatches', true, 'int'],
+  ['friction.timeouts', 'f.timeouts', true, 'int'],
+  ['friction.hookNonBlockingErrors', 'f.hook_errors', true, 'int'],
+  ['tools.errorRate', 'm.tool_error_rate', true, 'pct'],
+  ['autonomy.askPerSession', 'a.ask_user', true, 'num'],
+  ['quality.editsWithoutTestsShare', 'q.edits_without_tests', true, 'pct'],
+  ['context.claudeMdTokens', 'c.claude_md', true, 'int'],
+  ['mcp.unusedCount', 'x.mcp_unused', true, 'int'],
+  ['skills.unusedCount', 'x.skills_unused', true, 'int'],
+  ['totals.costUSD', 'm.cost', true, 'usd'],
+];
+
+function getPath(obj, dotted) {
+  return dotted.split('.').reduce((o, k) => (o && typeof o === 'object' ? o[k] : undefined), obj);
+}
+
+function fmtDelta(v, kind) {
+  if (typeof v !== 'number' || Number.isNaN(v)) return '—';
+  if (kind === 'pct') return pct(v);
+  if (kind === 'usd') return `$${v.toFixed(2)}`;
+  if (kind === 'num') return String(Math.round(v * 100) / 100);
+  return String(Math.round(v));
+}
+
+/** Compare two measurements; returns rows {label, before, now, change, better} for metrics that exist in both. */
+export function compareMeasures(prev, cur, t) {
+  const rows = [];
+  for (const [p, labelKey, lowerIsBetter, kind] of DELTA_METRICS) {
+    const a = getPath(prev, p);
+    const b = getPath(cur, p);
+    if (typeof a !== 'number' || typeof b !== 'number') continue;
+    const diff = b - a;
+    const relative = a !== 0 ? diff / Math.abs(a) : b !== 0 ? 1 : 0;
+    let better = null;
+    if (lowerIsBetter !== null && Math.abs(relative) >= 0.05) better = lowerIsBetter ? diff < 0 : diff > 0;
+    rows.push({ path: p, label: t(labelKey), before: fmtDelta(a, kind), now: fmtDelta(b, kind), change: `${diff > 0 ? '+' : ''}${fmtDelta(diff, kind)}`, better, relative });
+  }
+  return rows;
+}
+
+export function renderDigest(m, lang = m.locale?.lang || 'en', previous = null) {
   const t = translator(lang);
   const L = [];
   const T = m.totals;
@@ -211,6 +259,24 @@ export function renderDigest(m, lang = m.locale?.lang || 'en') {
       for (const s of m.insights.frictionSamples.slice(0, 6)) L.push(`- [${s.kinds.join(', ')}] ${s.detail}`);
     }
     L.push('');
+  }
+
+  // ---- what moved since the previous measurement
+  if (previous && previous.generatedAt) {
+    const rows = compareMeasures(previous, m, t);
+    if (rows.length) {
+      L.push(`## ${t('digest.delta')}`);
+      L.push('');
+      L.push(t('digest.delta_intro', { prev: String(previous.generatedAt).slice(0, 10), prev_days: previous.windowDays, now_days: m.windowDays }));
+      L.push('');
+      L.push(
+        table(
+          rows.map((r) => [r.label, r.before, r.now, `${r.change}${r.better === true ? ' ✓' : r.better === false ? ' ✗' : ''}`]),
+          [t('digest.metric'), t('digest.before'), t('digest.now'), t('digest.change')],
+        ),
+      );
+      L.push('');
+    }
   }
 
   L.push(`---`);

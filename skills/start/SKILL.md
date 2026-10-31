@@ -61,7 +61,7 @@ Whatever the UI, honour `notes`: if the user typed constraints (e.g. "no hooks s
 
 ## 5. Verify
 
-Spawn `kaizen-verifier` (or do it inline when only one or two recipes were applied): run `--selftest` on every hook script in `~/.claude/kaizen/hooks/`, parse every touched `settings.json`, confirm CLAUDE.md blocks have both markers, and run `claude plugin validate <skills dir>` when a skill was created. Report failures with the exact fix; apply the fix if it is in Kaizen's own files.
+Run `$KZ verify` (add `--project <dir>` when project-scoped recipes were applied): it self-tests every hook script in `~/.claude/kaizen/hooks/`, runs the status line script, parses every touched `settings.json`, checks that referenced hook files exist and that CLAUDE.md blocks have both markers. When a skill or agent was created, also run `claude plugin validate <its directory>`. For a large batch, or when `verify` reports failures, spawn `kaizen-verifier` with the batch manifest path to get the exact fixes; apply the fix if it is in Kaizen's own files.
 
 ## 6. Close
 
