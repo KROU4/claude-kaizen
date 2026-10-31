@@ -39,6 +39,8 @@ async function summarizeLines(lines) {
 
 const userLine = (content, extra = {}) => ({ type: 'user', message: { role: 'user', content }, timestamp: '2026-10-29T09:00:00.000Z', ...extra });
 
+const asstText = (id, extra = {}) => ({ type: 'assistant', uuid: `a-${id}`, requestId: `r-${id}`, message: { id: `m-${id}`, role: 'assistant', content: [{ type: 'text', text: 'Done.' }] }, timestamp: '2026-10-29T09:00:00.000Z', ...extra });
+
 after(() => cleanupTempDirs());
 
 describe('summarizeTranscript: session A', () => {
@@ -814,6 +816,7 @@ describe('summarizeTranscript: edge cases on inline transcripts', () => {
 
   it('reports a correction only for prompts that start like one', async () => {
     const s = await summarizeLines([
+      asstText('0'), // a correction answers something Claude did
       userLine("Don't touch the lockfile", { uuid: 'u1' }),
       userLine('please add a button, no animations', { uuid: 'u2' }),
       userLine('Стоп, это не то', { uuid: 'u3' }),
@@ -1065,7 +1068,7 @@ describe('listTranscripts', () => {
     write('proj1/newer.jsonl', '{"type":"user"}\n', 1_800_000_000);
     write('proj1/empty.jsonl', '', 1_800_000_100);
     write('proj1/notes.txt', 'not a transcript', 1_800_000_200);
-    write('proj1/older/subagents/agent-1.jsonl', '{"type":"user"}\n', 1_800_000_300);
+    write('proj1/older/subagents/agent-1.jsonl', '{"type":"user"}\n', 1_700_000_300);
     write('proj2/other.jsonl', '{"type":"user"}\n', 1_750_000_000);
     write('stray.jsonl', '{"type":"user"}\n', 1_800_000_400);
   });
@@ -1075,7 +1078,7 @@ describe('listTranscripts', () => {
     assert.deepEqual(names, ['older.jsonl', 'other.jsonl', 'newer.jsonl']);
   });
 
-  it('skips empty files, non-jsonl files, nested subagent transcripts and files outside project directories', () => {
+  it('skips empty files, non-jsonl files, subagent transcripts as sessions of their own and files outside project directories', () => {
     const names = listTranscripts(projects).map((f) => path.basename(f.file));
     for (const skipped of ['empty.jsonl', 'notes.txt', 'agent-1.jsonl', 'stray.jsonl']) assert.ok(!names.includes(skipped), skipped);
   });
@@ -1180,5 +1183,485 @@ describe('scanTranscripts', () => {
     const res = await scanTranscripts({ projectsDir: PROJECTS_FIXTURE, sinceMs: Date.now() + 86400000 });
     assert.equal(res.scanned, 0);
     assert.deepEqual(res.sessions, []);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Round 7: subagent transcripts, forks, the --days window, PowerShell, machine-origin turns, corrections.
+// All transcripts below are synthetic and live in temp dirs.
+
+const TS = (d, hh = '09', mm = '00', ss = '00') => `2026-${d}T${hh}:${mm}:${ss}.000Z`;
+const writeJsonl = (file, lines) => writeText(file, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+const asstTools = (id, blocks, extra = {}) => ({ type: 'assistant', uuid: `a-${id}`, requestId: `r-${id}`, message: { id: `m-${id}`, role: 'assistant', content: blocks, model: 'claude-test', usage: { input_tokens: 10, output_tokens: 5 } }, timestamp: TS('10-29'), ...extra });
+const useTool = (id, name, input) => ({ type: 'tool_use', id, name, input });
+const resultOf = (id, content, isError = false) => ({ type: 'tool_result', tool_use_id: id, is_error: isError, content });
+
+describe('subagent transcripts (<session>/subagents/*.jsonl)', () => {
+  let projects;
+  const SID = '44444444-dddd-4ddd-8ddd-dddddddddddd';
+  const parentLines = () => [
+    { type: 'cost-state', totalCostUSD: 1.5, totalLinesAdded: 3, totalLinesRemoved: 1 },
+    userLine('implement the parser for the config file', { uuid: 'p-u1', sessionId: SID }),
+    asstTools('p1', [useTool('e1', 'Edit', { file_path: '/w/src/p.js', old_string: 'a', new_string: 'b' })], { sessionId: SID }),
+    userLine([resultOf('e1', 'ok')], { uuid: 'p-u2', sessionId: SID }),
+    asstTools('p2', [useTool('ag1', 'Agent', { subagent_type: 'test-runner', prompt: 'run the tests' })], { sessionId: SID }),
+  ];
+  const subLines = () => [
+    userLine('run the tests and report', { uuid: 's-u1', sessionId: SID, isSidechain: true }),
+    asstTools('s1', [useTool('sb1', 'Bash', { command: 'npm test' })], { sessionId: SID, isSidechain: true, message: { id: 'm-s1', role: 'assistant', model: 'claude-test', content: [useTool('sb1', 'Bash', { command: 'npm test' })], usage: { input_tokens: 150000, output_tokens: 5 } } }),
+    userLine([resultOf('sb1', 'FAIL src/p.test.js\nTests: 1 failed, 4 passed', true)], { uuid: 's-u2', sessionId: SID, isSidechain: true }),
+    asstTools('s2', [useTool('sb2', 'mcp__context7__query-docs', { q: 'x' })], { sessionId: SID, isSidechain: true }),
+    asstTools('s3', [useTool('sb3', 'Bash', { command: 'git commit -m x' })], { sessionId: SID, isSidechain: true }),
+    { type: 'cost-state', totalCostUSD: 99, totalLinesAdded: 999, totalLinesRemoved: 999 },
+    { type: 'system', subtype: 'compact_boundary', uuid: 's-c1', timestamp: TS('10-29') },
+  ];
+
+  before(() => {
+    projects = path.join(makeTempDir('kaizen-sub-'), 'projects');
+    writeJsonl(path.join(projects, 'p1', `${SID}.jsonl`), parentLines());
+    writeJsonl(path.join(projects, 'p1', SID, 'subagents', 'agent-aaa.jsonl'), subLines());
+  });
+
+  it('listTranscripts attaches the subagent files to their session and does not list them as sessions', () => {
+    const list = listTranscripts(projects);
+    assert.equal(list.length, 1);
+    assert.equal(path.basename(list[0].file), `${SID}.jsonl`);
+    assert.deepEqual(list[0].subagents.map((x) => path.basename(x.file)), ['agent-aaa.jsonl']);
+    assert.ok(list[0].subagents[0].size > 0);
+  });
+
+  it('keeps a session whose main file is old when one of its subagent files is newer than sinceMs', () => {
+    const dir = path.join(makeTempDir('kaizen-sub-'), 'projects');
+    writeJsonl(path.join(dir, 'p', 's1.jsonl'), [userLine('hello there friend', { uuid: 'u1' })]);
+    writeJsonl(path.join(dir, 'p', 's1', 'subagents', 'agent-1.jsonl'), [userLine('sub', { uuid: 'u2', isSidechain: true })]);
+    writeJsonl(path.join(dir, 'p', 's2.jsonl'), [userLine('hello there friend', { uuid: 'u3' })]);
+    fs.utimesSync(path.join(dir, 'p', 's1.jsonl'), 1_700_000_000, 1_700_000_000);
+    fs.utimesSync(path.join(dir, 'p', 's2.jsonl'), 1_700_000_000, 1_700_000_000);
+    fs.utimesSync(path.join(dir, 'p', 's1', 'subagents', 'agent-1.jsonl'), 1_800_000_000, 1_800_000_000);
+    assert.deepEqual(listTranscripts(dir, { sinceMs: 1_750_000_000 * 1000 }).map((f) => path.basename(f.file)), ['s1.jsonl']);
+  });
+
+  it('ignores empty subagent files and subagent directories without a main transcript', () => {
+    const dir = path.join(makeTempDir('kaizen-sub-'), 'projects');
+    writeJsonl(path.join(dir, 'p', 's1.jsonl'), [userLine('hello there friend', { uuid: 'u1' })]);
+    writeText(path.join(dir, 'p', 's1', 'subagents', 'agent-empty.jsonl'), '');
+    writeText(path.join(dir, 'p', 's1', 'subagents', 'notes.txt'), 'x');
+    writeJsonl(path.join(dir, 'p', 'orphan', 'subagents', 'agent-1.jsonl'), [userLine('x', { uuid: 'u2', isSidechain: true })]);
+    const list = listTranscripts(dir);
+    assert.deepEqual(list.map((f) => path.basename(f.file)), ['s1.jsonl']);
+    assert.deepEqual(list[0].subagents, []);
+  });
+
+  it('merges the subagent test runs, MCP calls and test failures into the parent session', async () => {
+    const res = await scanTranscripts({ projectsDir: projects });
+    assert.equal(res.sessions.length, 1);
+    const s = res.sessions[0];
+    assert.equal(s.testCommands, 1);
+    assert.equal(s.sidechainTestCommands, 1);
+    assert.equal(s.testFailures, 1);
+    assert.deepEqual(s.mcp, { context7: { calls: 1, tools: { 'query-docs': 1 } } });
+    assert.equal(s.sidechainMessages, 5);
+    assert.equal(s.codeFilesEdited, 1);
+  });
+
+  it('keeps the main-session counters main-session: messages, tool uses, git, cost, compactions, context peak', async () => {
+    const res = await scanTranscripts({ projectsDir: projects });
+    const s = res.sessions[0];
+    assert.equal(s.userMessages, 1);
+    assert.equal(s.assistantMessages, 2);
+    assert.deepEqual(s.toolUses, { Edit: 1, Agent: 1 });
+    assert.deepEqual(s.git, {}, 'a subagent git command is not a main-session one');
+    assert.equal(s.costUSD, 1.5, 'the cumulative cost-state of the main file wins');
+    assert.equal(s.linesAdded, 3);
+    assert.equal(s.compactions, 0);
+    assert.ok(s.peakContextTokens < 1000, `peak ${s.peakContextTokens}`);
+    assert.equal(s.sessionId, SID);
+  });
+
+  it('counts the same lines once when an older Claude Code version also mirrored them as sidechain lines of the parent', async () => {
+    const dir = path.join(makeTempDir('kaizen-sub-'), 'projects');
+    const mirrored = subLines().filter((l) => l.type !== 'cost-state');
+    writeJsonl(path.join(dir, 'p1', `${SID}.jsonl`), [...parentLines(), ...mirrored]);
+    writeJsonl(path.join(dir, 'p1', SID, 'subagents', 'agent-aaa.jsonl'), mirrored);
+    const res = await scanTranscripts({ projectsDir: dir });
+    const s = res.sessions[0];
+    assert.equal(s.testCommands, 1);
+    assert.equal(s.testFailures, 1);
+    assert.equal(s.sidechainMessages, 5);
+    assert.equal(s.mcp.context7.calls, 1);
+  });
+
+  it('treats every line of a subagent file as sidechain even without the isSidechain flag', async () => {
+    const dir = path.join(makeTempDir('kaizen-sub-'), 'projects');
+    writeJsonl(path.join(dir, 'p1', `${SID}.jsonl`), parentLines());
+    writeJsonl(path.join(dir, 'p1', SID, 'subagents', 'agent-bbb.jsonl'), [
+      userLine('run it', { uuid: 'x-u1' }),
+      asstTools('x1', [useTool('xb1', 'Bash', { command: 'pytest -q' })]),
+    ]);
+    const s = (await scanTranscripts({ projectsDir: dir })).sessions[0];
+    assert.equal(s.userMessages, 1, 'the subagent prompt is not a human prompt');
+    assert.equal(s.assistantMessages, 2);
+    assert.equal(s.sidechainTestCommands, 1);
+  });
+
+  it('re-summarizes the session when only its subagent file changed (the cache key covers it)', async () => {
+    const dir = path.join(makeTempDir('kaizen-sub-'), 'projects');
+    const cacheDir = path.join(path.dirname(dir), 'cache');
+    writeJsonl(path.join(dir, 'p1', `${SID}.jsonl`), parentLines());
+    const subFile = path.join(dir, 'p1', SID, 'subagents', 'agent-aaa.jsonl');
+    writeJsonl(subFile, subLines().slice(0, 3));
+    const first = await scanTranscripts({ projectsDir: dir, cacheDir });
+    assert.equal(first.sessions[0].mcp.context7, undefined);
+    assert.equal((await scanTranscripts({ projectsDir: dir, cacheDir })).cached, 1);
+    fs.appendFileSync(subFile, JSON.stringify(subLines()[3]) + '\n');
+    const again = await scanTranscripts({ projectsDir: dir, cacheDir });
+    assert.equal(again.cached, 0);
+    assert.equal(again.sessions[0].mcp.context7.calls, 1);
+  });
+
+  it('reports the subagent bytes in the scan total', async () => {
+    const res = await scanTranscripts({ projectsDir: projects });
+    const list = listTranscripts(projects)[0];
+    assert.equal(res.bytes, list.size + list.subagents[0].size);
+  });
+});
+
+describe('forks and copies of a session (uuid dedup across files)', () => {
+  const history = (sid) => [
+    userLine('Add a login page for the app', { uuid: 'h-u1', sessionId: sid, timestamp: TS('10-29', '09', '00') }),
+    asstText('h1', { sessionId: sid, timestamp: TS('10-29', '09', '01') }),
+    userLine('No, that is wrong, redo the layout', { uuid: 'h-u2', sessionId: sid, timestamp: TS('10-29', '09', '02') }),
+    asstText('h2', { sessionId: sid, timestamp: TS('10-29', '09', '03') }),
+    userLine('Stop adding comments to every line', { uuid: 'h-u3', sessionId: sid, timestamp: TS('10-29', '09', '04') }),
+    asstText('h3', { sessionId: sid, timestamp: TS('10-29', '09', '05') }),
+    userLine('Deploy the service to staging and report back', { uuid: 'h-u4', sessionId: sid, timestamp: TS('10-29', '09', '06') }),
+    asstText('h4', { sessionId: sid, timestamp: TS('10-29', '09', '07') }),
+  ];
+  let dir;
+  let cacheDir;
+  const sidOf = (n) => `0000000${n}-ffff-4fff-8fff-ffffffffffff`;
+  const setup = (parentMtime = 1_760_000_000, forkMtime = 1_760_000_100) => {
+    dir = path.join(makeTempDir('kaizen-fork-'), 'projects');
+    cacheDir = path.join(path.dirname(dir), 'cache');
+    const parent = path.join(dir, 'p1', `${sidOf(1)}.jsonl`);
+    const f1 = path.join(dir, 'p1', `${sidOf(2)}.jsonl`);
+    const f2 = path.join(dir, 'p1', `${sidOf(3)}.jsonl`);
+    writeJsonl(parent, history(sidOf(1)));
+    writeJsonl(f1, [...history(sidOf(2)), userLine('Never touch the lockfile', { uuid: 'f1-u1', sessionId: sidOf(2), timestamp: TS('10-29', '10', '00') }), asstText('f1', { sessionId: sidOf(2), timestamp: TS('10-29', '10', '01') })]);
+    writeJsonl(f2, [...history(sidOf(3)), userLine('Please add tests for the login page', { uuid: 'f2-u1', sessionId: sidOf(3), timestamp: TS('10-29', '11', '00') }), asstText('f2', { sessionId: sidOf(3), timestamp: TS('10-29', '11', '01') })]);
+    fs.utimesSync(parent, parentMtime, parentMtime);
+    fs.utimesSync(f1, forkMtime, forkMtime);
+    fs.utimesSync(f2, forkMtime + 1, forkMtime + 1);
+  };
+  const totals = (sessions) => ({
+    sessions: sessions.length,
+    user: sessions.reduce((n, s) => n + s.userMessages, 0),
+    asst: sessions.reduce((n, s) => n + s.assistantMessages, 0),
+    corrections: sessions.reduce((n, s) => n + s.corrections, 0),
+  });
+
+  it('counts the replayed history once: the typed prompts, not once per fork', async () => {
+    setup();
+    const res = await scanTranscripts({ projectsDir: dir });
+    // typed: 4 in the parent + 1 new in each fork; corrections: 2 in the history + "Never ..." in the first fork
+    assert.deepEqual(totals(res.sessions), { sessions: 3, user: 6, asst: 6, corrections: 3 });
+    const stems = {};
+    for (const s of res.sessions) for (const [k, v] of Object.entries(s.promptStems)) stems[k] = (stems[k] || 0) + v;
+    assert.ok(Object.values(stems).every((n) => n === 1), JSON.stringify(stems));
+  });
+
+  it('gives each fork only its own new lines and keeps the parent whole', async () => {
+    setup();
+    const res = await scanTranscripts({ projectsDir: dir });
+    const byId = Object.fromEntries(res.sessions.map((s) => [s.file, s]));
+    assert.equal(byId[`${sidOf(1)}.jsonl`].userMessages, 4);
+    assert.equal(byId[`${sidOf(2)}.jsonl`].userMessages, 1);
+    assert.equal(byId[`${sidOf(3)}.jsonl`].userMessages, 1);
+    assert.equal(byId[`${sidOf(2)}.jsonl`].corrections, 1, 'a prompt after replayed assistant lines is a correction candidate');
+    assert.equal(byId[`${sidOf(3)}.jsonl`].corrections, 0);
+  });
+
+  it('gives the same totals whichever file was modified last (the file that is read first keeps the shared history)', async () => {
+    setup(1_760_000_500, 1_760_000_000);
+    // the first fork now owns the history; the parent has no line of its own left and is not a session
+    assert.deepEqual(totals((await scanTranscripts({ projectsDir: dir })).sessions), { sessions: 2, user: 6, asst: 6, corrections: 3 });
+  });
+
+  it('drops a copy that has no line of its own, also when it sits in another project directory', async () => {
+    setup();
+    fs.mkdirSync(path.join(dir, 'p2-copy'), { recursive: true });
+    fs.copyFileSync(path.join(dir, 'p1', `${sidOf(1)}.jsonl`), path.join(dir, 'p2-copy', 'copy.jsonl'));
+    const res = await scanTranscripts({ projectsDir: dir });
+    assert.deepEqual(totals(res.sessions), { sessions: 3, user: 6, asst: 6, corrections: 3 });
+    assert.equal(res.scanned, 4);
+  });
+
+  it('is stable through the cache: the second scan reads the cache and returns the same sessions', async () => {
+    setup();
+    const first = await scanTranscripts({ projectsDir: dir, cacheDir });
+    const second = await scanTranscripts({ projectsDir: dir, cacheDir });
+    assert.equal(second.cached, 3);
+    assert.deepEqual(second.sessions, first.sessions);
+    assert.deepEqual(totals(second.sessions), { sessions: 3, user: 6, asst: 6, corrections: 3 });
+  });
+
+  it('keeps the cache correct when a later fork appears', async () => {
+    setup();
+    await scanTranscripts({ projectsDir: dir, cacheDir });
+    writeJsonl(path.join(dir, 'p1', `${sidOf(4)}.jsonl`), [...history(sidOf(4)), userLine('Rename the helper to buildUrl', { uuid: 'f4-u1', sessionId: sidOf(4), timestamp: TS('10-29', '12', '00') })]);
+    const res = await scanTranscripts({ projectsDir: dir, cacheDir });
+    assert.deepEqual(totals(res.sessions), { sessions: 4, user: 7, asst: 6, corrections: 3 });
+  });
+
+  it('summarizeTranscript skips the uuid keys it is given and reports the keys it counted', async () => {
+    setup();
+    const keys = [];
+    const file = path.join(dir, 'p1', `${sidOf(1)}.jsonl`);
+    const s = await summarizeTranscript(file, { keysOut: keys });
+    assert.equal(s.userMessages, 4);
+    assert.equal(keys.length, 8);
+    const skipped = await summarizeTranscript(file, { skipKeys: new Set(keys.slice(0, 4)) });
+    assert.equal(skipped.userMessages, 2);
+  });
+});
+
+describe('the --days window works on line timestamps', () => {
+  const SINCE = Date.parse('2026-10-01T00:00:00.000Z');
+  const lines = () => [
+    userLine('Old prompt about the legacy exporter', { uuid: 'o-u1', timestamp: TS('08-01') }),
+    asstText('o1', { timestamp: TS('08-01', '09', '01') }),
+    userLine('No, that is wrong, do it again', { uuid: 'o-u2', timestamp: TS('08-01', '09', '02') }),
+    asstText('o2', { timestamp: TS('08-01', '09', '03') }),
+    { type: 'attachment', uuid: 'o-h1', timestamp: TS('08-01', '09', '04'), attachment: { type: 'hook_success', hookEvent: 'PreToolUse', command: 'node old-hook.mjs', durationMs: 5 } },
+    { type: 'last-prompt', lastPrompt: 'x' },
+    userLine('Fresh prompt about the new importer', { uuid: 'n-u1', timestamp: TS('10-29') }),
+    asstText('n1', { timestamp: TS('10-29', '09', '01') }),
+    userLine('No, that is wrong, use streams', { uuid: 'n-u2', timestamp: TS('10-29', '09', '02') }),
+    asstText('n2', { timestamp: TS('10-29', '09', '03') }),
+  ];
+  const projectWith = (ls) => {
+    const dir = path.join(makeTempDir('kaizen-win-'), 'projects');
+    writeJsonl(path.join(dir, 'p', 's.jsonl'), ls);
+    return dir;
+  };
+
+  it('summarizeTranscript counts only the lines stamped inside the window and marks the summary', async () => {
+    const dir = projectWith(lines());
+    const s = await summarizeTranscript(path.join(dir, 'p', 's.jsonl'), { sinceMs: SINCE });
+    assert.equal(s.userMessages, 2);
+    assert.equal(s.assistantMessages, 2);
+    assert.equal(s.corrections, 1);
+    assert.equal(s.startedAt, TS('10-29'));
+    assert.equal(s.hooks.hookRuns, 0, 'an old hook attachment is outside the window as well');
+    assert.deepEqual(Object.keys(s.promptStems), ['fresh prompt about the new importer', 'no that is wrong use streams']);
+    assert.equal(s.winStart, SINCE);
+    assert.equal(s.windowCut, true);
+    assert.equal(s.minTs, Date.parse(TS('10-29')));
+  });
+
+  it('without a window every line counts', async () => {
+    const dir = projectWith(lines());
+    const s = await summarizeTranscript(path.join(dir, 'p', 's.jsonl'));
+    assert.equal(s.userMessages, 4);
+    assert.equal(s.windowCut, false);
+    assert.equal(s.hooks.hookRuns, 1);
+  });
+
+  it('a file with a fresh mtime but only old lines is scanned and yields no session', async () => {
+    const dir = projectWith(lines().slice(0, 6));
+    const res = await scanTranscripts({ projectsDir: dir, sinceMs: SINCE });
+    assert.equal(res.scanned, 1);
+    assert.deepEqual(res.sessions, []);
+  });
+
+  it('a long-lived session keeps only its in-window part, and activeDays-style fields come from it', async () => {
+    const dir = projectWith(lines());
+    const res = await scanTranscripts({ projectsDir: dir, sinceMs: SINCE });
+    assert.equal(res.sessions.length, 1);
+    assert.equal(res.sessions[0].userMessages, 2);
+    assert.equal(res.sessions[0].startedAt, TS('10-29'));
+  });
+
+  it('counts the first in-window prompt as a correction when an assistant turn before the window preceded it', async () => {
+    const dir = projectWith([
+      userLine('Build the exporter', { uuid: 'a-u1', timestamp: TS('08-01') }),
+      asstText('a1', { timestamp: TS('08-01', '09', '01') }),
+      userLine('No, that is wrong, do it again', { uuid: 'a-u2', timestamp: TS('10-29') }),
+    ]);
+    const s = await summarizeTranscript(path.join(dir, 'p', 's.jsonl'), { sinceMs: SINCE });
+    assert.equal(s.corrections, 1);
+  });
+
+  it('reuses a cached summary only when it still answers the window, and rebuilds it otherwise', async () => {
+    const dir = projectWith(lines());
+    const cacheDir = path.join(path.dirname(dir), 'cache');
+    const at = (d) => Date.parse(`2026-${d}T00:00:00.000Z`);
+    const run = (sinceMs) => scanTranscripts({ projectsDir: dir, cacheDir, sinceMs });
+
+    let r = await run(at('10-01'));
+    assert.equal(r.cached, 0);
+    assert.equal(r.sessions[0].userMessages, 2);
+    r = await run(at('10-01'));
+    assert.equal(r.cached, 1, 'the same window reads the cache');
+
+    r = await run(at('07-01'));
+    assert.equal(r.cached, 0, 'a longer window needs the lines that were left out');
+    assert.equal(r.sessions[0].userMessages, 4);
+    r = await run(at('10-20'));
+    assert.equal(r.cached, 0, 'a shorter window must not keep the older lines');
+    assert.equal(r.sessions[0].userMessages, 2);
+    r = await run(at('10-28'));
+    assert.equal(r.cached, 1, 'every counted line is inside the shorter window: the cache is exact');
+    assert.equal(r.sessions[0].userMessages, 2);
+    r = await run(at('10-30'));
+    assert.equal(r.cached, 0, 'lines of the cached summary fall out of this window');
+    assert.deepEqual(r.sessions, []);
+  });
+
+  it('a window that cuts nothing is cached once for any window that reaches back further', async () => {
+    const dir = projectWith(lines().slice(6));
+    const cacheDir = path.join(path.dirname(dir), 'cache');
+    await scanTranscripts({ projectsDir: dir, cacheDir, sinceMs: Date.parse('2026-10-01T00:00:00.000Z') });
+    const r = await scanTranscripts({ projectsDir: dir, cacheDir, sinceMs: Date.parse('2026-01-01T00:00:00.000Z') });
+    assert.equal(r.cached, 1);
+    assert.equal(r.sessions[0].userMessages, 2);
+  });
+
+  it('keeps lines that have no timestamp', async () => {
+    const dir = projectWith([{ type: 'user', uuid: 'x1', message: { role: 'user', content: 'a prompt without any timestamp' } }]);
+    const s = await summarizeTranscript(path.join(dir, 'p', 's.jsonl'), { sinceMs: SINCE });
+    assert.equal(s.userMessages, 1);
+  });
+});
+
+describe('the PowerShell tool feeds the shell metrics like Bash', () => {
+  const run = async (tool) => {
+    const ps = (id, name, input) => asstTools(id, [useTool(id, name, input)], { timestamp: TS('10-29', '09', '00', '00') });
+    const result = (id, content, isError, sec) => userLine([resultOf(id, content, isError)], { uuid: `ur-${id}`, timestamp: TS('10-29', '09', '01', sec) });
+    return summarizeLines([
+      ps('e1', 'Edit', { file_path: 'src/a.js', old_string: 'a', new_string: 'b' }),
+      ps('t1', tool, { command: 'npm test' }),
+      result('t1', 'FAIL src/a.test.js\nTests: 1 failed, 2 passed', true, '00'),
+      ps('g1', tool, { command: 'git commit -m fix' }),
+      result('g1', 'done', false, '00'),
+      ps('d1', tool, { command: 'Remove-Item -Recurse -Force build' }),
+      result('d1', 'done', false, '00'),
+      ps('f1', tool, { command: 'git push --force origin main' }),
+      result('f1', 'done', false, '00'),
+    ]);
+  };
+
+  it('counts test runs, git, destructive commands, force pushes and test failures for PowerShell exactly as for Bash', async () => {
+    const ps = await run('PowerShell');
+    const bash = await run('Bash');
+    for (const s of [ps, bash]) {
+      assert.equal(s.testCommands, 1);
+      assert.equal(s.testFailures, 1);
+      assert.deepEqual(s.errorClasses, { 'test-failure': 1 });
+      assert.equal(s.forcePushes, 1);
+      assert.equal(s.destructive, 1);
+      assert.deepEqual(s.git, { commit: 1, push: 1 });
+      assert.deepEqual(s.bashVerbs, { 'npm test': 1, 'git commit': 1, 'Remove-Item': 1, 'git push': 1 });
+    }
+    assert.deepEqual(ps.toolUses, { Edit: 1, PowerShell: 4 });
+  });
+
+  it('puts a slow PowerShell command into the slow-command list', async () => {
+    const s = await summarizeLines([
+      asstTools('s1', [useTool('sl1', 'PowerShell', { command: 'dotnet build' })], { timestamp: TS('10-29', '09', '00', '00') }),
+      userLine([resultOf('sl1', 'ok')], { uuid: 'ur-sl1', timestamp: TS('10-29', '09', '01', '10') }),
+    ]);
+    assert.equal(s.slowCommandCount, 1);
+    assert.deepEqual(s.slowCommands, [{ verb: 'dotnet build', ms: 70000 }]);
+  });
+
+  it('flags the PowerShell forms of a recursive force delete, and nothing harmless', async () => {
+    const destructive = async (command) => (await summarizeLines([asstTools('x', [useTool('x', 'PowerShell', { command })])])).destructive;
+    for (const c of ['Remove-Item -Recurse -Force C:\\work\\build', 'Remove-Item build -Force -Recurse', 'remove-item -r -fo ./dist', 'rm -Recurse -Force node_modules', 'ri .\\out -Recurse -Force']) {
+      assert.equal(await destructive(c), 1, c);
+    }
+    for (const c of ['Remove-Item temp.txt', 'Remove-Item -Recurse build', 'Get-ChildItem -Recurse -Force', 'Get-Process | Where-Object Name -eq node']) {
+      assert.equal(await destructive(c), 0, c);
+    }
+  });
+});
+
+describe('turns that Claude Code sent to itself are not prompts', () => {
+  const scheduled = '<system-reminder>The user is not present.</system-reminder><scheduled-task>This is an automated run of a scheduled task. Run the nightly report for the team and email it to everyone.</scheduled-task>';
+
+  it('skips a scheduled-task trigger by its origin', async () => {
+    const s = await summarizeLines([
+      userLine(scheduled, { uuid: 'u1', origin: { kind: 'task-notification', subkind: 'scheduled-trigger', fireReason: 'scheduled' }, promptSource: 'system' }),
+      userLine('Fix the typo in the readme', { uuid: 'u2', origin: { kind: 'human' } }),
+    ]);
+    assert.equal(s.userMessages, 1);
+    assert.deepEqual(s.promptLengths, ['Fix the typo in the readme'.length]);
+    assert.deepEqual(Object.keys(s.promptStems), ['fix the typo in the readme']);
+    assert.equal(s.langSample.length, 1);
+  });
+
+  it('skips a scheduled-task body also when the line has no origin (older versions)', async () => {
+    const s = await summarizeLines([userLine(scheduled, { uuid: 'u1' }), userLine('Fix the typo in the readme', { uuid: 'u2' })]);
+    assert.equal(s.userMessages, 1);
+    assert.equal(humanText(scheduled), '');
+  });
+
+  it('three runs of the same scheduled task never become a repeated stem', async () => {
+    const lines = [1, 2, 3].map((i) => userLine(scheduled, { uuid: `u${i}`, origin: { kind: 'task-notification', subkind: 'scheduled-trigger' }, promptSource: 'system' }));
+    const s = await summarizeLines(lines);
+    assert.equal(s.userMessages, 0);
+    assert.deepEqual(s.promptStems, {});
+    assert.equal(s.hours.reduce((a, b) => a + b, 0), 0);
+  });
+
+  it('skips peer, coordinator and task-notification turns but keeps human ones and lines from before `origin` existed', async () => {
+    const s = await summarizeLines([
+      userLine('please review my branch now', { uuid: 'u1', origin: { kind: 'peer' } }),
+      userLine('split the work between the workers', { uuid: 'u2', origin: { kind: 'coordinator' } }),
+      userLine('the build finished with warnings', { uuid: 'u3', origin: { kind: 'task-notification' } }),
+      userLine('Add a settings page to the app', { uuid: 'u4', origin: { kind: 'human' } }),
+      userLine('Rename the helper to buildUrl', { uuid: 'u5' }),
+      userLine('a system generated reminder text here', { uuid: 'u6', promptSource: 'system' }),
+    ]);
+    assert.equal(s.userMessages, 2);
+    assert.deepEqual(Object.keys(s.promptStems).sort(), ['add a settings page to the', 'rename the helper to buildurl']);
+  });
+
+  it('still reads tool results of a line that carries an origin', async () => {
+    const s = await summarizeLines([
+      asstTools('t', [useTool('t1', 'Bash', { command: 'npm test' })]),
+      userLine([resultOf('t1', 'Tests: 1 failed', true)], { uuid: 'u1', origin: { kind: 'human' } }),
+    ]);
+    assert.equal(s.testFailures, 1);
+  });
+});
+
+describe('corrections need something to correct', () => {
+  it('does not count an instruction-style opening prompt of a session', async () => {
+    const s = await summarizeLines([
+      userLine('Do not use any tools. From the skill list in your context, print ONLY the names.', { uuid: 'u1' }),
+      asstText('1'),
+    ]);
+    assert.equal(s.userMessages, 1);
+    assert.equal(s.corrections, 0);
+    assert.deepEqual(s.correctionSamples, []);
+  });
+
+  it('counts the same words once Claude has answered', async () => {
+    const s = await summarizeLines([
+      userLine('Always write the changelog entry first', { uuid: 'u1' }),
+      asstText('1'),
+      userLine('Do not use any tools for this one', { uuid: 'u2' }),
+    ]);
+    assert.equal(s.corrections, 1);
+    assert.ok(s.correctionSamples[0].startsWith('Do not use any tools'));
+  });
+
+  it('does not let a subagent answer make the first prompt of the main session a correction target', async () => {
+    const s = await summarizeLines([
+      userLine('Never touch the lockfile', { uuid: 'u1' }),
+      asstText('1', { isSidechain: true }),
+    ]);
+    assert.equal(s.corrections, 0);
   });
 });

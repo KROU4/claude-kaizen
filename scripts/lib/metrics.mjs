@@ -2,12 +2,15 @@
 // measurement object (measure.json). Every metric that a recipe may test is
 // documented in docs/metrics.md (generated from METRIC_DOCS below).
 import { detectLang } from './i18n.mjs';
-import { topN } from './transcripts.mjs';
+import { hookKey, topN } from './transcripts.mjs';
 import { redact } from './redact.mjs';
 
 export const MEASURE_VERSION = 1;
 /** Fewer sessions than this cannot show that a skill or MCP server is unused, so those metrics stay empty. */
 export const MIN_SESSIONS_FOR_UNUSED = 3;
+/** A configured hook is offered for removal only when it failed at least this many times AND in at least this share of its runs. */
+export const FAILING_HOOK_MIN_ERRORS = 20;
+export const FAILING_HOOK_MIN_RATE = 0.5;
 
 const EXT_LANG = {
   '.py': 'python',
@@ -335,7 +338,9 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
       const configured = configuredNorm.get(normalizeCmd(command)) || null;
       // `command` is the display copy (redacted); `configuredCommand` stays exactly as written in settings.json for matching
       const source = configured ? null : fixedSource.get(normalizeCmd(command)) || null; // 'managed' / 'plugin': not removable
-      return { event, command: redact(command), errors, configured: !!configured, configuredCommand: configured, ...(source ? { source } : {}) };
+      // runs of the same hook (any outcome); an error attachment is a run too, but Stop hooks are counted from their summary only
+      const runs = Math.max((hookDurations[hookKey(command)] || {}).n || 0, errors);
+      return { event, command: redact(command), errors, runs, failureRate: round(errors / runs, 3), configured: !!configured, configuredCommand: configured, ...(source ? { source } : {}) };
     })
     .sort((a, b) => b.errors - a.errors)
     .slice(0, 10);
@@ -360,9 +365,17 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
   const sessionsWithCompaction = S.filter((s) => s.compactions > 0).length;
   const denialKinds = {};
   for (const s of S) merge(denialKinds, s.denialKinds);
-  const corrections = sum(S, (s) => s.corrections);
+  // Sessions driven through the SDK (scripts, bots, e2e tests) are not the human typing; keep them out of the habit and correction metrics.
+  const isAutomated = (s) => {
+    const e = s.entrypoints || {};
+    const total = sum(Object.values(e)) || 1;
+    const sdk = sum(Object.entries(e).filter(([k]) => /^sdk/i.test(k)), ([, v]) => v);
+    return sdk / total > 0.5;
+  };
+  const typed = S.filter((s) => !isAutomated(s));
+  const corrections = sum(typed, (s) => s.corrections);
   const correctionSamples = [];
-  for (const s of S) for (const c of s.correctionSamples || []) if (correctionSamples.length < 20) correctionSamples.push(c);
+  for (const s of typed) for (const c of s.correctionSamples || []) if (correctionSamples.length < 20) correctionSamples.push(c);
   const friction = {
     interruptions: sum(S, (s) => s.interruptions),
     interruptionsPerSession: round(sum(S, (s) => s.interruptions) / n, 2),
@@ -393,7 +406,7 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
     hookNonBlockingErrors: hookNonBlocking,
     hookErrorSamples,
     failingHooks,
-    failingHookCommands: failingHooks.filter((h) => h.configured && h.errors >= 20).map((h) => h.configuredCommand),
+    failingHookCommands: failingHooks.filter((h) => h.configured && h.errors >= FAILING_HOOK_MIN_ERRORS && h.failureRate >= FAILING_HOOK_MIN_RATE).map((h) => h.configuredCommand),
     slowHooks,
     hookTimeouts,
     slowCommands: tools.slowCommandsTotal,
@@ -568,13 +581,6 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
   const stems = {};
   const stemSamples = {};
   const langSamples = [];
-  // Sessions driven through the SDK (scripts, bots, e2e tests) are not the human typing; keep them out of habit metrics.
-  const isAutomated = (s) => {
-    const e = s.entrypoints || {};
-    const total = sum(Object.values(e)) || 1;
-    const sdk = sum(Object.entries(e).filter(([k]) => /^sdk/i.test(k)), ([, v]) => v);
-    return sdk / total > 0.5;
-  };
   for (const s of S) {
     if (isAutomated(s)) continue;
     s.hours.forEach((v, i) => (hours[i] += v));

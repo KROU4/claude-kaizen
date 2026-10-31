@@ -12,7 +12,7 @@ import { readJsonl } from './jsonl.mjs';
 import { redact, snippet } from './redact.mjs';
 import { ensureDir, readJsonSafe, writeJsonAtomic } from './paths.mjs';
 
-export const SUMMARY_VERSION = 19;
+export const SUMMARY_VERSION = 20;
 
 const INTERRUPT_RE = /\[Request interrupted by user/;
 const COMPACT_RE = /^This session is being continued from a previous conversation/;
@@ -23,6 +23,8 @@ const MACHINE_TAGS = [
   'task-notification',
   'side-sessions-event',
   'ci-monitor-event',
+  // a scheduled task fires as a user line: its body is the task definition, not something the human typed
+  'scheduled-task',
   'local-command-stdout',
   'local-command-caveat',
   'command-name',
@@ -52,7 +54,7 @@ const TEST_CMD_RE =
 const GIT_RE = /\bgit\s+(commit|push|pull|rebase|merge|checkout|switch|stash|reset|cherry-pick|worktree)\b/;
 const FORCE_PUSH_RE = /\bgit\s+push\b[^|;&]*(\s--force\b|\s-f\b|\s--force-with-lease\b|\s\+[^\s]+)/;
 const DESTRUCTIVE_RE =
-  /\brm\s+-[a-zA-Z]*r[a-zA-Z]*f|\brm\s+-[a-zA-Z]*f[a-zA-Z]*r|\bgit\s+reset\s+--hard|\bgit\s+clean\s+-[a-zA-Z]*f|\bgit\s+checkout\s+--\s|\bdrop\s+(table|database|schema)\b|\btruncate\s+table\b|\bdel\s+\/[sq]|\brmdir\s+\/s|\bformat\s+[a-z]:|\bmkfs\b|\bdd\s+if=/i;
+  /\brm\s+-[a-zA-Z]*r[a-zA-Z]*f|\brm\s+-[a-zA-Z]*f[a-zA-Z]*r|\bgit\s+reset\s+--hard|\bgit\s+clean\s+-[a-zA-Z]*f|\bgit\s+checkout\s+--\s|\bdrop\s+(table|database|schema)\b|\btruncate\s+table\b|\bdel\s+\/[sq]|\brmdir\s+\/s|\bformat\s+[a-z]:|\bmkfs\b|\bdd\s+if=|\b(?:remove-item|ri|rm|del|erase|rmdir|rd)\b(?=[^|;&\n]*\s-r(?:e\w*)?(?=\s|$))(?=[^|;&\n]*\s-fo\w*(?=\s|$))/i;
 
 const SHELL_KEYWORDS = new Set(['for', 'while', 'if', 'then', 'else', 'fi', 'do', 'done', 'case', 'esac', 'function', 'export', 'set', 'export', '&&', '||', '{', '}', '(', ')', 'local', 'return', 'exit']);
 
@@ -86,10 +88,10 @@ const ERROR_CLASSES = [
   ['nonzero-exit', /exit code [1-9]\d*|exited with code [1-9]/i],
 ];
 
-function classifyError(text, isBash) {
+function classifyError(text, isShell) {
   const t = String(text || '').slice(0, 4000);
   for (const [name, re] of ERROR_CLASSES) {
-    if (name === 'test-failure' && !isBash) continue;
+    if (name === 'test-failure' && !isShell) continue;
     if (re.test(t)) return name;
   }
   return 'other';
@@ -181,6 +183,11 @@ export function newSessionSummary(file) {
     versions: {},
     startedAt: null,
     endedAt: null,
+    // Window the summary was computed for (see summarizeTranscript): lets the cache decide whether a stored summary still
+    // answers a different window without reading the file again.
+    winStart: 0, // lines older than this were left out
+    windowCut: false, // at least one line was left out because of it
+    minTs: null, // oldest timestamp (ms) among the lines that were counted
     userMessages: 0,
     assistantMessages: 0,
     sidechainMessages: 0,
@@ -267,23 +274,67 @@ export function topN(obj, n) {
   );
 }
 
-/** Scan one transcript file into a session summary. */
-export async function summarizeTranscript(file) {
+/** Short, stable identity of a line's uuid: 48 bits of its hash keep the sets small and collisions out of reach. */
+function uuidKey(uuid) {
+  return crypto.createHash('sha1').update(String(uuid)).digest('hex').slice(0, 12);
+}
+
+async function* readSources(sources) {
+  for (const src of sources) for await (const o of readJsonl(src.file)) yield { o, sub: src.sub };
+}
+
+/**
+ * Scan one transcript file into a session summary.
+ *
+ * opts.subagents   paths of the session's subagent transcripts (<session>/subagents/*.jsonl). Current Claude Code writes
+ *                  subagent traffic only there, not as isSidechain lines of the parent; every line of these files is
+ *                  treated as sidechain and merged into this summary. A line that an older version mirrored in both
+ *                  places is counted once (uuid).
+ * opts.sinceMs     lines stamped before this are not counted (the --days window works on lines, not on file mtimes).
+ * opts.skipKeys    uuid keys already counted by another file (a fork replays its parent's lines): those lines are skipped.
+ * opts.keysOut     array that receives the uuid key of every counted line, in file order.
+ */
+export async function summarizeTranscript(file, opts = {}) {
+  const { subagents = [], sinceMs = 0, skipKeys = null, keysOut = null } = opts;
   const s = newSessionSummary(file);
-  const pendingTools = new Map(); // tool_use id -> {name, ts, verb, isBash, sidechain}
+  s.winStart = sinceMs;
+  const pendingTools = new Map(); // tool_use id -> {name, ts, verb, isShell, sidechain}
   const seenUuids = new Set(); // resumed/forked sessions repeat lines
   const seenRequests = new Set(); // one assistant API response spans several lines (text, tool_use, thinking)
   let lastAssistantTs = null;
   let lastUserTs = null;
   let interruptSeen = false; // a tool_result already reported this Esc; its companion text line must not count twice
+  // A correction answers something Claude did. The first prompt of a session, or the first one inside the window or after
+  // the lines a fork shares with its parent, has nothing to correct unless an assistant turn came before it.
+  let assistantBefore = false;
 
-  for await (const o of readJsonl(file)) {
+  const sources = [{ file, sub: false }, ...subagents.map((f) => ({ file: f, sub: true }))];
+  for await (const { o, sub } of readSources(sources)) {
     const type = o.type;
+    if (sinceMs && o.timestamp) {
+      const lineTs = Date.parse(o.timestamp);
+      if (!Number.isNaN(lineTs) && lineTs < sinceMs) {
+        s.windowCut = true;
+        if (type === 'assistant' && !sub) assistantBefore = true;
+        continue;
+      }
+    }
     if (o.uuid) {
-      if (seenUuids.has(o.uuid)) continue;
-      seenUuids.add(o.uuid);
+      const key = uuidKey(o.uuid);
+      if (seenUuids.has(key)) continue;
+      seenUuids.add(key);
+      if (skipKeys && skipKeys.has(key)) {
+        if (type === 'assistant' && !sub) assistantBefore = true;
+        continue;
+      }
+      if (keysOut) keysOut.push(key);
+    }
+    if (o.timestamp && type !== 'cost-state') {
+      const lineTs = Date.parse(o.timestamp);
+      if (!Number.isNaN(lineTs) && (s.minTs === null || lineTs < s.minTs)) s.minTs = lineTs;
     }
     if (type === 'cost-state') {
+      if (sub) continue; // cumulative totals belong to the main session
       if (typeof o.totalCostUSD === 'number') s.costUSD = o.totalCostUSD;
       if (typeof o.totalLinesAdded === 'number') s.linesAdded = o.totalLinesAdded;
       if (typeof o.totalLinesRemoved === 'number') s.linesRemoved = o.totalLinesRemoved;
@@ -291,6 +342,7 @@ export async function summarizeTranscript(file) {
     }
     if (type === 'system') {
       if (o.subtype === 'compact_boundary') {
+        if (sub) continue; // a subagent compacting its own context is not a compaction of the session
         s.compactions++;
         inc(s.hooks.events, 'compact_boundary');
         continue;
@@ -369,7 +421,7 @@ export async function summarizeTranscript(file) {
       if (!s.endedAt || ts > Date.parse(s.endedAt)) s.endedAt = o.timestamp;
     }
     const content = o.message && o.message.content;
-    const sidechain = o.isSidechain === true;
+    const sidechain = sub || o.isSidechain === true;
     if (sidechain) s.sidechainMessages++;
 
     if (type === 'assistant') {
@@ -391,17 +443,19 @@ export async function summarizeTranscript(file) {
         mm.cacheRead += u.cache_read_input_tokens || 0;
         mm.cacheCreate += u.cache_creation_input_tokens || 0;
         const ctx = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
-        if (ctx > s.peakContextTokens) s.peakContextTokens = ctx;
+        if (ctx > s.peakContextTokens && !sidechain) s.peakContextTokens = ctx;
       }
       if (typeof o.thinkingDurationMs === 'number' && firstOfRequest) s.thinkingMs += o.thinkingDurationMs;
+      if (!sidechain) assistantBefore = true;
       if (!sidechain && !Number.isNaN(ts)) lastAssistantTs = ts;
       for (const b of blocks(content, 'tool_use')) {
         const name = b.name || 'unknown';
         const input = b.input || {};
         if (!sidechain) inc(s.toolUses, name);
         let verb = '';
-        const isBash = name === 'Bash';
-        if (isBash && typeof input.command === 'string') {
+        // The PowerShell tool (Windows) feeds the same shell metrics as Bash; both carry the command in input.command.
+        const isShell = name === 'Bash' || name === 'PowerShell';
+        if (isShell && typeof input.command === 'string') {
           const cmd = input.command;
           verb = commandVerb(cmd);
           if (!sidechain) {
@@ -450,7 +504,7 @@ export async function summarizeTranscript(file) {
           if (!DOC_EXTS.has(ext)) s.codeFilesEdited.add(fp);
           inc(s.extensions, ext);
         }
-        if (b.id) pendingTools.set(b.id, { name, ts, verb, isBash, sidechain });
+        if (b.id) pendingTools.set(b.id, { name, ts, verb, isShell, sidechain });
         if (pendingTools.size > 200) pendingTools.delete(pendingTools.keys().next().value);
       }
       continue;
@@ -486,7 +540,7 @@ export async function summarizeTranscript(file) {
             d.n++;
             d.ms += ms;
             if (ms > d.max) d.max = ms;
-            if (pend.isBash && ms >= 30000 && !waitedForUser) s.slowCommands.push({ verb: pend.verb, ms });
+            if (pend.isShell && ms >= 30000 && !waitedForUser) s.slowCommands.push({ verb: pend.verb, ms });
           }
         }
         if (r.is_error === true && (!pend || !pend.sidechain)) {
@@ -501,11 +555,11 @@ export async function summarizeTranscript(file) {
           }
           const name = pend ? pend.name : 'unknown';
           inc(s.toolErrors, name);
-          const cls = classifyError(text, pend ? pend.isBash : false);
+          const cls = classifyError(text, pend ? pend.isShell : false);
           inc(s.errorClasses, cls);
           if (cls === 'user-rejected') s.userRejections++;
           if (cls === 'test-failure') s.testFailures++;
-        } else if (r.is_error === true && pend && pend.sidechain && pend.isBash) {
+        } else if (r.is_error === true && pend && pend.sidechain && pend.isShell) {
           // a failing test run inside a subagent is still a test failure (nothing else of a sidechain tool error is counted)
           const text = typeof r.content === 'string' ? r.content : textOf(r.content);
           if (!INTERRUPT_RE.test(text) && classifyError(text, true) === 'test-failure') s.testFailures++;
@@ -515,6 +569,9 @@ export async function summarizeTranscript(file) {
     }
     if (sidechain) continue;
     if (o.isMeta === true) continue;
+    // Scheduled-task triggers, task notifications, peer and coordinator messages are Claude Code talking to itself; only
+    // origin.kind 'human' (or a line from before origin existed) is a prompt somebody typed.
+    if ((o.origin && o.origin.kind && o.origin.kind !== 'human') || (!o.origin && o.promptSource === 'system')) continue;
 
     const raw = textOf(content);
     if (!raw) continue;
@@ -553,7 +610,7 @@ export async function summarizeTranscript(file) {
       inc(s.promptStems, stem);
       if (!s.promptSamples[stem]) s.promptSamples[stem] = snippet(safe, 160);
     }
-    if (CORRECTION_RE.test(human)) {
+    if (assistantBefore && CORRECTION_RE.test(human)) {
       s.corrections++;
       if (s.correctionSamples.length < 12) s.correctionSamples.push(snippet(safe, 200));
     }
@@ -595,14 +652,55 @@ function hookKeyRaw(command) {
   return base.slice(0, 60) || c.slice(0, 60);
 }
 
-function cacheKey(file, st) {
-  return crypto.createHash('sha1').update(`${file}|${st.size}|${Math.round(st.mtimeMs)}|${SUMMARY_VERSION}`).digest('hex');
+function sha1(text) {
+  return crypto.createHash('sha1').update(text).digest('hex');
+}
+
+function cacheKey(file, st, subs = []) {
+  const subPart = subs.map((x) => `${path.basename(x.file)}:${x.size}:${Math.round(x.mtimeMs)}`).join(',');
+  return sha1(`${file}|${st.size}|${Math.round(st.mtimeMs)}|${SUMMARY_VERSION}|${subPart}`);
+}
+
+/**
+ * Does a summary that was computed for the window start `c.winStart` still hold for `winStart`?
+ * A later start only needs the counted lines to be all inside it; an earlier start needs that no line was left out.
+ */
+function coversWindow(c, winStart) {
+  const w = c.winStart || 0;
+  if (w === winStart) return true;
+  if (winStart > w) return c.minTs === null || c.minTs === undefined || c.minTs >= winStart;
+  return !c.windowCut;
+}
+
+function listSubagentTranscripts(dir, sessionName) {
+  const subDir = path.join(dir, sessionName, 'subagents');
+  let entries;
+  try {
+    entries = fs.readdirSync(subDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const e of entries) {
+    if (!e.isFile() || !e.name.endsWith('.jsonl')) continue;
+    const file = path.join(subDir, e.name);
+    try {
+      const st = fs.statSync(file);
+      if (st.size > 0) out.push({ file, size: st.size, mtimeMs: st.mtimeMs });
+    } catch {
+      /* vanished while listing */
+    }
+  }
+  out.sort((a, b) => a.file.localeCompare(b.file));
+  return out;
 }
 
 /**
  * Enumerate transcript files under projectsDir modified after `sinceMs`.
- * Subagent transcripts live in nested directories; they are skipped (their
- * messages are also mirrored as isSidechain lines in the parent session).
+ * Current Claude Code writes subagent traffic only to <project>/<session>/subagents/*.jsonl (older versions also
+ * mirrored it as isSidechain lines of the parent), so each entry carries the `subagents` files of its session.
+ * A session is listed when the main file or any of its subagent files was modified after `sinceMs`;
+ * which lines count is decided later by their own timestamps.
  */
 export function listTranscripts(projectsDir, { sinceMs = 0 } = {}) {
   const out = [];
@@ -625,47 +723,109 @@ export function listTranscripts(projectsDir, { sinceMs = 0 } = {}) {
       } catch {
         continue;
       }
-      if (st.size === 0 || st.mtimeMs < sinceMs) continue;
-      out.push({ file, size: st.size, mtimeMs: st.mtimeMs });
+      if (st.size === 0) continue;
+      const subagents = listSubagentTranscripts(dir, e.name.slice(0, -'.jsonl'.length));
+      const newest = Math.max(st.mtimeMs, ...subagents.map((x) => x.mtimeMs));
+      if (newest < sinceMs) continue;
+      out.push({ file, size: st.size, mtimeMs: st.mtimeMs, subagents });
     }
   }
   out.sort((a, b) => a.mtimeMs - b.mtimeMs);
   return out;
 }
 
+const KEY_LEN = 12;
+
+function splitKeys(joined) {
+  const keys = [];
+  for (let p = 0; p + KEY_LEN <= joined.length; p += KEY_LEN) keys.push(joined.slice(p, p + KEY_LEN));
+  return keys;
+}
+
 /**
  * Scan all transcripts. Returns {sessions, scanned, cached, bytes, errors}.
  * onProgress(done, total, file) is optional.
+ *
+ * Only lines stamped inside the window (sinceMs) are counted. A fork or a copy of a session replays its parent's lines
+ * with the same uuids in a file of its own: every uuid is counted once across all files, by the file whose first line is
+ * the oldest (the parent), and the others keep only their own new lines.
  */
 export async function scanTranscripts({ projectsDir, sinceMs = 0, cacheDir = null, onProgress = null, useCache = true }) {
   const files = listTranscripts(projectsDir, { sinceMs });
-  const sessions = [];
   let cached = 0;
   let bytes = 0;
   const errors = [];
   if (cacheDir && useCache) ensureDir(cacheDir);
+  const readCache = (cacheFile) => {
+    const c = cacheFile && useCache ? readJsonSafe(cacheFile) : null;
+    return c && c.v === SUMMARY_VERSION && coversWindow(c, sinceMs) ? c : null;
+  };
+  const fail = (f, err) => errors.push({ file: path.basename(f.file), error: String(err && err.message ? err.message : err) });
+
+  // pass 1: every file on its own (cached), with the uuid keys of the lines it counted
+  const entries = [];
   let i = 0;
   for (const f of files) {
     i++;
-    bytes += f.size;
-    const key = cacheDir ? cacheKey(f.file, { size: f.size, mtimeMs: f.mtimeMs }) : null;
+    const subs = f.subagents || [];
+    bytes += f.size + subs.reduce((n, x) => n + x.size, 0);
+    const key = cacheDir ? cacheKey(f.file, { size: f.size, mtimeMs: f.mtimeMs }, subs) : null;
     const cacheFile = key ? path.join(cacheDir, `${key}.json`) : null;
-    let summary = cacheFile && useCache ? readJsonSafe(cacheFile) : null;
-    if (summary && summary.v === SUMMARY_VERSION) {
+    let summary = readCache(cacheFile);
+    let uu = '';
+    if (summary) {
       cached++;
+      uu = typeof summary.uu === 'string' ? summary.uu : '';
+      delete summary.uu;
     } else {
       try {
-        summary = await summarizeTranscript(f.file);
-        if (cacheFile) writeJsonAtomic(cacheFile, summary);
+        const keys = [];
+        summary = await summarizeTranscript(f.file, { subagents: subs.map((x) => x.file), sinceMs, keysOut: keys });
+        uu = keys.join('');
+        if (cacheFile) writeJsonAtomic(cacheFile, { ...summary, uu });
       } catch (err) {
-        errors.push({ file: path.basename(f.file), error: String(err && err.message ? err.message : err) });
+        fail(f, err);
         continue;
       }
     }
-    summary.mtime = new Date(f.mtimeMs).toISOString();
-    summary.bytes = f.size;
-    if (summary.userMessages + summary.assistantMessages > 0) sessions.push(summary);
+    entries.push({ f, subs, summary, uu, key });
     if (onProgress) onProgress(i, files.length, f.file);
+  }
+
+  // pass 2: oldest session first, so that a later file with shared uuids only keeps what is new in it
+  const startOf = (e) => (e.summary.startedAt ? Date.parse(e.summary.startedAt) : Infinity);
+  const order = [...entries].sort((a, b) => startOf(a) - startOf(b) || a.f.mtimeMs - b.f.mtimeMs || a.f.file.localeCompare(b.f.file));
+  const seen = new Set();
+  const finalSummary = new Map();
+  for (const e of order) {
+    let summary = e.summary;
+    const keys = splitKeys(e.uu);
+    const overlap = keys.filter((k) => seen.has(k));
+    if (overlap.length) {
+      const forkFile = e.key && cacheDir ? path.join(cacheDir, `${e.key}.${sha1(overlap.join('')).slice(0, 12)}.json`) : null;
+      let fork = readCache(forkFile);
+      if (!fork) {
+        try {
+          fork = await summarizeTranscript(e.f.file, { subagents: e.subs.map((x) => x.file), sinceMs, skipKeys: new Set(overlap) });
+          if (forkFile) writeJsonAtomic(forkFile, fork);
+        } catch (err) {
+          fail(e.f, err);
+          continue;
+        }
+      }
+      summary = fork;
+    }
+    for (const k of keys) seen.add(k);
+    finalSummary.set(e, summary);
+  }
+
+  const sessions = [];
+  for (const e of entries) {
+    const summary = finalSummary.get(e);
+    if (!summary) continue;
+    summary.mtime = new Date(e.f.mtimeMs).toISOString();
+    summary.bytes = e.f.size + e.subs.reduce((n, x) => n + x.size, 0);
+    if (summary.userMessages + summary.assistantMessages > 0) sessions.push(summary);
   }
   return { sessions, scanned: files.length, cached, bytes, errors };
 }

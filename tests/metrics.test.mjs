@@ -12,7 +12,7 @@ import { inventory } from '../scripts/lib/inventory.mjs';
 import { detectLang } from '../scripts/lib/i18n.mjs';
 import { METRIC_DOCS, MEASURE_VERSION, MIN_SESSIONS_FOR_UNUSED, SAFE_VERBS, buildMeasure, suggestAllowRules } from '../scripts/lib/metrics.mjs';
 import { loadCatalog, resolvePath } from '../scripts/lib/recipes.mjs';
-import { commandVerb, newSessionSummary, scanTranscripts } from '../scripts/lib/transcripts.mjs';
+import { commandVerb, hookKey, newSessionSummary, scanTranscripts } from '../scripts/lib/transcripts.mjs';
 import { PROJECTS_FIXTURE, USAGE_DATA_FIXTURE, cleanupTempDirs, makeTempDir, materializeHome, setEnv, writeJson, writeText } from './helpers.mjs';
 
 let restoreEnv;
@@ -323,6 +323,69 @@ describe('friction', () => {
     assert.deepEqual(m.friction.failingHookCommands, [raw]);
     assert.ok(!h.command.includes('AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsawZ'), h.command);
     assert.match(h.command, /REDACTED/);
+  });
+
+  describe('failure rate of hooks', () => {
+    const cmd = 'npx prettier --write'; // configured in the fixture settings
+    const hookSession = (errors, runs) =>
+      makeSession({
+        hooks: {
+          ...newSessionSummary('/p/s.jsonl').hooks,
+          errorsByCommand: { [`PostToolUse|${cmd}`]: errors },
+          durations: { [hookKey(cmd)]: { n: runs, ms: runs * 10, max: 50 } },
+        },
+      });
+    const failingOf = (errors, runs) => buildMeasure({ sessions: [hookSession(errors, runs), ...padding()], inventory: inv, insights: null, env: ENV }).friction;
+
+    it('exposes runs and failureRate next to the error count', () => {
+      const h = failingOf(25, 4566).failingHooks.find((x) => x.command === cmd);
+      assert.equal(h.errors, 25);
+      assert.equal(h.runs, 4566);
+      assert.equal(h.failureRate, 0.005);
+    });
+
+    it('does not offer a hook that fails in a fraction of its runs for removal (25 errors in 4566 runs)', () => {
+      const f = failingOf(25, 4566);
+      assert.equal(f.failingHooks.length, 1, 'it stays visible in the digest');
+      assert.deepEqual(f.failingHookCommands, []);
+    });
+
+    it('offers a hook that fails on nearly every run, and keeps the boundary (half of the runs, 20 errors) inclusive', () => {
+      assert.deepEqual(failingOf(3320, 3320).failingHookCommands, [cmd]);
+      assert.deepEqual(failingOf(25, 50).failingHookCommands, [cmd]);
+      assert.deepEqual(failingOf(25, 51).failingHookCommands, [], 'just under half of the runs');
+    });
+
+    it('still needs the minimum number of errors, however high the rate', () => {
+      assert.deepEqual(failingOf(19, 19).failingHookCommands, []);
+      assert.deepEqual(failingOf(20, 20).failingHookCommands, [cmd]);
+    });
+
+    it('sums runs and errors over sessions before it takes the rate', () => {
+      const m = buildMeasure({ sessions: [hookSession(15, 20), hookSession(15, 20), ...padding()], inventory: inv, insights: null, env: ENV });
+      const h = m.friction.failingHooks.find((x) => x.command === cmd);
+      assert.equal(h.errors, 30);
+      assert.equal(h.runs, 40);
+      assert.equal(h.failureRate, 0.75);
+      assert.deepEqual(m.friction.failingHookCommands, [cmd]);
+    });
+
+    it('never reports a rate above 1 when the run count is missing or smaller than the errors', () => {
+      const none = makeSession({ hooks: { ...newSessionSummary('/p/s.jsonl').hooks, errorsByCommand: { [`PostToolUse|${cmd}`]: 30 } } });
+      const h = buildMeasure({ sessions: [none, ...padding()], inventory: inv, insights: null, env: ENV }).friction.failingHooks.find((x) => x.command === cmd);
+      assert.equal(h.runs, 30);
+      assert.equal(h.failureRate, 1);
+    });
+  });
+});
+
+describe('corrections in the metrics', () => {
+  it('leaves sessions driven through the SDK out of the correction count and samples, like the habit metrics', () => {
+    const human = makeSession({ entrypoints: { cli: 10 }, userMessages: 5, corrections: 2, correctionSamples: ['No, not that'] });
+    const bot = makeSession({ entrypoints: { 'sdk-cli': 10 }, userMessages: 5, corrections: 4, correctionSamples: ['Do not use any tools'] });
+    const m = buildMeasure({ sessions: [human, bot, ...padding()], inventory: inv, insights: null, env: ENV });
+    assert.equal(m.friction.corrections, 2);
+    assert.deepEqual(m.friction.correctionSamples, ['No, not that']);
   });
 });
 
