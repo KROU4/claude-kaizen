@@ -16,7 +16,7 @@ const MODE_RAW = '{{mode}}';
 const PATTERN_RAW = '{{testPattern}}';
 const unset = (v) => typeof v !== 'string' || v.startsWith('{' + '{') || v.trim() === '';
 const MODE = !unset(MODE_RAW) && MODE_RAW.trim().toLowerCase() === 'remind' ? 'remind' : 'block';
-const DEFAULT_RE = /\b(?:pytest|unittest|tox|nox|(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:test|lint|typecheck|check)|vitest|jest|mocha|playwright\s+test|go\s+(?:test|vet)|cargo\s+(?:test|clippy|check)|dotnet\s+test|mvn\s+(?:\S+\s+)*(?:test|verify)|gradlew?\s+(?:test|check)|phpunit|rspec|mix\s+test|make\s+(?:test|check|lint)|node\s+--test|ruff|eslint|tsc|mypy|pyright|flake8|pylint|golangci-lint|biome)\b/i;
+const DEFAULT_RE = /\b(?:pytest|unittest|tox|nox|(?:npm|pnpm|yarn|bun)(?:\.cmd|\.exe)?\s+(?:run\s+)?(?:test|lint|typecheck|check)|vitest|jest|mocha|playwright\s+test|go\s+(?:test|vet)|cargo\s+(?:test|clippy|check)|dotnet\s+test|mvnw?(?:\.cmd)?(?:\s+(?:(?!-x\b|--exclude-task\b)-{1,2}[\w.:=-]+|clean|compile|install|package))*\s+(?:test|verify)(?=\s|$)|gradlew?(?:\.bat)?(?:\s+(?:(?!-x\b|--exclude-task\b)-{1,2}[\w.:=-]+|clean|compile\w*|assemble|build))*\s+(?:test|check|build)(?=\s|$)|phpunit|rspec|mix\s+test|make\s+(?:test|check|lint)|node\s+--test|ruff|eslint|tsc|mypy|pyright|flake8|pylint|golangci-lint|biome)\b/i;
 const CODE_EXT = /\.(?:js|jsx|ts|tsx|mjs|cjs|py|go|rs|java|kt|cs|rb|php|swift|c|cpp|h|vue|svelte|sql|sh|ps1)$/i;
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 
@@ -105,6 +105,13 @@ function selftest() {
     const r1 = ev(transcript(user('fix it'), edit('C:\\p\\src\\a.ts'), result, edit('/p/b.py')));
     check('code edited, no checks -> block', r1 && r1.decision === 'block' && r1.reason.includes('2 source file(s)') && r1.reason.includes('a.ts, b.py'), JSON.stringify(r1));
     check('tests ran -> silent', ev(transcript(user('fix'), edit('/p/a.ts'), result, bash('cd p && npm test -- --run'))) === null, 'expected silence');
+    for (const c of ['npm.cmd test', 'pnpm.cmd run lint', 'yarn.cmd test', './mvnw test', 'mvnw.cmd verify', '.\\gradlew.bat test', './gradlew --no-daemon check', 'mvn -q verify']) {
+      check(`tests ran (${c}) -> silent`, ev(transcript(user('fix'), edit('C:\\p\\src\\a.ts'), asst(use('PowerShell', { command: c })))) === null, 'expected silence');
+    }
+    for (const c of ['./gradlew bootRun 2>&1 | tee build.log', './gradlew assemble -x test', 'gradle wrapper && echo check', './mvnw spring-boot:run | tee test.log']) {
+      check(`not a test run (${c}) -> block`, ev(transcript(user('fix'), edit('/p/a.ts'), bash(c)))?.decision === 'block', 'expected block');
+    }
+    check('echo of a test name is not a run', ev(transcript(user('fix'), edit('/p/a.ts'), bash('echo done')))?.decision === 'block', 'expected block');
     check('only docs/config edited -> silent', ev(transcript(user('docs'), edit('/p/README.md'), edit('/p/package.json'), edit('/p/x.yaml'))) === null, 'expected silence');
     check('stop_hook_active -> silent', ev({ ...transcript(user('fix'), edit('/p/a.ts')), stop_hook_active: true }) === null, 'expected silence');
     check('new prompt resets the turn', ev(transcript(user('one'), edit('/p/a.ts'), user('what is this?'), asst({ type: 'text', text: 'an answer' }))) === null, 'expected silence');

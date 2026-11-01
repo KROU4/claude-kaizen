@@ -2,7 +2,7 @@
 // What it does: denies file tools that touch secret stores (.env and .env.*, *.pem, *.key, *.p12, *.pfx,
 //   *.kdbx, id_rsa*, id_ed25519*, anything under .ssh/, .aws/credentials, .netrc, .pypirc, secrets.yml|yaml|json,
 //   credentials.json, service-account*.json) and Bash commands that print them (cat .env, type, Get-Content,
-//   printenv, bare env, echo $API_TOKEN). Allowed: .env.example/.sample/.template and public keys (*.pub).
+//   printenv, bare env, echo $API_TOKEN). Allowed: .env.example/.sample/.template and public keys (*.pub, also under .ssh/).
 // Registered for: PreToolUse, matcher "Read|Edit|Write|MultiEdit|Bash|PowerShell" (shell commands are checked for both shells).
 // Parameters (substituted by Kaizen at install time): extraPatterns (comma list of extra glob-ish patterns,
 //   e.g. "*.secret,config/prod.yml,vault/"; a pattern without "/" matches the file name only).
@@ -30,16 +30,18 @@ function isSecretPath(file, extras = EXTRA) {
   const dirs = parts.slice(0, -1).map((s) => s.toLowerCase());
   if (!base) return false;
   if (/^\.env(?:[.*?].*)?$/.test(base)) return !/\.(?:example|sample|template)$/.test(base);
-  if (dirs.includes('.ssh')) return true;
-  if (base === 'credentials' && dirs[dirs.length - 1] === '.aws') return true;
-  if (/^id_(?:rsa|ed25519|ecdsa|dsa)/.test(base)) return !base.endsWith('.pub');
-  if (/\.(?:pem|key|p12|pfx|kdbx)$/.test(base)) return true;
-  if (/^(?:\.netrc|_netrc|\.pypirc|credentials\.json|secrets\.(?:ya?ml|json)|service-account.*\.json)$/.test(base)) return true;
-  return extras.some((p) => {
+  const extra = () => extras.some((p) => {
     const pat = p.replace(/\\/g, '/');
     if (pat.endsWith('/')) return dirs.some((d) => globRe(pat.slice(0, -1)).test(d));
     return globRe(pat).test(pat.includes('/') ? norm : base);
   });
+  if (base.endsWith('.pub')) return extra(); // public keys are fine, also under .ssh/
+  if (dirs.includes('.ssh')) return true;
+  if (base === 'credentials' && dirs[dirs.length - 1] === '.aws') return true;
+  if (/^id_(?:rsa|ed25519|ecdsa|dsa)/.test(base)) return true;
+  if (/\.(?:pem|key|p12|pfx|kdbx)$/.test(base)) return true;
+  if (/^(?:\.netrc|_netrc|\.pypirc|credentials\.json|secrets\.(?:ya?ml|json)|service-account.*\.json)$/.test(base)) return true;
+  return extra();
 }
 
 // Quote-aware split of a command line into simple commands (one token array each).
@@ -121,7 +123,8 @@ function selftest() {
     [file('Read', 'service-account-prod.json'), true], [file('Read', 'vault.kdbx'), true], [file('Write', '/app/.env'), true], [file('Edit', '/app/.env.local'), true],
     [{ tool_name: 'NotebookEdit', tool_input: { notebook_path: '/x/.env' } }, true],
     [file('Read', '/app/.env.example'), false], [file('Read', '/app/.env.sample'), false], [file('Read', '/app/.env.template'), false], [file('Edit', 'src/app.ts'), false],
-    [file('Read', 'README.md'), false], [file('Read', '/x/id_rsa.pub'), false], [file('Read', '/x/environment.js'), false], [file('Read', '/x/.envrc'), false],
+    [file('Read', 'README.md'), false], [file('Read', '/x/id_rsa.pub'), false], [file('Read', '/home/u/.ssh/id_ed25519.pub'), false], [file('Read', 'C:\\Users\\u\\.ssh\\id_rsa.pub'), false], [file('Read', '/home/u/.ssh/known_hosts'), true],
+    [bash('cat ~/.ssh/id_rsa.pub'), false], [ps('Get-Content $env:USERPROFILE\\.ssh\\id_ed25519.pub'), false], [bash('cat ~/.ssh/id_rsa'), true], [file('Read', '/x/environment.js'), false], [file('Read', '/x/.envrc'), false],
     [bash('cat .env'), true], [bash('type C:\\a\\.env'), true], [bash('Get-Content secrets.json'), true], [bash('head -n 3 ~/.ssh/id_rsa'), true], [bash('tail -f .env.local'), true],
     [bash('printenv'), true], [bash('env | sort'), true], [bash('echo $GITHUB_TOKEN'), true], [bash('cat < .env'), true], [bash('grep API_KEY .env'), true],
     [bash('cat README.md'), false], [bash('ls -la'), false], [bash('cat .env.example'), false], [bash('echo $PATH'), false], [bash('grep -r ".env" src'), false],

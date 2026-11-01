@@ -362,3 +362,88 @@ test('long-command-nudge: here-string and heredoc bodies, Start-Job in assignmen
     assert.ok(out && /run_in_background/.test(out.additionalContext), c);
   }
 });
+
+test('guard-destructive: SQL text is judged by the command it belongs to, not by every command on the line', () => {
+  const good = [
+    'cd C:/Users/KROU4/proj && git commit -m "migrations: drop table legacy_users"',
+    'cd migrations && grep -n "DROP TABLE" *.sql',
+    'rg -n "drop table" migrations && npm test',
+    'pushd db && git log -S"TRUNCATE TABLE" && popd',
+    'msg="drop table x"; git commit -m "$msg"',
+  ];
+  for (const c of good) assert.equal(run(scripts.guard, shell('Bash', c)), null, c);
+  const bad = ['cd db && psql -c "DROP TABLE x"', 'git log -S"drop table" && psql -c "select 1"', 'q="DROP TABLE x"; python run.py "$q"', 'cd x && python migrate.py "drop table y"', 'echo "DROP TABLE x" | cd . | mysql'];
+  for (const c of bad) assert.equal(run(scripts.guard, shell('Bash', c))?.permissionDecision, 'deny', c);
+  const psGood = [
+    "Select-String -Path .\\migrations\\*.sql -Pattern 'DROP TABLE'",
+    "@'\nDROP TABLE old_users;\n'@ | Set-Content migrations\\002_down.sql",
+    "@\"\nTRUNCATE TABLE cache;\n\"@ | Out-File down.sql",
+    "git commit -m @'\nmigrations: drop table legacy_users\n'@",
+    'cd C:\\proj; git commit -m "drop table old"',
+  ];
+  for (const c of psGood) assert.equal(run(scripts.guard, shell('PowerShell', c)), null, JSON.stringify(c));
+  const psBad = ["@'\nDROP TABLE old_users;\n'@ | Invoke-Sqlcmd", "@'\nDROP TABLE x;\n'@ | sqlcmd -S db", 'Invoke-Sqlcmd -Query "DROP TABLE x"'];
+  for (const c of psBad) assert.equal(run(scripts.guard, shell('PowerShell', c))?.permissionDecision, 'deny', JSON.stringify(c));
+});
+
+test('guard-destructive: PowerShell comma-separated paths are an array, each one judged on its own', () => {
+  for (const c of ['Remove-Item -Recurse -Force node_modules, dist', 'Remove-Item -Recurse -Force node_modules,dist', 'Remove-Item -Recurse -Force .\\out\\a,.\\out\\b']) {
+    assert.equal(run(scripts.guard, shell('PowerShell', c)), null, c);
+  }
+  for (const c of ['Remove-Item -Recurse -Force .\\out\\a,C:\\', 'Remove-Item -Recurse -Force .\\out\\a,~', 'Remove-Item -Recurse -Force ./out/a,/', 'Remove-Item -Recurse -Force dist, C:\\', 'powershell -Command "Remove-Item -Recurse -Force dist,C:\\"']) {
+    assert.equal(run(scripts.guard, shell('PowerShell', c))?.permissionDecision, 'deny', c);
+  }
+  // in Bash a comma is part of the file name: not an array, and a single top-level name is still flagged
+  assert.equal(run(scripts.guard, shell('Bash', 'rm -rf a/b,c/d')), null);
+});
+
+test('guard-destructive: Git Bash / WSL drive paths and cmd //c are judged like C:\\ paths', () => {
+  // bare /c is a Git Bash drive only on Windows; elsewhere /c/... is an ordinary directory
+  const gitBash = process.platform === 'win32' ? ['rm -rf /c/Users/KROU4', 'rm -rf /c/Users/KROU4/', 'rm -rf /c/Users', 'rm -rf /c/Windows', 'rm -rf /c', 'rm -rf /c/'] : [];
+  const bad = [...gitBash, 'rm -rf /mnt/c/Users/me', 'rm -rf /cygdrive/c/Windows',
+    'cmd //c "rd /s /q C:\\"', "cmd //c 'rd /s /q C:\\'", 'cmd //c rd /s /q C:\\', 'cmd //c "rd /s /q C:/"', 'cmd.exe /c "rd /s /q C:\\"'];
+  for (const c of bad) assert.equal(run(scripts.guard, shell('Bash', c))?.permissionDecision, 'deny', c);
+  for (const c of ['rm -rf /c/Users/KROU4/proj/dist', 'rm -rf /mnt/c/proj/node_modules', 'rm -rf /c/proj/build/*', 'cmd //c "dir C:\\"']) {
+    assert.equal(run(scripts.guard, shell('Bash', c)), null, c);
+  }
+});
+
+test('protect-secrets: public keys are readable everywhere, private keys and the rest of .ssh stay denied', () => {
+  const pub = [
+    shell('Bash', 'cat ~/.ssh/id_ed25519.pub'),
+    shell('PowerShell', 'Get-Content $env:USERPROFILE\\.ssh\\id_ed25519.pub'),
+    { tool_name: 'Read', tool_input: { file_path: 'C:\\Users\\KROU4\\.ssh\\id_rsa.pub' } },
+    { tool_name: 'Read', tool_input: { file_path: '/home/u/.ssh/id_ed25519.pub' } },
+  ];
+  for (const p of pub) assert.equal(run(scripts.secrets, p), null, JSON.stringify(p));
+  const priv = [
+    shell('Bash', 'cat ~/.ssh/id_ed25519'),
+    { tool_name: 'Read', tool_input: { file_path: '/home/u/.ssh/id_rsa' } },
+    { tool_name: 'Read', tool_input: { file_path: '/home/u/.ssh/config' } },
+    { tool_name: 'Read', tool_input: { file_path: '/home/u/.ssh/known_hosts' } },
+  ];
+  for (const p of priv) assert.equal(run(scripts.secrets, p)?.permissionDecision, 'deny', JSON.stringify(p));
+});
+
+test('verify-before-stop: Windows shims and build-tool wrappers count as test runs; the rendered selftest passes', () => {
+  const script = render('verify-before-stop.mjs', { mode: 'block' });
+  const st = spawnSync(process.execPath, [script, '--selftest'], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+  assert.equal(st.status, 0, st.stdout + st.stderr);
+  assert.ok(!/^FAIL/m.test(st.stdout), st.stdout);
+  const line = (o) => JSON.stringify(o);
+  const turn = (command, tool = 'PowerShell') => {
+    const file = path.join(tmp, `vbs-${Math.random().toString(36).slice(2)}.jsonl`);
+    fs.writeFileSync(file, [
+      line({ type: 'user', message: { role: 'user', content: 'fix it' } }),
+      line({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'a', name: 'Edit', input: { file_path: 'C:\\p\\src\\a.ts' } }] } }),
+      line({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'b', name: tool, input: { command } }] } }),
+    ].join('\n') + '\n');
+    const r = spawnSync(process.execPath, [script], { input: JSON.stringify({ transcript_path: file }), encoding: 'utf8', timeout: 15000, windowsHide: true });
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout.trim();
+  };
+  for (const c of ['npm.cmd test', 'pnpm.cmd run lint', 'yarn.cmd test', './mvnw test', 'mvnw.cmd verify', '.\\gradlew.bat test', './gradlew test', 'npx.cmd vitest run', 'npm test']) {
+    assert.equal(turn(c), '', c);
+  }
+  assert.match(turn('git status'), /"decision":"block"/);
+});
