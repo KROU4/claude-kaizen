@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.1.5] — 2026-11-01
 
 ### Added
 - `kaizen paths` prints where Kaizen keeps its files for this run (the state directory and the files in it, as JSON). Skills and subagents read it instead of assuming `~/.claude/kaizen`.
@@ -18,6 +18,11 @@ All notable changes to this project are documented here. The format follows [Kee
 - Upgrading from 0.1.4: applying `format-on-edit` / `verify-before-stop` again in a project that already has the old shared-script hook now says which old batch to `undo`, instead of silently leaving two hooks.
 - `undo` of a hook that stays because another batch still needs it prints the shared message, not "remove … hook".
 - `apply --recipe` for a recipe that is not in the recommendations (`hooks.verify-before-stop`, `hooks.format-on-edit`) uses the recipe's own default scope (project) instead of forcing `user`.
+- Re-applying a recipe (same script, a status line, a setting, a rules block, permissions) records that it relies on what the earlier batch wrote, so undoing the earlier batch no longer removes a script, setting or block the newer batch still needs. A script a 0.1.4 batch shares with another project's hook is kept on undo.
+- `apply --dry-run` with several recipes and `undo --all --dry-run` simulate each step, so they print exactly what the real run does.
+- The local console moves an old `choices.json` aside and exits with an error on timeout, so a stale selection is never applied.
+- Measurement: SubagentStop runs and their failures are matched; decisions accepted by a saved permission rule are not counted as permission prompts and do not hide slow commands; scheduled-task and other non-human turns are not prompts; a correction needs an earlier answer; PowerShell deletes are recognised in command position only; PowerShell verbs no longer produce `Bash(...)` allow rules; `Invoke-Pester` counts as a test run.
+- Docs: deleting the state folder removes the installed hook scripts and the undo journal, so run `undo --all` first; undo guidance for a run with several batches; skills and agents no longer assume `~/.claude/kaizen`.
 
 ## [0.1.4] — 2026-11-01
 

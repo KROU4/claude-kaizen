@@ -1,7 +1,7 @@
 {
   "name": "kaizen",
   "displayName": "Kaizen",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Continuous improvement for Claude Code: measures how you really work from local transcripts, lets you pick fixes in an interactive console, then configures hooks, skills, subagents, rules and permissions for you. Reversible, local-only, bilingual (en/ru).",
   "author": {
     "name": "KROU4",
