@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [0.1.7] — 2026-11-01
+
+### Fixed
+- `hooks.disable-failing` together with recipes that wire the same hook: undoing the batches in any order no longer loses a hook a live batch needs, and never leaves a hook that runs a deleted script; once every batch is undone the settings and hook scripts are back to where they started.
+- A project upgraded through 0.1.5 that still runs the old shared-script `format-on-edit` / `verify-before-stop` hook next to the new one gets the old one removed (journaled, undoable) on the next apply.
+- Failing hooks: a hook on an event whose runs cannot be estimated (Notification, PreCompact, SessionEnd, …) is offered for removal only when at least half of its recorded runs failed. Matchers are read as Claude Code reads them: `Edit, Write` and `Edit | Write` lists, unanchored regexes, legacy tool names (`Task` matches `Agent`, `KillShell` matches `TaskStop`, …) and the `Artifact` family.
+
+### Known issues
+- While a `hooks.disable-failing` batch is still in force, undoing in some orders a recipe applied after it can put the disabled hook back early, or leave a recipe applied after a second `disable-failing` batch without its hook until that batch is undone too. The final state after all undos is correct.
+
 ## [0.1.6] — 2026-11-01
 
 ### Fixed
