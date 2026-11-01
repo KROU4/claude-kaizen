@@ -293,3 +293,120 @@ describe('start skill: the terminal-mode choices template', () => {
     assert.ok(projectSettings.hooks.Stop, 'the Stop hook is project-scoped');
   });
 });
+
+describe('apply --from-batch with custom.* recipes', () => {
+  const recipe = (id, actions) => ({ id, category: 'settings', impact: 'low', title: { en: id, ru: id }, why: { en: 'w', ru: 'w' }, evidence: { en: 'e', ru: 'e' }, when: true, actions });
+  const draft = (home, version, { skill = true } = {}) => {
+    const file = path.join(home.stateDir, 'extra-recipes.json');
+    const recipes = [recipe('custom.corrections-rules', [{ type: 'claude-md.block', id: 'corrections', content: `Rules ${version}.` }])];
+    if (skill) recipes.push(recipe('custom.skill-deploy-check', [{ type: 'skill', name: 'deploy-check', content: `SKILL ${version}` }]));
+    writeJson(file, { recipes });
+    return file;
+  };
+  const skillText = (home) => fs.readFileSync(path.join(home.configDir, 'skills', 'deploy-check', 'SKILL.md'), 'utf8');
+  const claudeMd = (home) => fs.readFileSync(path.join(home.configDir, 'CLAUDE.md'), 'utf8');
+  const setup = () => {
+    const home = measured();
+    const extra = draft(home, 'v1');
+    const first = cli(home, ['apply', '--recipe', 'custom.corrections-rules,custom.skill-deploy-check,hooks.guard-destructive', '--add', extra]);
+    assert.equal(first.status, 0, first.stderr + first.stdout);
+    const [id] = batchIds(home);
+    return { home, id, extra };
+  };
+  const manifestFile = (home, id) => path.join(home.stateDir, 'applied', id, 'manifest.json');
+
+  it('the manifest keeps the definition of every custom recipe it applied', () => {
+    const { home, id } = setup();
+    const m = readJson(manifestFile(home, id));
+    const custom = m.recipes.find((r) => r.id === 'custom.skill-deploy-check');
+    assert.equal(custom.recipe.id, 'custom.skill-deploy-check');
+    assert.equal(custom.recipe.actions[0].content, 'SKILL v1');
+    assert.ok(!m.recipes.find((r) => r.id === 'hooks.guard-destructive').recipe, 'catalog recipes are not copied');
+  });
+
+  it('re-applies the text the batch applied, not the draft the analyst rewrote since', () => {
+    const { home, id } = setup();
+    const extra = draft(home, 'v2');
+    assert.equal(cli(home, ['undo', id]).status, 0);
+    assert.ok(!fs.existsSync(path.join(home.configDir, 'skills', 'deploy-check')));
+    const dry = cli(home, ['apply', '--from-batch', id, '--recipe', 'custom.skill-deploy-check,custom.corrections-rules', '--add', extra, '--dry-run']);
+    assert.equal(dry.status, 0, dry.stderr + dry.stdout);
+    assert.equal(dry.stderr, '', 'nothing to warn about');
+    const r = cli(home, ['apply', '--from-batch', id, '--recipe', 'custom.skill-deploy-check,custom.corrections-rules', '--add', extra]);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.match(skillText(home), /SKILL v1/);
+    assert.ok(!/SKILL v2/.test(skillText(home)));
+    assert.match(claudeMd(home), /Rules v1\./);
+    const fresh = readJson(manifestFile(home, batchIds(home)[1]));
+    const old = readJson(manifestFile(home, id));
+    for (const rid of ['custom.skill-deploy-check', 'custom.corrections-rules']) {
+      assert.equal(fresh.recipes.find((x) => x.id === rid).digest, old.recipes.find((x) => x.id === rid).digest, `${rid}: the same content as the batch`);
+    }
+  });
+
+  it('a recipe the redrafted file no longer has still comes back from the batch (and no unknown-recipe skip)', () => {
+    const { home, id } = setup();
+    draft(home, 'v3', { skill: false });
+    assert.equal(cli(home, ['undo', id]).status, 0);
+    const r = cli(home, ['apply', '--from-batch', id]);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.doesNotMatch(r.stdout, /unknown recipe/);
+    assert.match(skillText(home), /SKILL v1/);
+    assert.match(claudeMd(home), /Rules v1\./);
+  });
+
+  describe('a batch of an older version (no saved recipe text)', () => {
+    const old = () => {
+      const s = setup();
+      const m = readJson(manifestFile(s.home, s.id));
+      for (const r of m.recipes) delete r.recipe;
+      writeJson(manifestFile(s.home, s.id), m);
+      assert.equal(cli(s.home, ['undo', s.id]).status, 0);
+      return s;
+    };
+
+    it('applies the current draft with a clear warning when it differs from what the batch applied', () => {
+      const { home, id } = old();
+      const extra = draft(home, 'v2');
+      const r = cli(home, ['apply', '--from-batch', id, '--recipe', 'custom.skill-deploy-check', '--add', extra]);
+      assert.equal(r.status, 0, r.stderr + r.stdout);
+      assert.match(r.stderr, /did not save the text of the custom recipe\(s\) custom\.skill-deploy-check/);
+      assert.match(r.stderr, /CURRENT draft/);
+      assert.match(skillText(home), /SKILL v2/);
+      const ru = cli(home, ['apply', '--from-batch', id, '--recipe', 'custom.skill-deploy-check', '--add', extra, '--lang', 'ru', '--dry-run']);
+      assert.match(ru.stderr, /не сохранил текст своих рецептов custom\.skill-deploy-check/);
+    });
+
+    it('is quiet when the current draft is the one the batch applied', () => {
+      const { home, id, extra } = old();
+      const r = cli(home, ['apply', '--from-batch', id, '--recipe', 'custom.skill-deploy-check', '--add', extra]);
+      assert.equal(r.status, 0, r.stderr + r.stdout);
+      assert.equal(r.stderr, '');
+      assert.match(skillText(home), /SKILL v1/);
+    });
+
+    it('stops before writing anything when the current draft no longer has the recipe (it is never skipped silently)', () => {
+      const { home, id } = old();
+      const extra = draft(home, 'v2', { skill: false });
+      const before = batchIds(home).length;
+      const r = cli(home, ['apply', '--from-batch', id, '--add', extra, '--recipe', 'custom.skill-deploy-check,custom.corrections-rules']);
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /did not save the text of the custom recipe\(s\) custom\.skill-deploy-check/);
+      assert.match(r.stderr, /Nothing was applied/);
+      assert.equal(batchIds(home).length, before);
+      assert.ok(!fs.existsSync(path.join(home.configDir, 'skills', 'deploy-check')));
+      const ru = cli(home, ['apply', '--from-batch', id, '--add', extra, '--recipe', 'custom.skill-deploy-check', '--lang', 'ru']);
+      assert.match(ru.stderr, /Ничего не применено/);
+      // leaving the lost recipe out is allowed
+      const rest = cli(home, ['apply', '--from-batch', id, '--add', extra, '--recipe', 'custom.corrections-rules,hooks.guard-destructive']);
+      assert.equal(rest.status, 0, rest.stderr + rest.stdout);
+    });
+  });
+
+  it('en and ru have the new messages', () => {
+    for (const lang of ['en', 'ru']) {
+      const loc = readJson(path.join(KIT_ROOT, 'locales', `${lang}.json`));
+      assert.ok(loc.err.from_batch_custom_gone && loc.cli.from_batch_custom_draft, lang);
+    }
+  });
+});

@@ -401,13 +401,49 @@ function applyArgsFromBatch(args) {
   if (needsProject && !args.flags.project && typeof manifest.projectDir === 'string' && manifest.projectDir && !fs.existsSync(manifest.projectDir)) {
     throw new UserError(t('err.from_batch_project_gone', { id, dir: manifest.projectDir }));
   }
-  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'kaizen-from-batch-')), 'choices.json');
-  writeJsonAtomic(file, choices);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kaizen-from-batch-'));
+  const file = path.join(dir, 'choices.json');
   const flags = { ...args.flags };
+  const extraFile = customRecipesFromBatch(picked, args.flags, id, dir, t);
+  if (extraFile) flags.add = extraFile;
+  writeJsonAtomic(file, choices);
   delete flags['from-batch'];
   delete flags.recipe;
   if (!flags.project && typeof manifest.projectDir === 'string' && manifest.projectDir) flags.project = manifest.projectDir;
   return { _: [args._[0], file], flags };
+}
+
+/**
+ * The custom.* recipes a re-applied batch carries (their text sits in the recipe's actions, not in its parameters). A batch
+ * of this version saved each recipe it applied (`recipe` in the manifest): those are written to an extra-recipes file in the
+ * temp folder and win over any draft, so the batch's own text comes back. A batch of an older version saved only a digest:
+ * the current draft (--add FILE, or the file recommend --add remembered) is the only source then. A recipe it no longer
+ * has stops the run before anything is written; one whose digest differs (or that has none) is applied with a warning on
+ * stderr. Returns the temp extra-recipes file to pass as --add, or null when nothing needs one.
+ */
+function customRecipesFromBatch(picked, flags, id, dir, t) {
+  const custom = picked.filter((r) => /^custom\./.test(r.id));
+  if (!custom.length || flags.add === true) return null; // a bare --add is reported by apply itself
+  const stored = custom.filter((r) => r.recipe && typeof r.recipe === 'object' && r.recipe.id === r.id);
+  const legacy = custom.filter((r) => !stored.includes(r));
+  let current = null;
+  if (flags.add && flags.add !== true) {
+    current = readExtraRecipes(resolveExtraFile(flags.add));
+    if (!current) throw new UserError(t('err.add_unreadable', { file: flags.add }));
+  } else {
+    const remembered = rememberedExtraFile(stateDir());
+    current = remembered ? readExtraRecipes(remembered) : null;
+  }
+  const draft = current && Array.isArray(current.recipes) ? current.recipes : [];
+  const gone = legacy.filter((r) => !draft.some((x) => x && x.id === r.id));
+  if (gone.length) throw new UserError(t('err.from_batch_custom_gone', { id, ids: gone.map((r) => r.id).join(', ') }));
+  const differs = legacy.filter((r) => !r.digest || recipeDigest(draft.find((x) => x && x.id === r.id)) !== r.digest);
+  if (differs.length) process.stderr.write(t('cli.from_batch_custom_draft', { id, ids: differs.map((r) => r.id).join(', ') }) + '\n');
+  if (!stored.length) return null; // only drafts: cmdApply loads them the way it always does
+  const recipes = [...stored.map((r) => r.recipe), ...draft.filter((x) => x && !stored.some((r) => r.id === x.id))];
+  const file = path.join(dir, 'extra-recipes.json');
+  writeJsonAtomic(file, { recipes });
+  return file;
 }
 
 /** Removes the temp folder `applyArgsFromBatch` made for the choices document. */
@@ -737,6 +773,8 @@ Usage: node scripts/kaizen.mjs <command> [options]
              --add FILE (extra recipes, e.g. custom.*; defaults to the file recorded by recommend --add)
              --from-batch ID re-applies a journaled batch with the scope and parameters it was applied with
                (after "undo ID", to keep some of its recipes: --from-batch ID --recipe a,b)
+               custom.* recipes come back with the text the batch applied (a batch of an older version did not save it:
+               the current --add draft is used, with a warning, and a recipe it no longer has stops the run)
                it reuses the batch's project folder (--project DIR overrides it; an existing folder is required otherwise)
   undo       Revert an applied batch   [ID | --last | --all]   --dry-run
              --force also reverts what you edited after apply (kept entries otherwise stay undoable)

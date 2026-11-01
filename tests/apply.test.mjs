@@ -2984,7 +2984,7 @@ describe('hook scripts of a project-scope recipe belong to that project', () => 
   });
 
   // Claude Code runs the identical command found in several settings files once, two different commands twice.
-  const eventCommands = (settings, event) => (settings.hooks[event] || []).flatMap((g) => g.hooks.map((h) => h.command));
+  const eventCommands = (settings, event) => ((settings.hooks || {})[event] || []).flatMap((g) => g.hooks.map((h) => h.command));
 
   it('session-context at user scope and precompact-handoff at project scope: the same SessionStart command in both files, a script with no unfilled placeholders', async () => {
     await at(1, { recipe: 'hooks.session-context', scope: 'user' });
@@ -3034,22 +3034,67 @@ describe('hook scripts of a project-scope recipe belong to that project', () => 
     }
     const hookCommands = (proj) => eventCommands(readJson(path.join(proj, '.claude', 'settings.json')), 'PostToolUse');
 
-    it('re-applying format-on-edit says which old batch to undo; undoing it leaves exactly the new hook', async () => {
+    it('re-applying format-on-edit takes the old hook out inside the new batch; undoing the new batch puts it back', async () => {
       await at(1, { recipe: 'hooks.format-on-edit', scope: 'project', project: projA(), param: ['hooks.format-on-edit.formatter=ruff'] });
       downgradeBatch(batch(1), projA());
+      const legacy = path.join(hooksDir(), 'format-on-edit.mjs');
       assert.equal(hookCommands(projA()).length, 1);
       assert.deepEqual(hookFiles(), ['format-on-edit.mjs']);
       const dry = await at(2, { recipe: 'hooks.format-on-edit', scope: 'project', project: projA(), param: ['hooks.format-on-edit.formatter=prettier'], 'dry-run': true });
-      assert.match(dry.stdout, new RegExp(`earlier version.*batch ${batch(1)}.*runs twice.*kaizen undo ${batch(1)}`));
+      assert.match(dry.stdout, new RegExp(`earlier version.*batch ${batch(1)}.*was removed.*undoing this batch puts it back`));
+      assert.ok(!/kaizen undo/.test(dry.stdout), 'the note does not send the user to undo the old batch');
+      assert.equal(hookCommands(projA()).length, 1, 'a dry run writes nothing');
       const real = await at(2, { recipe: 'hooks.format-on-edit', scope: 'project', project: projA(), param: ['hooks.format-on-edit.formatter=prettier'] });
-      assert.match(real.stdout, new RegExp(`kaizen undo ${batch(1)}`));
-      assert.equal(hookCommands(projA()).length, 2, 'the old hook is not removed behind the journal');
+      assert.match(real.stdout, new RegExp(`batch ${batch(1)}.*was removed`));
+      const keyed = `format-on-edit.${apply.projectKey(projA())}.mjs`;
+      const left = hookCommands(projA());
+      assert.equal(left.length, 1, 'the old hook is gone, so it does not run twice');
+      assert.ok(scriptOf(left[0]).endsWith(keyed));
+      const removal = readManifest(batch(2)).recipes[0].actions.find((e) => e.type === 'settings.hook.remove');
+      assert.equal(removal.removed.length, 1, 'the removal is journaled in the NEW batch');
+      assert.ok(scriptOf(removal.removed[0].hook.command).endsWith('format-on-edit.mjs'));
+      assert.deepEqual(hookFiles(), ['format-on-edit.mjs', keyed].sort());
+      // undoing the new batch gives back exactly the state before it (the old hook, the old script)
+      await runUndo({}, [batch(2)]);
+      const back = hookCommands(projA());
+      assert.equal(back.length, 1);
+      assert.ok(scriptOf(back[0]).endsWith('format-on-edit.mjs') && !scriptOf(back[0]).endsWith(keyed));
+      assert.deepEqual(hookFiles(), ['format-on-edit.mjs']);
+      assert.ok(fs.existsSync(legacy));
       await runUndo({}, [batch(1)]);
+      assert.equal(hookCommands(projA()).length, 0);
+      assert.deepEqual(hookFiles(), []);
+    });
+
+    it('undoing the old batch afterwards leaves the new hook alone and the removal record is dropped, so the old hook never comes back', async () => {
+      await at(1, { recipe: 'hooks.format-on-edit', scope: 'project', project: projA(), param: ['hooks.format-on-edit.formatter=ruff'] });
+      downgradeBatch(batch(1), projA());
+      await at(2, { recipe: 'hooks.format-on-edit', scope: 'project', project: projA(), param: ['hooks.format-on-edit.formatter=prettier'] });
+      const keyed = `format-on-edit.${apply.projectKey(projA())}.mjs`;
+      const dry = await runUndo({ 'dry-run': true }, [batch(1)]);
+      const real = await runUndo({}, [batch(1)]);
+      assert.equal(normalizeUndoOutput(dry.stdout), normalizeUndoOutput(real.stdout));
+      assert.ok(!/remove PostToolUse hook .*format-on-edit\.mjs/.test(real.stdout), 'it does not claim to remove a hook that is already gone');
       const left = hookCommands(projA());
       assert.equal(left.length, 1);
-      assert.ok(scriptOf(left[0]).endsWith(`format-on-edit.${apply.projectKey(projA())}.mjs`));
-      assert.deepEqual(hookFiles(), [`format-on-edit.${apply.projectKey(projA())}.mjs`]);
-      assert.match(read(path.join(hooksDir(), hookFiles()[0])), /const FORMATTER_RAW = 'prettier';/);
+      assert.ok(scriptOf(left[0]).endsWith(keyed));
+      assert.deepEqual(hookFiles(), [keyed], 'the old script goes with its batch');
+      assert.equal(readManifest(batch(2)).recipes[0].actions.find((e) => e.type === 'settings.hook.remove').removed.length, 0);
+      await runUndo({}, [batch(2)]);
+      assert.equal(hookCommands(projA()).length, 0, 'the old hook is not resurrected');
+      assert.deepEqual(hookFiles(), []);
+    });
+
+    it('the other recipes of the old batch are not touched and nobody has to undo the old batch', async () => {
+      await at(1, { recipe: 'hooks.format-on-edit,hooks.guard-destructive', scope: 'project', project: projA() });
+      downgradeBatch(batch(1), projA());
+      const guardBefore = eventCommands(readJson(path.join(projA(), '.claude', 'settings.json')), 'PreToolUse');
+      assert.equal(guardBefore.length, 1);
+      const out = await at(2, { recipe: 'hooks.format-on-edit,hooks.guard-destructive', scope: 'project', project: projA() });
+      assert.ok(!/kaizen undo/.test(out.stdout), out.stdout);
+      assert.deepEqual(eventCommands(readJson(path.join(projA(), '.claude', 'settings.json')), 'PreToolUse'), guardBefore);
+      assert.equal(hookCommands(projA()).length, 1);
+      assert.ok(hookFiles().includes('guard-destructive.mjs'));
     });
 
     it('the Russian run says it in Russian', async () => {
@@ -3058,7 +3103,8 @@ describe('hook scripts of a project-scope recipe belong to that project', () => 
       const out = await withFrozenDate('2026-10-30T14:00:02.000Z', () =>
         captureOutput(() => apply.cmdApply({ _: ['apply'], flags: { recipe: 'hooks.format-on-edit', scope: 'project', project: projA() } }, { loadMeasure: () => fixtureMeasure, pickLang: () => 'ru' })),
       );
-      assert.match(out.stdout, new RegExp(`прежней версии.*kaizen undo ${batch(1)}`));
+      assert.match(out.stdout, new RegExp(`прежней версии.*пакет ${batch(1)}.*убран.*откат этого пакета вернёт его`));
+      assert.ok(!/kaizen undo/.test(out.stdout), out.stdout);
     });
 
     /** What 0.1.4 left for a project that found the shared script already there: the unkeyed hook, and no entry for the script. */
@@ -3083,7 +3129,7 @@ describe('hook scripts of a project-scope recipe belong to that project', () => 
       downgradeClaimless(batch(2), projB());
       assert.deepEqual(hookFiles(), ['format-on-edit.mjs']);
       const upgrade = await at(3, { recipe: 'hooks.format-on-edit', scope: 'project', project: projA(), param: ['hooks.format-on-edit.formatter=prettier'] });
-      assert.match(upgrade.stdout, new RegExp(`kaizen undo ${batch(1)}\\. The old script is shared with other projects \\(batch ${batch(2)}\\)`));
+      assert.match(upgrade.stdout, new RegExp(`The old script file stays until batch ${batch(1)} is undone and until the other projects that still run it \\(batch ${batch(2)}\\) are undone too`));
       const legacy = path.join(hooksDir(), 'format-on-edit.mjs');
       const dry = await runUndo({ 'dry-run': true }, [batch(1)]);
       assert.match(dry.stdout, /format-on-edit\.mjs still in use by hooks\.format-on-edit/);
@@ -3109,7 +3155,7 @@ describe('hook scripts of a project-scope recipe belong to that project', () => 
       const ru = await withFrozenDate('2026-10-30T14:00:03.000Z', () =>
         captureOutput(() => apply.cmdApply({ _: ['apply'], flags: { recipe: 'hooks.format-on-edit', scope: 'project', project: projA() } }, { loadMeasure: () => fixtureMeasure, pickLang: () => 'ru' })),
       );
-      assert.match(ru.stdout, new RegExp(`Старый скрипт общий с другими проектами \\(пакет ${batch(2)}\\)`));
+      assert.match(ru.stdout, new RegExp(`Старый файл скрипта останется, пока не откатят пакет ${batch(1)} и пока не откатят другие проекты, которые его ещё запускают \\(пакет ${batch(2)}\\)`));
       await runUndo({}, [batch(2)]); // project B first: its hook goes, the script is still the journal of A's old batch
       assert.ok(fs.existsSync(path.join(hooksDir(), 'format-on-edit.mjs')), 'A\'s old hook still runs it');
       await runUndo({}, [batch(1)]);
@@ -3270,5 +3316,101 @@ describe('undo of a hook another batch adopted', () => {
     const out = await runUndo({}, [batch(1)]);
     assert.match(out.stdout, /remove PreCompact hook/);
     assert.ok(!/shared:/.test(out.stdout), out.stdout);
+  });
+});
+
+describe('claims stay inside the files a run looked at, and cover every file that keeps a plugin off', () => {
+  const at = (n, flags) => withFrozenDate(`2026-10-30T17:00:0${n}.000Z`, () => runApply(flags));
+  const batch = (n) => `2026-10-30T17-00-0${n}`;
+  const projA = () => path.join(ctx.root, 'projA');
+  const projB = () => path.join(ctx.root, 'projB');
+  const hookSettings = (cmd) => ({ hooks: { PostToolUse: [{ matcher: 'Edit', hooks: [{ type: 'command', command: cmd }] }] } });
+  const commandsOf = (file) => ((readJson(file).hooks || {}).PostToolUse || []).flatMap((g) => g.hooks.map((h) => h.command));
+
+  it('settings.hook.remove: a hook another project\'s batch removed from ITS file is not claimed, so undoing that project\'s own batch restores it', async () => {
+    const fileA = path.join(projA(), '.claude', 'settings.json');
+    writeJson(fileA, hookSettings('fmt-a --write'));
+    writeJson(path.join(projB(), '.claude', 'settings.json'), hookSettings('echo y'));
+    await at(1, { recipe: 'hooks.disable-failing', project: projA(), param: ['hooks.disable-failing.hooks=fmt-a --write'] });
+    const b = await at(2, { recipe: 'hooks.disable-failing', project: projB(), param: ['hooks.disable-failing.hooks=fmt-a --write,echo y'] });
+    const entry = b.manifest.recipes[0].actions[0];
+    assert.equal(entry.claimed, undefined, 'project B has no business with project A\'s file');
+    assert.deepEqual(entry.removed.map((r) => r.hook.command), ['echo y']);
+    assert.deepEqual(commandsOf(fileA), []);
+    const undo = await runUndo({}, [batch(1)]);
+    assert.ok(!/shared/.test(undo.stdout), undo.stdout);
+    assert.deepEqual(commandsOf(fileA), ['fmt-a --write'], 'project A has its hook back');
+  });
+
+  it('settings.hook.remove: a hook removed earlier from a file this run also looks at is still claimed (user settings are shared by every project)', async () => {
+    writeSettings(hookSettings('shared-fmt'));
+    writeJson(path.join(projB(), '.claude', 'settings.json'), hookSettings('echo y'));
+    await at(1, { recipe: 'hooks.disable-failing', project: projA(), param: ['hooks.disable-failing.hooks=shared-fmt'] });
+    const b = await at(2, { recipe: 'hooks.disable-failing', project: projB(), param: ['hooks.disable-failing.hooks=shared-fmt,echo y'] });
+    const entry = b.manifest.recipes[0].actions[0];
+    assert.deepEqual(entry.removed.map((r) => r.hook.command), ['echo y']);
+    assert.equal(entry.claimed.length, 1);
+    assert.ok(samePath(entry.claimed[0].file, ctx.settingsFile));
+    await runUndo({}, [batch(1)]);
+    assert.deepEqual(commandsOf(ctx.settingsFile), [], 'batch 2 still wants it off');
+    await runUndo({}, [batch(2)]);
+    assert.deepEqual(commandsOf(ctx.settingsFile), ['shared-fmt']);
+  });
+
+  it('plugins.disable: a plugin that is already off in two files is claimed in both, so undoing the older batch leaves it off for every project', async () => {
+    writeSettings({ ...readSettings(), enabledPlugins: { 'x@m': true, 'y@m': true } });
+    writeJson(path.join(projA(), '.claude', 'settings.json'), { enabledPlugins: { 'x@m': true } });
+    await at(1, { recipe: 'skills.prune-unused', project: projA(), param: ['skills.prune-unused.plugins=x@m'] });
+    const b = await at(2, { recipe: 'skills.prune-unused', project: projA(), param: ['skills.prune-unused.plugins=x@m,y@m'] });
+    const claimed = b.manifest.recipes[0].actions[0].claimed;
+    assert.deepEqual(claimed.map((c) => path.basename(c.file)).sort(), ['settings.json', 'settings.local.json']);
+    const undo = await runUndo({}, [batch(1)]);
+    assert.ok(!/re-enable plugins/.test(undo.stdout), undo.stdout);
+    assert.equal(readSettings().enabledPlugins['x@m'], false, 'still off in the user settings');
+    assert.equal(readJson(path.join(projA(), '.claude', 'settings.local.json')).enabledPlugins['x@m'], false);
+    // the batch that owns it now puts everything back
+    await runUndo({}, [batch(2)]);
+    assert.equal(readSettings().enabledPlugins['x@m'], true);
+    assert.equal(readSettings().enabledPlugins['y@m'], true);
+    assert.ok(!fs.existsSync(path.join(projA(), '.claude', 'settings.local.json')));
+  });
+
+  describe('paths that differ only in case or slashes are one file on Windows', () => {
+    const win = process.platform === 'win32';
+    const lower = (p) => p[0].toLowerCase() + p.slice(1);
+    const slashed = (p) => p.replace(/\\/g, '/');
+
+    it('format-on-edit applied to a project path in upper case and then in lower case with forward slashes: the second batch claims the hook, so undoing the first leaves the project with its hook', { skip: !win && 'Windows file-system rules' }, async () => {
+      const proj = projA();
+      await at(1, { recipe: 'hooks.format-on-edit', scope: 'project', project: proj, param: ['hooks.format-on-edit.formatter=prettier'] });
+      const b = await at(2, { recipe: 'hooks.format-on-edit', scope: 'project', project: slashed(lower(proj)), param: ['hooks.format-on-edit.formatter=ruff'] });
+      assert.ok(b.manifest.recipes[0].actions.some((a) => a.type === 'settings.hook' && a.shared), 'the hook is claimed');
+      const undo = await runUndo({}, [batch(1)]);
+      assert.match(undo.stdout, /still in use by hooks\.format-on-edit/);
+      assert.equal(commandsOf(path.join(proj, '.claude', 'settings.json')).length, 1, 'formatting does not silently stop');
+      await runUndo({}, [batch(2)]);
+      assert.equal(((readJson(path.join(proj, '.claude', 'settings.json')).hooks || {}).PostToolUse || []).length, 0);
+    });
+
+    it('a setting and a rules block that another recipe wrote through the other spelling are claimed too', { skip: !win && 'Windows file-system rules' }, async () => {
+      const proj = projA();
+      const actions = [
+        { type: 'settings.set', path: 'cleanupPeriodDays', value: 45 },
+        { type: 'claude-md.block', id: 'zz', content: 'Rule zz.' },
+      ];
+      const recipe = (id) => ({ id, category: 'settings', impact: 'low', title: { en: id, ru: id }, why: { en: 'w', ru: 'w' }, evidence: { en: 'e', ru: 'e' }, when: true, actions });
+      const add = path.join(ctx.root, 'extra.json');
+      writeJson(add, { recipes: [recipe('custom.one'), recipe('custom.two')] });
+      await at(1, { recipe: 'custom.one', add, scope: 'project', project: proj });
+      const b = await at(2, { recipe: 'custom.two', add, scope: 'project', project: slashed(lower(proj)) });
+      const shape = b.manifest.recipes.map((r) => r.actions.map((a) => `${a.type}${a.shared ? ':shared' : ''}`));
+      assert.deepEqual(shape, [['settings.set:shared', 'claude-md.block:shared']]);
+      await runUndo({}, [batch(1)]);
+      assert.match(read(path.join(proj, 'CLAUDE.md')), /Rule zz\./);
+      assert.equal(readJson(path.join(proj, '.claude', 'settings.json')).cleanupPeriodDays, 45);
+      await runUndo({}, [batch(2)]);
+      assert.ok(!fs.existsSync(path.join(proj, 'CLAUDE.md')));
+      assert.equal(readJson(path.join(proj, '.claude', 'settings.json')).cleanupPeriodDays, undefined);
+    });
   });
 });

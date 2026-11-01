@@ -149,8 +149,15 @@ function needOf(entry) {
 
 const UNFILLED = /\{\{[a-zA-Z0-9_]+\}\}/;
 
+/** A path as a map key / for comparing: resolved (slashes and `..` settled), and lower case where the file system ignores case (Windows). */
+function pathKey(p) {
+  const r = path.resolve(p);
+  return process.platform === 'win32' ? r.toLowerCase() : r;
+}
+
+/** The same file, however it is spelled: `C:\p` and `c:/p` are one file on Windows. */
 function samePath(a, b) {
-  return path.resolve(a) === path.resolve(b);
+  return pathKey(a) === pathKey(b);
 }
 
 function cmpSeq(a, b) {
@@ -254,21 +261,34 @@ const handlers = {
     io.describe(io.t('apply.plan.hook_add', { file, event: a.event, matcher: matcher ? ` [${matcher}]` : '', command: entry.command }));
     list.push(group);
     // Upgrade from 0.1.4, which wired the shared script (format-on-edit.mjs) in the project: a live batch of this very recipe
-    // still owns that unkeyed hook, and Claude Code runs two different commands twice. The old batch is the one to undo (it
-    // removes its hook and script); removing the hook here would take it out of that batch's journal without a trace.
+    // still owns that unkeyed hook, and Claude Code runs two different commands twice. The old hook is taken out here, as a
+    // settings.hook.remove entry of THIS batch: undoing this batch puts it back, and the old batch (which may hold other
+    // recipes) does not have to be undone. Undoing the old batch finds the hook gone and drops that removal record.
     if (ctx.hookKey) {
       const legacyId = hookIdentity({ type: 'command', command: fill(a.command, { ...ctx, hookKey: null }) });
-      const stillWired = list.some((g) => (g.hooks || []).some((h) => hookIdentity(h) === legacyId));
       const owners = io
         .live()
         .filter((p) => p.entry.type === 'settings.hook' && !p.entry.shared && p.entry.event === a.event && p.entry.identity === legacyId && samePath(p.entry.file, file) && p.recipe.id === io.recipeId);
-      if (stillWired && owners.length) {
-        const ids = [...new Set(owners.map((p) => p.box.id))];
-        const undo = ids.map((id) => `kaizen undo ${id}`).join('; ');
-        // the old script is one file for every project (and for the user scope): hooks in other settings files may still run it
-        const others = [...new Set(io.live().filter((p) => p.entry.type === 'settings.hook' && p.entry.identity === legacyId && !samePath(p.entry.file, file)).map((p) => p.box.id))].filter((id) => !ids.includes(id));
-        const shared = others.length ? io.say(`. The old script is shared with other projects (batch ${others.join(', ')}), so it stays until those are undone too`, `. Старый скрипт общий с другими проектами (пакет ${others.join(', ')}), поэтому он останется, пока не откатят и их`) : '';
-        io.note(io.say(`${file} still has the ${a.event} hook of an earlier version (shared script, batch ${ids.join(', ')}) next to the new project-specific one, so it runs twice. Remove the old one with: ${undo}${shared}`, `в ${file} остался хук ${a.event} прежней версии (общий скрипт, пакет ${ids.join(', ')}) рядом с новым, своим для проекта, поэтому он сработает дважды. Уберите старый: ${undo}${shared}`));
+      if (legacyId !== id && owners.length) {
+        const gone = [];
+        for (const g of list) {
+          const keep = [];
+          for (const h of g.hooks || []) {
+            if (hookIdentity(h) === legacyId) gone.push({ file, event: a.event, matcher: g.matcher || null, hook: h });
+            else keep.push(h);
+          }
+          g.hooks = keep;
+        }
+        if (gone.length) {
+          settings.hooks[a.event] = list.filter((g) => g.hooks && g.hooks.length);
+          const ids = [...new Set(owners.map((p) => p.box.id))];
+          io.describe(io.say(`${file}: remove the ${a.event} hook of an earlier version (shared script)`, `${file}: убрать хук ${a.event} прежней версии (общий скрипт)`));
+          // the old script is one file for every project (and for the user scope): hooks in other settings files may still run it
+          const others = [...new Set(io.live().filter((p) => p.entry.type === 'settings.hook' && p.entry.identity === legacyId && !samePath(p.entry.file, file)).map((p) => p.box.id))].filter((id) => !ids.includes(id));
+          const shared = others.length ? io.say(` and until the other projects that still run it (batch ${others.join(', ')}) are undone too`, ` и пока не откатят другие проекты, которые его ещё запускают (пакет ${others.join(', ')})`) : '';
+          io.note(io.say(`the ${a.event} hook of an earlier version (shared script, batch ${ids.join(', ')}) was removed from ${file} so that it does not run twice next to the new project-specific one; undoing this batch puts it back. The old script file stays until batch ${ids.join(', ')} is undone${shared}`, `хук ${a.event} прежней версии (общий скрипт, пакет ${ids.join(', ')}) убран из ${file}, чтобы он не срабатывал дважды рядом с новым, своим для проекта; откат этого пакета вернёт его. Старый файл скрипта останется, пока не откатят пакет ${ids.join(', ')}${shared}`));
+          io.also({ type: 'settings.hook.remove', removed: gone });
+        }
       }
     }
     if (!io.dry) io.save(file, settings);
@@ -452,7 +472,8 @@ const handlers = {
     const norm = normCommand;
     const wanted = new Set(commands.map(norm));
     const removed = [];
-    for (const { file } of settingsFiles(ctx.projectDir || null, configDir())) {
+    const scanned = settingsFiles(ctx.projectDir || null, configDir());
+    for (const { file } of scanned) {
       if (!exists(file)) continue;
       const settings = io.load(file);
       let changed = false;
@@ -478,18 +499,20 @@ const handlers = {
       }
     }
     // Hooks that are gone because a batch still in force removed them: this batch relies on that, so that undoing the other
-    // batch does not put them back.
+    // batch does not put them back. Only the settings files this run looked at count (a removal made in another project's
+    // file is not this run's business), and every such file is claimed, also when this run removed the hook elsewhere.
     const claimed = [];
     const providers = [];
     for (const want of wanted) {
-      if (removed.some((r) => norm(r.hook.command) === want)) continue;
       for (const p of io.live()) {
         if (p.entry.type !== 'settings.hook.remove') continue;
-        const c = [...(p.entry.removed || []), ...(p.entry.claimed || [])].find((x) => normCommand(x.hook ? x.hook.command : x.command) === want);
-        if (!c) continue;
-        claimed.push({ file: c.file, event: c.event, command: want });
-        providers.push(p);
-        break;
+        for (const c of [...(p.entry.removed || []), ...(p.entry.claimed || [])]) {
+          if (normCommand(c.hook ? c.hook.command : c.command) !== want || !scanned.some((s) => samePath(s.file, c.file))) continue;
+          if (removed.some((r) => samePath(r.file, c.file) && r.event === c.event && norm(r.hook.command) === want)) continue;
+          if (claimed.some((x) => samePath(x.file, c.file) && x.event === c.event && x.command === want)) continue;
+          claimed.push({ file: c.file, event: c.event, command: want });
+          providers.push(p);
+        }
       }
     }
     if (!removed.length) {
@@ -524,8 +547,14 @@ const handlers = {
         const map = readMap(layer);
         if (map && Object.prototype.hasOwnProperty.call(map, p)) win = { layer, value: map[p] };
       }
+      // Already off: rely on EVERY file that says `false` and was written by a batch in force (not only the winning layer's
+      // file), so that undoing the older batch does not switch the plugin back on in a file the newer one still needs off.
       const claimOff = () => {
-        if (pluginHolders(io, { plugin: p, file: win.layer.file }).length) claimed.push({ plugin: p, file: win.layer.file });
+        const held = layers.filter((layer) => {
+          const map = readMap(layer);
+          return map && map[p] === false && pluginHolders(io, { plugin: p, file: layer.file }).length;
+        });
+        if (held.length) for (const layer of held) claimed.push({ plugin: p, file: layer.file });
         else offIn ||= win.layer.file;
       };
       if (win && !win.value && win.layer.readOnly) {
@@ -597,6 +626,22 @@ function mcpHolders(io, file, ref, except) {
 /** The same hook removed from the same settings file (a removed item holds the hook, a claimed one only its command). */
 function sameRemovedHook(a, b) {
   return samePath(a.file, b.file) && a.event === b.event && normCommand(a.hook ? a.hook.command : a.command) === normCommand(b.hook ? b.hook.command : b.command);
+}
+
+/**
+ * The hook of a settings.hook entry that is being undone is already gone, because a batch in force took it out
+ * (settings.hook.remove: the upgrade from 0.1.4 does that to the old shared-script hook). It must not come back when that
+ * batch is undone later: its owner is undone now, and so is the script. Those removal records are dropped.
+ */
+function forgetRemovals(io, e) {
+  const ref = { file: e.file, event: e.event, command: String(e.identity).slice(String(e.identity).indexOf('|') + 1) };
+  for (const p of io.live()) {
+    if (p.entry.type !== 'settings.hook.remove') continue;
+    const before = (p.entry.removed || []).length + (p.entry.claimed || []).length;
+    p.entry.removed = (p.entry.removed || []).filter((c) => !sameRemovedHook(c, ref));
+    if (p.entry.claimed) p.entry.claimed = p.entry.claimed.filter((c) => !sameRemovedHook(c, ref));
+    if (p.entry.removed.length + (p.entry.claimed || []).length !== before) io.touch(p.box);
+  }
 }
 
 /** The other entries in force that removed a hook, or rely on it being gone, oldest first. */
@@ -679,7 +724,7 @@ function writeManaged(target, content, io, extra = {}) {
     const claim = { type: 'file', file: target, existedBefore: true, hash: current === content ? sha(content) : last.entry.hash || sha(current), createdDir: null, shared: true };
     return shareOrSkip(io, claim, owners, skip, io.say(`${target}: shared with ${recipeNames(foreign)}, kept as it is`, `${target}: общий файл рецепта ${recipeNames(foreign)}, оставлен как есть`));
   }
-  const ours = io.ownedFiles.has(path.resolve(target)) || owners.length > 0;
+  const ours = [...io.ownedFiles].some((f) => samePath(f, target)) || owners.length > 0;
   if (existed && !ours && !io.force && !target.replace(/\\/g, '/').includes(toPosix(stateDir()))) {
     return { skipped: true, reason: io.t('apply.skip.not_ours'), file: target };
   }
@@ -742,6 +787,7 @@ function collectLive(boxes, { done = new Set(), extra = null } = {}) {
 function makeIo({ dry, force, measure, batchDir, recipeId, t = translator('en'), lang = 'en', live = null, applyDir = null, cache = new Map(), sim = new Map() }) {
   const described = [];
   const notes = [];
+  const alsoEntries = [];
   const backedUp = new Set();
   const touched = new Set();
   const liveEntries = live || (() => collectLive(listManifests()));
@@ -773,12 +819,12 @@ function makeIo({ dry, force, measure, batchDir, recipeId, t = translator('en'),
      * kept in `sim`, shared by every batch of one undo run: a later entry must see the file as the real run leaves it.
      */
     fileText(file) {
-      const key = path.resolve(file);
+      const key = pathKey(file);
       if (sim.has(key)) return sim.get(key);
       return exists(file) ? fs.readFileSync(file, 'utf8') : null;
     },
     writeFile(file, text) {
-      if (dry) sim.set(path.resolve(file), text);
+      if (dry) sim.set(pathKey(file), text);
       else {
         this.backup(file);
         ensureDir(path.dirname(file));
@@ -786,7 +832,7 @@ function makeIo({ dry, force, measure, batchDir, recipeId, t = translator('en'),
       }
     },
     removeFile(file) {
-      if (dry) sim.set(path.resolve(file), null);
+      if (dry) sim.set(pathKey(file), null);
       else {
         this.backup(file);
         fs.unlinkSync(file);
@@ -805,6 +851,14 @@ function makeIo({ dry, force, measure, batchDir, recipeId, t = translator('en'),
     },
     describe(line) {
       described.push(line);
+    },
+    /** A journal entry the handler wants recorded after its own (a change made on the side, e.g. an old hook taken out). */
+    also(entry) {
+      alsoEntries.push(entry);
+    },
+    /** The side entries recorded since the last call (cmdApply puts them right behind the entry of the action). */
+    takeAlso() {
+      return alsoEntries.splice(0);
     },
     /** A message for the user that is not a change (something left alone, something not found). */
     note(line) {
@@ -991,19 +1045,21 @@ export async function cmdApply(args, { loadMeasure, pickLang }) {
       }
       try {
         const entry = handler(action, ctx, io);
-        if (entry && !entry.skipped) entries.push(entry);
+        const side = io.takeAlso();
+        if (entry && !entry.skipped) entries.push(entry, ...side);
         else if (entry && entry.skipped) {
           lines.push(`  · ${recipe.id}: ${entry.reason}${entry.file ? ` (${entry.file})` : ''}`);
           if (entry.claim) claims.push(entry.claim);
         }
       } catch (err) {
+        io.takeAlso();
         lines.push(`! ${recipe.id}: ${err.message}`);
       }
     }
     if (entries.length) entries.push(...claims);
     for (const d of io.described) lines.push(`  ${dry ? '→' : '✓'} ${d}`);
     for (const n of io.notes) lines.push(`  · ${recipe.id}: ${n}`);
-    manifest.recipes.push({ id: recipe.id, scope, params, actions: entries, advice: !(recipe.actions && recipe.actions.length), ...(recipe.id.startsWith('custom.') ? { digest: recipeDigest(recipe) } : {}) });
+    manifest.recipes.push({ id: recipe.id, scope, params, actions: entries, advice: !(recipe.actions && recipe.actions.length), ...(recipe.id.startsWith('custom.') ? { digest: recipeDigest(recipe), recipe: JSON.parse(JSON.stringify(recipe)) } : {}) });
   }
   if (!dry && manifest.recipes.length) {
     ensureDir(batchDir);
@@ -1105,7 +1161,10 @@ function undoEntry(e, io) {
       const s = io.load(e.file);
       const list = s.hooks && s.hooks[e.event];
       if (e.shared) return 'ok'; // used another recipe's hook and installed nothing of its own
-      if (!Array.isArray(list)) return 'hook list missing';
+      if (!Array.isArray(list)) {
+        forgetRemovals(io, e);
+        return 'hook list missing';
+      }
       let removed = 0;
       let sample = null; // the hook as it was, to put back what other batches still need
       const gone = new Set(); // matcher alternatives this undo took out
@@ -1178,7 +1237,8 @@ function undoEntry(e, io) {
       if (!io.dry) io.save(e.file, s);
       // the hook is still in the file when another batch adopted it: say that, not that it was removed
       if (kept) return `shared: ${e.file} [${e.event}] still in use by ${recipeNames(adopters)}`;
-      io.describe(io.t('undo.plan.hook_remove', { file: e.file, event: e.event, command: e.identity.split('|')[1] }));
+      if (removed) io.describe(io.t('undo.plan.hook_remove', { file: e.file, event: e.event, command: e.identity.split('|')[1] }));
+      else forgetRemovals(io, e);
       return removed ? 'ok' : 'hook was already gone';
     }
     case 'settings.set': {
@@ -1371,7 +1431,7 @@ function undoEntry(e, io) {
         if (created && !Object.keys(s).length && io.fileText(file) !== null) io.removeFile(file);
         else if (!io.dry) io.save(file, s);
       }
-      if (!restore.size && kept.length) return `shared: ${e.file} [${kept.map((k) => k.plugin).join(', ')}] still in use by ${recipeNames(kept.flatMap((k) => k.holders))}`;
+      if (!restore.size && kept.length) return `shared: ${e.file} [${[...new Set(kept.map((k) => k.plugin))].join(', ')}] still in use by ${recipeNames(kept.flatMap((k) => k.holders))}`;
       return 'ok';
     }
     default:
