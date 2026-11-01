@@ -12,7 +12,7 @@ import { readJsonl } from './jsonl.mjs';
 import { redact, snippet } from './redact.mjs';
 import { ensureDir, readJsonSafe, writeJsonAtomic } from './paths.mjs';
 
-export const SUMMARY_VERSION = 21;
+export const SUMMARY_VERSION = 22;
 
 const INTERRUPT_RE = /\[Request interrupted by user/;
 const COMPACT_RE = /^This session is being continued from a previous conversation/;
@@ -50,11 +50,11 @@ const MAX_SLOW_COMMANDS = 200;
 const DOC_EXTS = new Set(['.md', '.mdx', '.markdown', '.txt', '.rst', '.adoc', '.org', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp']);
 
 const TEST_CMD_RE =
-  /\b(pytest|py\.test|npm (?:run )?test|yarn (?:run )?test|pnpm (?:run )?test|bun test|vitest|jest|mocha|go test|cargo test|dotnet test|mvn (?:-[^\s]+ )*test|gradle(?:w)? test|phpunit|rspec|mix test|make test|ctest|tox|nox|node --test)\b/;
+  /\b(pytest|py\.test|npm (?:run )?test|yarn (?:run )?test|pnpm (?:run )?test|bun test|vitest|jest|mocha|go test|cargo test|dotnet test|[Ii][Nn][Vv][Oo][Kk][Ee]-[Pp][Ee][Ss][Tt][Ee][Rr]|mvn (?:-[^\s]+ )*test|gradle(?:w)? test|phpunit|rspec|mix test|make test|ctest|tox|nox|node --test)\b/;
 const GIT_RE = /\bgit\s+(commit|push|pull|rebase|merge|checkout|switch|stash|reset|cherry-pick|worktree)\b/;
 const FORCE_PUSH_RE = /\bgit\s+push\b[^|;&]*(\s--force\b|\s-f\b|\s--force-with-lease\b|\s\+[^\s]+)/;
 const DESTRUCTIVE_RE =
-  /\brm\s+-[a-zA-Z]*r[a-zA-Z]*f|\brm\s+-[a-zA-Z]*f[a-zA-Z]*r|\bgit\s+reset\s+--hard|\bgit\s+clean\s+-[a-zA-Z]*f|\bgit\s+checkout\s+--\s|\bdrop\s+(table|database|schema)\b|\btruncate\s+table\b|\bdel\s+\/[sq]|\brmdir\s+\/s|\bformat\s+[a-z]:|\bmkfs\b|\bdd\s+if=|(?:^|[;|&\n({]|\s-c(?:ommand)?\s+["'])\s*(?:remove-item|ri|rm|del|erase|rmdir|rd)(?=\s)(?=[^|;&\n]*\s-r(?:e\w*)?(?::\$true)?(?=[\s"')}]|$))(?=[^|;&\n]*\s-fo\w*(?::\$true)?(?=[\s"')}]|$))/i;
+  /\brm\s+-[a-zA-Z]*r[a-zA-Z]*f|\brm\s+-[a-zA-Z]*f[a-zA-Z]*r|\bgit\s+reset\s+--hard|\bgit\s+clean\s+-[a-zA-Z]*f|\bgit\s+checkout\s+--\s|\bdrop\s+(table|database|schema)\b|\btruncate\s+table\b|(?:^|[;&|\n(]|\/c\s+["']?)\s*(?:del\s+(?:\/\w\s+)*\/[sq]|(?:rmdir|rd)\s+(?:\/q\s+)?\/s)|\bformat\s+[a-z]:|\bmkfs\b|\bdd\s+if=|(?:^|[;|&\n({=]|\s-c(?:ommand)?\s+["']?)\s*(?:remove-item|ri|rm|del|erase|rmdir|rd)(?=\s)(?=[^|;&\n]*\s-r(?:e\w*)?(?::\$true)?(?=[\s"')}]|$))(?=[^|;&\n]*\s-fo\w*(?::\$true)?(?=[\s"')}]|$))/i;
 
 const SHELL_KEYWORDS = new Set(['for', 'while', 'if', 'then', 'else', 'fi', 'do', 'done', 'case', 'esac', 'function', 'export', 'set', 'export', '&&', '||', '{', '}', '(', ')', 'local', 'return', 'exit']);
 
@@ -185,6 +185,20 @@ export function powershellVerb(cmd) {
     c = c.replace(/^&\s*/, '');
     if (c === before) break;
   }
+  // Only the first statement names the verb: cut at the first ';', '|' or newline that is not inside quotes.
+  let quote = '';
+  for (let i = 0; i < c.length; i++) {
+    const ch = c[i];
+    if (quote) {
+      if (ch === quote) quote = '';
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+    } else if (ch === ';' || ch === '|' || ch === '\n') {
+      c = c.slice(0, i);
+      break;
+    }
+  }
+  c = c.trim();
   const q = c.match(/^(["'])([^"']*)\1\s*([\s\S]*)$/);
   if (q) c = `${q[2].replace(/^.*[\\/]/, '')} ${q[3]}`;
   c = c.replace(/^(\S+?)\.(?:exe|cmd|bat)(?=\s|$)/i, '$1');
@@ -388,7 +402,8 @@ export async function summarizeTranscript(file, opts = {}) {
         inc(s.hooks.events, o.subtype);
         if (Array.isArray(o.hookInfos)) {
           // the summary line has no event of its own: it is the Stop (or SubagentStop) run
-          const summaryEvent = o.hookEvent || (/subagent/i.test(o.subtype) ? 'SubagentStop' : /stop/i.test(o.subtype) ? 'Stop' : null);
+          // A stop_hook_summary written inside a subagent transcript (or marked isSidechain) is the subagent's SubagentStop run.
+          const summaryEvent = o.hookEvent || (/subagent/i.test(o.subtype) || sub || o.isSidechain === true ? 'SubagentStop' : /stop/i.test(o.subtype) ? 'Stop' : null);
           for (const h of o.hookInfos) {
             if (!h || typeof h.command !== 'string') continue;
             inc(s.hooks.runsByCommand, hookRunKey(summaryEvent, h.command));
@@ -570,7 +585,8 @@ export async function summarizeTranscript(file, opts = {}) {
     // The tool_result line carries how the permission was decided. A decision the user made in a dialog means the time
     // from tool_use to tool_result includes the wait for that answer, so it says nothing about how long the command ran.
     const pd0 = o.permissionDecision;
-    const waitedForUser = !!pd0 && typeof pd0 === 'object' && /^user/i.test(String(pd0.source || ''));
+    // A saved rule (reasonType/reason 'rule') accepts without asking, even when the user wrote it: not a wait (same rule as metrics).
+    const waitedForUser = !!pd0 && typeof pd0 === 'object' && /^user/i.test(String(pd0.source || '')) && (pd0.reasonType || pd0.reason) !== 'rule';
     if (results.length) {
       for (const r of results) {
         const pend = pendingTools.get(r.tool_use_id);

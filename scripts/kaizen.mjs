@@ -395,6 +395,12 @@ function applyArgsFromBatch(args) {
     discuss: [],
     notes: '',
   };
+  // The batch's project folder is reused as is; a folder that is gone is an error, not something to recreate (the writer would mkdir it).
+  // Only a batch with project-scope recipes needs that folder.
+  const needsProject = choices.selected.some((s) => s.scope === 'project');
+  if (needsProject && !args.flags.project && typeof manifest.projectDir === 'string' && manifest.projectDir && !fs.existsSync(manifest.projectDir)) {
+    throw new UserError(t('err.from_batch_project_gone', { id, dir: manifest.projectDir }));
+  }
   const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'kaizen-from-batch-')), 'choices.json');
   writeJsonAtomic(file, choices);
   const flags = { ...args.flags };
@@ -731,6 +737,7 @@ Usage: node scripts/kaizen.mjs <command> [options]
              --add FILE (extra recipes, e.g. custom.*; defaults to the file recorded by recommend --add)
              --from-batch ID re-applies a journaled batch with the scope and parameters it was applied with
                (after "undo ID", to keep some of its recipes: --from-batch ID --recipe a,b)
+               it reuses the batch's project folder (--project DIR overrides it; an existing folder is required otherwise)
   undo       Revert an applied batch   [ID | --last | --all]   --dry-run
              --force also reverts what you edited after apply (kept entries otherwise stay undoable)
   paths      Print the state directory and the files in it as JSON (KAIZEN_STATE_DIR respected)

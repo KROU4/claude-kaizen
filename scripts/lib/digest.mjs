@@ -172,7 +172,7 @@ export function renderDigest(m, lang = m.locale?.lang || 'en', previous = null) 
   L.push(`${t('tl.top_errors')}: ${kv(m.tools.errorsByName, 10)}`);
   L.push('');
   L.push(`${t('tl.bash_verbs')}: ${kv(m.tools.bashVerbs, 20)}`);
-  if (m.tools.powershellVerbs && Object.keys(m.tools.powershellVerbs).length) L.push(`${t('tl.bash_verbs')} (PowerShell): ${kv(m.tools.powershellVerbs, 20)}`);
+  if (m.tools.powershellVerbs && Object.keys(m.tools.powershellVerbs).length) L.push(`${t('tl.powershell_verbs')}: ${kv(m.tools.powershellVerbs, 20)}`);
   if (m.tools.slowBashCommands.length) {
     L.push('');
     L.push(`${t('tl.slow_commands')} (≥30 ${t('digest.unit_s')}):`);

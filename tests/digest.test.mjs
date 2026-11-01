@@ -97,6 +97,16 @@ describe('renderDigest', () => {
     assert.ok(md.includes('a\\|b'));
   });
 
+  it('labels the PowerShell verbs line with its own key, not the Bash one plus a suffix', () => {
+    for (const lang of ['en', 'ru']) {
+      const tl = loadLocale(lang).tl;
+      assert.ok(tl.powershell_verbs && tl.powershell_verbs !== tl.bash_verbs, lang);
+      const md = renderDigest({ ...measure, tools: { ...measure.tools, powershellVerbs: { 'git status': 3 } } }, lang);
+      assert.ok(md.includes(`${tl.powershell_verbs}: `), md);
+      assert.ok(!md.includes(`${tl.bash_verbs} (PowerShell)`));
+    }
+  });
+
   it('handles an empty window without throwing', () => {
     const empty = buildMeasure({ sessions: [], inventory: fixture.inventory, insights: null, env: { windowDays: 30, since: '2026-10-01T00:00:00.000Z', configDir: '/x', projectDir: null, platform: { platform: 'test', node: 'v0' }, claudeVersion: null, kitVersion: '0' } });
     const md = renderDigest(empty, 'en');

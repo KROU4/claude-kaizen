@@ -178,6 +178,48 @@ describe('apply --from-batch', () => {
     assert.ok(!/acceptEdits/.test(fs.existsSync(path.join(projA, '.claude', 'settings.json')) ? fs.readFileSync(path.join(projA, '.claude', 'settings.json'), 'utf8') : ''));
   });
 
+  it('re-applies a user-scope batch even when the folder it was run from is gone', () => {
+    const home = measured();
+    const projA = path.join(home.root, 'projUserGone');
+    fs.mkdirSync(projA, { recursive: true });
+    assert.equal(cli(home, ['apply', '--recipe', 'permissions.accept-edits', '--scope', 'user', '--project', projA]).status, 0);
+    const [id] = batchIds(home);
+    assert.equal(cli(home, ['undo', id]).status, 0);
+    fs.rmSync(projA, { recursive: true, force: true });
+    const r = cli(home, ['apply', '--from-batch', id]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(!fs.existsSync(projA), 'the folder was not recreated');
+  });
+
+  it('stops with a localized error, without recreating the folder, when the batch project is gone and --project is not given', () => {
+    const home = measured();
+    const projA = path.join(home.root, 'projGone');
+    const projC = path.join(home.root, 'projNew');
+    fs.mkdirSync(projA, { recursive: true });
+    fs.mkdirSync(projC, { recursive: true });
+    assert.equal(cli(home, ['apply', '--recipe', 'permissions.accept-edits', '--scope', 'project', '--project', projA]).status, 0);
+    const [id] = batchIds(home);
+    assert.equal(cli(home, ['undo', id]).status, 0);
+    fs.rmSync(projA, { recursive: true, force: true });
+
+    const en = cli(home, ['apply', '--from-batch', id]);
+    assert.equal(en.status, 1, en.stdout);
+    assert.match(en.stderr, /project folder of batch .* no longer exists/);
+    assert.match(en.stderr, /--project DIR/);
+    assert.match(cli(home, ['apply', '--from-batch', id, '--lang', 'ru']).stderr, /папки проекта пакета .* больше нет/);
+    assert.ok(!fs.existsSync(projA), 'the folder was not recreated');
+    assert.equal(batchIds(home).length, 1, 'nothing was applied');
+    // --project still works as the way out
+    assert.equal(cli(home, ['apply', '--from-batch', id, '--project', projC]).status, 0);
+    assert.ok(fs.existsSync(path.join(projC, '.claude', 'settings.json')));
+    assert.ok(!fs.existsSync(projA));
+    for (const lang of ['en', 'ru']) assert.ok(readJson(path.join(KIT_ROOT, 'locales', `${lang}.json`)).err.from_batch_project_gone);
+  });
+
+  it('says in the help that --from-batch reuses the project folder of the batch', () => {
+    assert.match(runCli(['help']).stdout, /--from-batch ID re-applies[\s\S]*reuses the batch's project folder/);
+  });
+
   const stateFiles = (dir) => fs.readdirSync(dir, { recursive: true }).map(String).sort();
 
   it('writes nothing into the state directory on a dry run, nor leaves choices.from-batch.json after a real one', () => {

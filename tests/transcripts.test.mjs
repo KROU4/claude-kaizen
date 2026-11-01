@@ -1880,3 +1880,93 @@ describe('workflow subagent transcripts (<session>/subagents/workflows/<run>/age
     assert.equal(listTranscripts(dir, { sinceMs: 1_750_000_000 * 1000 }).length, 1);
   });
 });
+
+// Round 9: SubagentStop runs, PowerShell destructive forms and verbs, rule-accepted slow commands, Invoke-Pester.
+
+describe('a stop_hook_summary inside a subagent transcript is a SubagentStop run', () => {
+  const cmd = 'node "/x/subdone.mjs"';
+  const att = (n, type) => ({ type: 'attachment', uuid: `sa${n}`, isSidechain: true, attachment: { type, hookName: 'SubagentStop', hookEvent: 'SubagentStop', command: cmd, durationMs: 10 } });
+  const summary = (n, errs = []) => ({ type: 'system', subtype: 'stop_hook_summary', uuid: `ss${n}`, isSidechain: true, hookCount: 1, hookInfos: [{ command: cmd, durationMs: 10 }], hookErrors: errs });
+
+  it('counts the runs under SubagentStop (the key of the errors), so the failure rate is errors / runs, not 100%', async () => {
+    const dir = makeTempDir('kaizen-substop-');
+    const main = path.join(dir, 'p', 's1.jsonl');
+    const sub = path.join(dir, 'p', 's1', 'subagents', 'agent-a1.jsonl');
+    writeJsonl(main, [userLine('hello there', { uuid: 'm0' })]);
+    const lines = [];
+    for (let k = 0; k < 10; k++) {
+      const fail = k < 2;
+      lines.push(att(k, fail ? 'hook_non_blocking_error' : 'hook_success'), summary(k, fail ? ['x'] : []));
+    }
+    writeJsonl(sub, lines);
+    const s = await summarizeTranscript(main, { subagents: [sub] });
+    assert.deepEqual(s.hooks.runsByCommand, { [`SubagentStop|${cmd}`]: 10 });
+    assert.deepEqual(s.hooks.errorsByCommand, { [`SubagentStop|${cmd}`]: 2 });
+  });
+
+  it('also does so for an isSidechain summary line in the main file, and still counts a plain summary as Stop', async () => {
+    const s = await summarizeLines([summary(1), { ...summary(2), isSidechain: false }]);
+    assert.deepEqual(s.hooks.runsByCommand, { [`SubagentStop|${cmd}`]: 1, [`Stop|${cmd}`]: 1 });
+  });
+});
+
+describe('PowerShell destructive forms after an assignment, unquoted -Command, and cmd rd /s', () => {
+  const destructive = async (command) => (await summarizeLines([asstTools('x', [useTool('x', 'PowerShell', { command })])])).destructive;
+
+  it('flags them', async () => {
+    for (const c of ['$null = Remove-Item .\\b -Recurse -Force', '$x=Remove-Item .\\b -Recurse -Force', 'pwsh -NoProfile -Command Remove-Item .\\b -Recurse -Force', 'powershell -Command Remove-Item b -r -fo', 'rd /s /q C:\\work\\build', 'cmd /c rd /s /q build', 'rd /q /s build', 'rmdir /q /s build', 'cmd /c "rd /s /q build"', 'cd x; del /f /s /q *.log']) {
+      assert.equal(await destructive(c), 1, c);
+    }
+  });
+
+  it('keeps the path false positives fixed', async () => {
+    for (const c of ['xcopy .\\src\\rd /s /i .\\out', 'dir .\\docs\\rd /s', 'robocopy C:\\a\\rd /s C:\\b', 'Copy-Item .\\src\\rd -Destination .\\x -Recurse -Force','Get-ChildItem .\\ri -Recurse -Force', 'Write-Host "rd -r -fo"', '$a = Get-Item .\\rm -Recurse -Force', 'Set-Content rd.txt -Value x -Force', 'Remove-Item temp.txt']) {
+      assert.equal(await destructive(c), 0, c);
+    }
+  });
+});
+
+describe('powershellVerb reads only the first statement', () => {
+  it('cuts at the first unquoted ; or |', () => {
+    assert.equal(powershellVerb('git status; git diff'), 'git status');
+    assert.equal(powershellVerb('npm test | Select-Object -Last 5'), 'npm test');
+    assert.equal(powershellVerb('Push-Location x; npm test; Pop-Location'), 'npm test');
+    assert.equal(powershellVerb('Write-Host "a"; git status'), 'Write-Host');
+    assert.equal(powershellVerb('git status\ngit diff'), 'git status');
+  });
+
+  it('does not cut inside quotes', () => {
+    assert.equal(powershellVerb('& "C:\\Program Files (x86)\\a;b\\tool.exe" run; git status'), 'tool');
+    assert.equal(powershellVerb('& "C:\\Program Files\\Git\\bin\\git.exe" status'), 'git status');
+    assert.equal(powershellVerb("git commit -m 'a; b'"), 'git commit');
+  });
+});
+
+describe('slow commands accepted by a saved rule are not a wait for the user', () => {
+  const at = (sec) => new Date(Date.UTC(2026, 9, 29, 9, 0, 0) + sec * 1000).toISOString();
+  const run = (id, startSec, decision) => [
+    { ...asstTools(id, [useTool(id, 'Bash', { command: 'npm run build' })]), timestamp: at(startSec) },
+    { ...userLine([resultOf(id, 'ok')], { uuid: `ur-${id}` }), timestamp: at(startSec + 90), permissionDecision: decision },
+  ];
+
+  it('keeps a rule-accepted command (accept/rule/user_permanent) and drops a prompt answered by the user', async () => {
+    const s = await summarizeLines([
+      ...run('r1', 0, { decision: 'accept', reasonType: 'rule', source: 'user_permanent' }),
+      ...run('r2', 200, { decision: 'accept', reasonType: 'prompt', source: 'user_temporary' }),
+    ]);
+    assert.deepEqual(s.slowCommands, [{ verb: 'npm run', ms: 90000 }]);
+    assert.equal(s.slowCommandCount, 1);
+  });
+});
+
+describe('Invoke-Pester is a test run', () => {
+  it('counts it for PowerShell, and for a subagent as a sidechain test run', async () => {
+    const s = await summarizeLines([
+      asstTools('p1', [useTool('p1', 'PowerShell', { command: 'Invoke-Pester -Path .\\tests' })]),
+      asstTools('p2', [useTool('p2', 'PowerShell', { command: 'invoke-pester' })], { isSidechain: true }),
+      asstTools('p3', [useTool('p3', 'PowerShell', { command: 'INVOKE-PESTER ./t' })]),
+    ]);
+    assert.equal(s.testCommands, 3);
+    assert.equal(s.sidechainTestCommands, 1);
+  });
+});

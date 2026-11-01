@@ -157,6 +157,12 @@ describe('architecture doc: transcript scanner wording matches the scanner', () 
     assert.ok(!/repeated lines by `uuid`/.test(row), 'the old per-file wording is gone');
   });
 
+  it('documents the subagent walk depth, workflow agents and the subagent files in the cache key', () => {
+    assert.match(row, /up to 4 levels deep/);
+    assert.match(row, /workflows\/<run>\/agent-\*\.jsonl/);
+    assert.match(row, /path, size and mtime of the session's subagent files/);
+  });
+
   it('documents that apply --from-batch keeps the batch project directory and paths prints absolute paths', () => {
     assert.match(arch, /--from-batch ID \[--recipe ids\]` to re-apply a journaled batch with its own scope, parameters and project directory/);
     assert.match(arch, /absolute-path JSON/);

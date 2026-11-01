@@ -42,6 +42,7 @@
     "from_batch_with_file": "--from-batch нельзя сочетать с FILE выбора",
     "from_batch_no_manifest": "--from-batch: нет манифеста в {file}",
     "from_batch_no_recipe": "--from-batch: в пакете {id} нет рецепта {missing} (есть: {have})",
+    "from_batch_project_gone": "--from-batch: папки проекта пакета {id} больше нет: {dir}. Укажите --project DIR, чтобы применить его в другом месте.",
     "add_expects_file": "--add ожидает файл",
     "add_unreadable": "--add: не удаётся прочитать {file}",
     "param_shape": "--param ожидает вид recipe.id.param=value, получено: {spec}",
@@ -232,6 +233,7 @@
     "top_tools": "Топ инструментов",
     "top_errors": "Ошибки по инструментам",
     "bash_verbs": "Команды Bash",
+    "powershell_verbs": "Команды PowerShell",
     "slow_commands": "Долгие команды",
     "repeated_commands": "Повторяющиеся команды (3+)",
     "suggested_allow": "Частые read-only команды (кандидаты в allowlist)"

@@ -42,6 +42,7 @@
     "from_batch_with_file": "--from-batch cannot be combined with a choices FILE",
     "from_batch_no_manifest": "--from-batch: no manifest at {file}",
     "from_batch_no_recipe": "--from-batch: batch {id} has no recipe {missing} (it has: {have})",
+    "from_batch_project_gone": "--from-batch: the project folder of batch {id} no longer exists: {dir}. Pass --project DIR to apply it elsewhere.",
     "add_expects_file": "--add expects a file",
     "add_unreadable": "--add: cannot read {file}",
     "param_shape": "--param expects recipe.id.param=value, got: {spec}",
@@ -232,6 +233,7 @@
     "top_tools": "Top tools",
     "top_errors": "Errors by tool",
     "bash_verbs": "Bash verbs",
+    "powershell_verbs": "PowerShell verbs",
     "slow_commands": "Slow commands",
     "repeated_commands": "Repeated commands (3+)",
     "suggested_allow": "Read-only commands run often (allowlist candidates)"
