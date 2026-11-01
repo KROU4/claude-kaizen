@@ -12,7 +12,7 @@ import { readJsonl } from './jsonl.mjs';
 import { redact, snippet } from './redact.mjs';
 import { ensureDir, readJsonSafe, writeJsonAtomic } from './paths.mjs';
 
-export const SUMMARY_VERSION = 22;
+export const SUMMARY_VERSION = 23;
 
 const INTERRUPT_RE = /\[Request interrupted by user/;
 const COMPACT_RE = /^This session is being continued from a previous conversation/;
@@ -263,12 +263,19 @@ export function newSessionSummary(file) {
     models: {}, // model -> {messages, input, output, cacheRead, cacheCreate}
     peakContextTokens: 0,
     thinkingMs: 0,
+    // cost-state lines carry the CUMULATIVE totals of a whole session (no timestamp, no uuid): costUSD / linesAdded /
+    // linesRemoved are lifetime values of costSessionId, not the part inside the window. scanTranscripts counts each
+    // sessionId once (a relocated or forked copy repeats the parent's cost-state), and metrics labels the partly windowed ones.
     costUSD: null,
+    costSessionId: null,
     linesAdded: 0,
     linesRemoved: 0,
-    // runsByCommand uses the key of errorsByCommand (`event|command`), so a failure rate divides by the runs of that very hook;
+    // runsByCommand uses the key of errorsByCommand (`event|command`), but it only holds the runs Claude Code RECORDED: a hook
+    // that succeeds without output leaves no attachment (see the hook_* branch of summarizeTranscript), so for every event except
+    // Stop / SubagentStop it is a lower bound. opps counts what a hook had the chance to run on (tool uses and tool failures by
+    // tool name, main session and subagents), metrics turns it into the run count of a hook with a known matcher.
     // durations/timeouts are keyed by hookKey() (script name), which two hooks or two events can share.
-    hooks: { summaries: 0, hookRuns: 0, errors: 0, events: {}, durations: {}, timeouts: {}, nonBlockingErrors: 0, errorSamples: [], errorsByCommand: {}, runsByCommand: {} },
+    hooks: { summaries: 0, hookRuns: 0, errors: 0, events: {}, durations: {}, timeouts: {}, nonBlockingErrors: 0, errorSamples: [], errorsByCommand: {}, runsByCommand: {}, opps: { toolUses: {}, toolFailures: {} } },
     attachments: {},
     toolTimeouts: 0,
     toolInterrupted: 0,
@@ -297,6 +304,8 @@ function finalize(s) {
   const runs = topN(s.hooks.runsByCommand, 100);
   for (const k of Object.keys(s.hooks.errorsByCommand)) if (s.hooks.runsByCommand[k]) runs[k] = s.hooks.runsByCommand[k];
   s.hooks.runsByCommand = runs;
+  s.hooks.opps.toolUses = topN(s.hooks.opps.toolUses, 200);
+  s.hooks.opps.toolFailures = topN(s.hooks.opps.toolFailures, 200);
   for (const k of Object.keys(s.promptSamples)) if (!(k in s.promptStems)) delete s.promptSamples[k];
   s.slowCommands.sort((a, b) => b.ms - a.ms);
   s.slowCommandCount = s.slowCommands.length;
@@ -321,9 +330,13 @@ function uuidKey(uuid) {
   return crypto.createHash('sha1').update(String(uuid)).digest('hex').slice(0, 12);
 }
 
-/** Identity of one configured hook in the counters: `event|command`. Errors and runs share it, so a rate divides like by like. */
+/**
+ * Identity of one configured hook in the counters: `event|command`. Errors and runs share it, so a rate divides like by like.
+ * An attachment names the event either as hookEvent ('PostToolUse') or only as hookName ('PostToolUse:Edit', the tool is
+ * appended); both must land on the same key.
+ */
 function hookRunKey(event, command) {
-  return `${event || '?'}|${String(command).slice(0, 300)}`;
+  return `${String(event || '?').split(':')[0]}|${String(command).slice(0, 300)}`;
 }
 
 async function* readSources(sources) {
@@ -382,7 +395,10 @@ export async function summarizeTranscript(file, opts = {}) {
     }
     if (type === 'cost-state') {
       if (sub) continue; // cumulative totals belong to the main session
-      if (typeof o.totalCostUSD === 'number') s.costUSD = o.totalCostUSD;
+      if (typeof o.totalCostUSD === 'number') {
+        s.costUSD = o.totalCostUSD;
+        s.costSessionId = typeof o.sessionId === 'string' && o.sessionId ? o.sessionId : null;
+      }
       if (typeof o.totalLinesAdded === 'number') s.linesAdded = o.totalLinesAdded;
       if (typeof o.totalLinesRemoved === 'number') s.linesRemoved = o.totalLinesRemoved;
       continue;
@@ -507,6 +523,7 @@ export async function summarizeTranscript(file, opts = {}) {
         const name = b.name || 'unknown';
         const input = b.input || {};
         if (!sidechain) inc(s.toolUses, name);
+        inc(s.hooks.opps.toolUses, name); // PreToolUse / PostToolUse hooks run in subagents too
         let verb = '';
         // The PowerShell tool (Windows) feeds the same shell metrics as Bash; both carry the command in input.command.
         const isShell = name === 'Bash' || name === 'PowerShell';
@@ -594,6 +611,7 @@ export async function summarizeTranscript(file, opts = {}) {
         const resultSidechain = pend ? pend.sidechain : sidechain;
         if (pend) {
           pendingTools.delete(r.tool_use_id);
+          if (r.is_error === true) inc(s.hooks.opps.toolFailures, pend.name); // what PostToolUseFailure hooks run on
           if (!Number.isNaN(ts) && !Number.isNaN(pend.ts) && !pend.sidechain) {
             const ms = Math.max(0, ts - pend.ts);
             const d = (s.toolDurations[pend.name] ||= { n: 0, ms: 0, max: 0 });
@@ -806,6 +824,39 @@ export function listTranscripts(projectsDir, { sinceMs = 0 } = {}) {
   return out;
 }
 
+/**
+ * cost-state lines hold the cumulative totals of one session (cost, lines added / removed) and have neither a uuid nor a
+ * timestamp, so the uuid dedup and the --days window never touch them. A relocated or forked copy of a session repeats the
+ * parent's cost-state, and counting it per file would add the same cost twice. Summaries (oldest first) that report the
+ * same costSessionId are therefore collapsed: the first one that still has messages of its own keeps the largest total
+ * seen, the others report no cost. `costWindowCut` tells that some copy had lines before the window, i.e. the total is the
+ * whole session's and not only what happened inside the window.
+ */
+function dedupeSessionCost(summaries) {
+  const groups = new Map();
+  for (const s of summaries) {
+    if (typeof s.costUSD !== 'number') continue;
+    // a cost-state line without its own sessionId belongs to the session of the lines around it, else to the file name
+    const id = s.costSessionId || s.sessionId || s.file.replace(/.jsonl$/, '');
+    if (!groups.has(id)) groups.set(id, []);
+    groups.get(id).push(s);
+  }
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    const owner = group.find((s) => s.userMessages + s.assistantMessages > 0);
+    if (!owner) continue;
+    const best = group.reduce((a, b) => (b.costUSD > a.costUSD ? b : a));
+    const total = { costUSD: best.costUSD, linesAdded: best.linesAdded, linesRemoved: best.linesRemoved };
+    const cut = group.some((s) => s.windowCut);
+    for (const s of group) {
+      s.costUSD = null;
+      s.linesAdded = 0;
+      s.linesRemoved = 0;
+    }
+    Object.assign(owner, total, { costWindowCut: cut });
+  }
+}
+
 const KEY_LEN = 12;
 
 function splitKeys(joined) {
@@ -820,7 +871,8 @@ function splitKeys(joined) {
  *
  * Only lines stamped inside the window (sinceMs) are counted. A fork or a copy of a session replays its parent's lines
  * with the same uuids in a file of its own: every uuid is counted once across all files, by the file whose first line is
- * the oldest (the parent), and the others keep only their own new lines.
+ * the oldest (the parent), and the others keep only their own new lines. The cumulative cost-state totals (no uuid, no
+ * timestamp) are counted once per sessionId the same way (see dedupeSessionCost).
  */
 export async function scanTranscripts({ projectsDir, sinceMs = 0, cacheDir = null, onProgress = null, useCache = true }) {
   const files = listTranscripts(projectsDir, { sinceMs });
@@ -890,6 +942,8 @@ export async function scanTranscripts({ projectsDir, sinceMs = 0, cacheDir = nul
     for (const k of keys) seen.add(k);
     finalSummary.set(e, summary);
   }
+
+  dedupeSessionCost(order.map((e) => finalSummary.get(e)).filter(Boolean));
 
   const sessions = [];
   for (const e of entries) {

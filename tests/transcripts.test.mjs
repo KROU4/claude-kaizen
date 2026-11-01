@@ -1970,3 +1970,118 @@ describe('Invoke-Pester is a test run', () => {
     assert.equal(s.sidechainTestCommands, 1);
   });
 });
+
+describe('hook runs Claude Code does not record (round 8)', () => {
+  const att = (type, extra, command = 'node "/x/fmt.mjs"') => ({ type: 'attachment', uuid: `h-${Math.random()}`, attachment: { type, command, durationMs: 10, ...extra } });
+
+  it('bumps the summary version so that caches written without the opportunity counters are rebuilt', () => {
+    assert.ok(SUMMARY_VERSION >= 23, String(SUMMARY_VERSION));
+    const hooks = newSessionSummary('/p/s.jsonl').hooks;
+    assert.deepEqual(hooks.opps, { toolUses: {}, toolFailures: {} });
+  });
+
+  it('puts an attachment that names the event only in hookName (PostToolUse:Edit) under the same key as one with hookEvent', async () => {
+    const cmd = 'node "/x/fmt.mjs"';
+    const s = await summarizeLines([att('hook_non_blocking_error', { hookName: 'PostToolUse:Edit' }), att('hook_success', { hookName: 'PostToolUse:Write', hookEvent: 'PostToolUse' }), att('hook_success', { hookName: 'PostToolUse:Edit' })]);
+    assert.deepEqual(s.hooks.errorsByCommand, { [`PostToolUse|${cmd}`]: 1 });
+    assert.deepEqual(s.hooks.runsByCommand, { [`PostToolUse|${cmd}`]: 3 });
+  });
+
+  it('counts the tool uses (main session and subagents) and the failed ones by tool name, as the runs a tool hook had the chance to make', async () => {
+    const s = await summarizeLines([
+      asstTools('m1', [useTool('t1', 'Edit', { file_path: '/x/a.js' }), useTool('t2', 'Bash', { command: 'ls' })]),
+      asstTools('m2', [useTool('t3', 'Edit', { file_path: '/x/b.js' })], { isSidechain: true }),
+      userLine([resultOf('t1', 'ok'), resultOf('t2', 'Error: ENOENT no such file', true)], { uuid: 'u-r1' }),
+      userLine([resultOf('t3', 'old_string not found', true)], { uuid: 'u-r2', isSidechain: true }),
+    ]);
+    assert.deepEqual(s.hooks.opps, { toolUses: { Edit: 2, Bash: 1 }, toolFailures: { Bash: 1, Edit: 1 } });
+    assert.deepEqual(s.toolUses, { Edit: 1, Bash: 1 }, 'the main-session counter is unchanged');
+  });
+
+  it('leaves the tool uses before the window out of the opportunity counters, like every other counter', async () => {
+    const dir = path.join(makeTempDir('kaizen-opps-'), 'projects');
+    writeJsonl(path.join(dir, 'p', 's.jsonl'), [
+      asstTools('o1', [useTool('o1', 'Edit', { file_path: '/x/a.js' })], { timestamp: TS('08-01') }),
+      asstTools('n1', [useTool('n1', 'Edit', { file_path: '/x/a.js' })], { timestamp: TS('10-29') }),
+    ]);
+    const res = await scanTranscripts({ projectsDir: dir, sinceMs: Date.parse('2026-10-01T00:00:00Z'), useCache: false });
+    assert.deepEqual(res.sessions[0].hooks.opps.toolUses, { Edit: 1 });
+  });
+});
+
+describe('cost-state totals are cumulative per session (round 8)', () => {
+  const SID = '0000000a-ffff-4fff-8fff-ffffffffffff';
+  const cost = (total, lines, sid = SID) => ({ type: 'cost-state', sessionId: sid, totalCostUSD: total, totalLinesAdded: lines, totalLinesRemoved: 1 });
+  const base = (sid = SID) => [
+    userLine('Add a login page for the app', { uuid: 'c-u1', sessionId: sid, timestamp: TS('10-10', '09', '00') }),
+    asstText('c1', { sessionId: sid, timestamp: TS('10-10', '09', '01') }),
+    userLine('Deploy the service to staging and report back', { uuid: 'c-u2', sessionId: sid, timestamp: TS('10-20', '09', '00') }),
+    asstText('c2', { sessionId: sid, timestamp: TS('10-20', '09', '01') }),
+  ];
+  const scan = async (files, opts = {}) => {
+    const dir = path.join(makeTempDir('kaizen-cost-'), 'projects');
+    for (const [rel, ls] of Object.entries(files)) writeJsonl(path.join(dir, rel), ls);
+    return scanTranscripts({ projectsDir: dir, useCache: false, ...opts });
+  };
+  const costOf = (res) => res.sessions.reduce((n, s) => n + (s.costUSD || 0), 0);
+  const linesOf = (res) => res.sessions.reduce((n, s) => n + s.linesAdded, 0);
+
+  it('counts a relocated copy of a session once: the larger total, not the sum of both files', async () => {
+    const res = await scan({
+      'p1/a.jsonl': [...base(), cost(5, 10)],
+      'p2/a.jsonl': [...base(), userLine('One more thing to do here', { uuid: 'c-u3', sessionId: SID, timestamp: TS('10-25', '09', '00') }), asstText('c3', { sessionId: SID, timestamp: TS('10-25', '09', '01') }), cost(6, 12)],
+    });
+    assert.equal(costOf(res), 6);
+    assert.equal(linesOf(res), 12);
+    assert.equal(res.sessions.filter((s) => typeof s.costUSD === 'number').length, 1);
+  });
+
+  it('keeps the total when the copy that holds it has no messages of its own left', async () => {
+    const res = await scan({ 'p1/a.jsonl': [...base(), cost(5, 10)], 'p2/a.jsonl': [...base(), cost(6, 12)] });
+    assert.equal(res.sessions.length, 1, 'the second copy replays nothing new');
+    assert.equal(res.sessions[0].costUSD, 6);
+    assert.equal(res.sessions[0].linesAdded, 12);
+  });
+
+  it('keys a cost-state line without its own sessionId by the session of the lines around it', async () => {
+    const bare = (total) => ({ type: 'cost-state', totalCostUSD: total, totalLinesAdded: 3, totalLinesRemoved: 0 });
+    const res = await scan({
+      'p1/a.jsonl': [...base(), bare(5)],
+      'p2/a.jsonl': [...base(), userLine('One more thing to do here', { uuid: 'c-u3', sessionId: SID, timestamp: TS('10-25', '09', '00') }), bare(7)],
+    });
+    assert.equal(costOf(res), 7);
+  });
+
+  it('keeps the cost of different sessions apart, a fork with a session id of its own included', async () => {
+    const FORK = '0000000b-ffff-4fff-8fff-ffffffffffff';
+    const res = await scan({
+      'p1/a.jsonl': [...base(), cost(5, 10)],
+      'p1/b.jsonl': [...base(FORK), userLine('Fork work that is new here', { uuid: 'f-u1', sessionId: FORK, timestamp: TS('10-26', '09', '00') }), cost(2, 4, FORK)],
+    });
+    assert.equal(costOf(res), 7);
+  });
+
+  it('marks the cost of a session that began before the window as whole-session cost', async () => {
+    const SINCE = Date.parse('2026-10-15T00:00:00Z');
+    const inside = '0000000c-ffff-4fff-8fff-ffffffffffff';
+    const res = await scan(
+      {
+        'p1/a.jsonl': [...base(), cost(5, 10)],
+        'p1/c.jsonl': [userLine('A session entirely inside the window', { uuid: 'i-u1', sessionId: inside, timestamp: TS('10-21', '09', '00') }), asstText('i1', { sessionId: inside, timestamp: TS('10-21', '09', '01') }), cost(1, 2, inside)],
+      },
+      { sinceMs: SINCE },
+    );
+    const byFile = Object.fromEntries(res.sessions.map((s) => [s.file, s]));
+    assert.equal(byFile['a.jsonl'].userMessages, 1, 'only the line inside the window is counted');
+    assert.equal(byFile['a.jsonl'].costUSD, 5, 'but the cost is the whole session');
+    assert.equal(byFile['a.jsonl'].windowCut, true);
+    assert.equal(byFile['c.jsonl'].windowCut, false);
+  });
+
+  it('remembers that some copy of a session had lines before the window', async () => {
+    const SINCE = Date.parse('2026-10-15T00:00:00Z');
+    const res = await scan({ 'p1/a.jsonl': [...base(), cost(5, 10)], 'p2/a.jsonl': [...base(), cost(5, 10)] }, { sinceMs: SINCE });
+    assert.equal(res.sessions.length, 1);
+    assert.equal(res.sessions[0].costWindowCut, true);
+  });
+});

@@ -23,6 +23,30 @@ function pct(x) {
   return `${Math.round((x || 0) * 100)}%`;
 }
 
+// Strings of the hook-failure and cost notes. They live here, in both languages, and not in locales/*.json.
+const NOTES = {
+  en: {
+    failing_hooks: 'Hooks with errors',
+    errors_in_runs: ({ errors, runs, rate }) => `${errors} errors in ${runs} runs (${rate}% of them)`,
+    errors_rate_unknown: ({ errors, recorded }) =>
+      `${errors} errors, failure rate unknown: Claude Code records a run only when the hook printed something or failed${recorded ? ` (${recorded} runs recorded)` : ''}, so the successful runs cannot be counted`,
+    not_in_settings: 'not in the settings files',
+    hook_runs: ({ recorded, estimated }) => `${recorded} recorded, ~${estimated} estimated`,
+    cost_whole_sessions: ({ partial, total, inWindow }) =>
+      `Cost and lines are cumulative totals of whole sessions (Claude Code writes no timestamp on them): ${partial} of ${total} sessions with a cost began before the window, so their cost includes time outside it. Cost of the sessions that are entirely inside the window: $${inWindow}.`,
+  },
+  ru: {
+    failing_hooks: 'Хуки с ошибками',
+    errors_in_runs: ({ errors, runs, rate }) => `${errors} ошибок за ${runs} запусков (${rate}% запусков)`,
+    errors_rate_unknown: ({ errors, recorded }) =>
+      `${errors} ошибок, доля сбоев неизвестна: Claude Code записывает запуск, только если хук что-то вывел или упал${recorded ? ` (записано запусков: ${recorded})` : ''}, поэтому успешные запуски посчитать нельзя`,
+    not_in_settings: 'нет в файлах настроек',
+    hook_runs: ({ recorded, estimated }) => `${recorded} записано, ~${estimated} по оценке`,
+    cost_whole_sessions: ({ partial, total, inWindow }) =>
+      `Стоимость и строки — накопленные итоги целых сессий (временной метки у них нет): ${partial} из ${total} сессий со стоимостью начались до окна, поэтому в их стоимость входит и время вне окна. Стоимость сессий, целиком лежащих в окне: $${inWindow}.`,
+  },
+};
+
 function hourBar(hours) {
   const max = Math.max(1, ...hours);
   const blocks = ' ▁▂▃▄▅▆▇█';
@@ -79,6 +103,7 @@ export function compareMeasures(prev, cur, t) {
 
 export function renderDigest(m, lang = m.locale?.lang || 'en', previous = null) {
   const t = translator(lang);
+  const N = NOTES[lang === 'ru' ? 'ru' : 'en'];
   const L = [];
   const T = m.totals;
   L.push(`# ${t('digest.title')}`);
@@ -116,6 +141,10 @@ export function renderDigest(m, lang = m.locale?.lang || 'en', previous = null) 
       [t('digest.metric'), t('digest.value'), t('digest.metric'), t('digest.value')],
     ),
   );
+  if (T.costPartialSessions > 0) {
+    L.push('');
+    L.push(`*${N.cost_whole_sessions({ partial: T.costPartialSessions, total: T.costSessions, inWindow: T.costInWindowUSD })}*`);
+  }
   L.push('');
 
   // ---- friction
@@ -133,7 +162,7 @@ export function renderDigest(m, lang = m.locale?.lang || 'en', previous = null) 
         [t('f.edit_mismatches'), F.editMismatches, t('f.user_modified_edits'), F.userModifiedEdits],
         [t('f.not_found'), F.notFound, t('f.missing_dependency'), F.missingDependency],
         [t('f.test_failures'), F.testFailures, t('f.tool_errors'), F.toolErrors],
-        [t('f.hook_runs'), F.hookRuns, t('f.hook_errors'), `${F.hookErrors} / ${F.hookNonBlockingErrors} ${t('f.non_blocking')}`],
+        [t('f.hook_runs'), typeof F.hookRunsEstimated === 'number' ? N.hook_runs({ recorded: F.hookRuns, estimated: F.hookRunsEstimated }) : F.hookRuns, t('f.hook_errors'), `${F.hookErrors} / ${F.hookNonBlockingErrors} ${t('f.non_blocking')}`],
       ],
       [t('digest.metric'), t('digest.value'), t('digest.metric'), t('digest.value')],
     ),
@@ -151,6 +180,18 @@ export function renderDigest(m, lang = m.locale?.lang || 'en', previous = null) 
     L.push('');
     L.push(`${t('f.hook_timeouts')}:`);
     for (const h of F.hookTimeouts) L.push(`- \`${h.hook}\`: ${t('f.timed_out', { n: h.timeouts, limit: h.limitMs ? `${h.limitMs / 1000} ${t('digest.unit_s')}` : '?' })}`);
+  }
+  if ((F.failingHooks || []).length) {
+    L.push('');
+    L.push(`${N.failing_hooks}:`);
+    for (const h of F.failingHooks) {
+      const what =
+        typeof h.failureRate === 'number' && typeof h.runs === 'number'
+          ? N.errors_in_runs({ errors: h.errors, runs: h.runs, rate: Math.round(h.failureRate * 1000) / 10 })
+          : N.errors_rate_unknown({ errors: h.errors, recorded: h.runsRecorded || 0 });
+      const note = h.configured ? '' : `; ${h.source || N.not_in_settings}`;
+      L.push(`- \`${h.command}\` (${h.event}): ${what}${note}`);
+    }
   }
   if (F.hookErrorSamples.length) {
     L.push('');

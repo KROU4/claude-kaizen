@@ -8,9 +8,53 @@ import { redact } from './redact.mjs';
 export const MEASURE_VERSION = 1;
 /** Fewer sessions than this cannot show that a skill or MCP server is unused, so those metrics stay empty. */
 export const MIN_SESSIONS_FOR_UNUSED = 3;
-/** A configured hook is offered for removal only when it failed at least this many times AND in at least this share of its runs. */
+/**
+ * A configured hook is offered for removal only when it failed at least this many times AND, when its runs can be counted,
+ * in at least this share of them. When they cannot (see hookRunCount) the rate is unknown and the error count decides alone.
+ */
 export const FAILING_HOOK_MIN_ERRORS = 20;
 export const FAILING_HOOK_MIN_RATE = 0.5;
+
+/** The tool names a hook matcher selects: '' and '*' select every tool, anything else is a regex over the whole name. null = not usable. */
+function matcherTest(matcher) {
+  const m = String(matcher || '').trim();
+  if (!m || m === '*') return () => true;
+  try {
+    const re = new RegExp(`^(?:${m})$`);
+    return (name) => re.test(name);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * How many times a hook had the chance to run: prompts for UserPromptSubmit, sessions (plus compactions) for SessionStart,
+ * the tool uses of the tools its matcher selects for PreToolUse / PostToolUse, the failed ones for PostToolUseFailure.
+ * null when there is no such count (other events, or a matcher that is unknown or not a valid pattern).
+ */
+function hookOpportunities(event, matchers, ctx) {
+  if (event === 'UserPromptSubmit') return ctx.prompts;
+  if (event === 'SessionStart') return ctx.sessions + ctx.compactions;
+  const byTool = event === 'PreToolUse' || event === 'PostToolUse' ? ctx.toolUses : event === 'PostToolUseFailure' ? ctx.toolFailures : null;
+  if (!byTool || !matchers.length) return null;
+  const tests = matchers.map(matcherTest);
+  if (tests.some((x) => !x)) return null;
+  let n = 0;
+  for (const [name, c] of Object.entries(byTool)) if (tests.some((x) => x(name))) n += c;
+  return n;
+}
+
+/**
+ * Runs of one hook, or null when they cannot be told. Claude Code writes a hook_* attachment only for a run that produced
+ * output or failed, so for every event but Stop / SubagentStop (counted from the stop_hook_summary line, which lists every
+ * hook that ran) the recorded runs are a lower bound, and runs == errors would make any hook look like it fails every time.
+ * Those events use max(recorded, opportunities) when the opportunities are known and at least the errors; otherwise null.
+ */
+function hookRunCount(event, errors, recorded, matchers, ctx) {
+  if (event === 'Stop' || event === 'SubagentStop') return recorded > 0 && recorded >= errors ? recorded : null;
+  const opps = hookOpportunities(event, matchers, ctx);
+  return opps !== null && opps >= errors ? Math.max(recorded, opps) : null;
+}
 
 const EXT_LANG = {
   '.py': 'python',
@@ -179,6 +223,9 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
   for (const m of Object.values(models)) m.share = round(m.messages / totalMsgs, 3);
   const promptTokensAll = tokens.input + tokens.cacheRead + tokens.cacheCreate;
   const costSessions = S.filter((s) => typeof s.costUSD === 'number');
+  // cost-state totals are cumulative per session and carry no timestamp: a session that began before the window contributes its
+  // whole cost, not the part inside it (costWindowCut is set by scanTranscripts for a session spread over several copies).
+  const costPartial = costSessions.filter((s) => (s.costWindowCut ?? s.windowCut) === true);
 
   const totals = {
     sessions: S.length,
@@ -190,6 +237,8 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
     activeDays: new Set(S.map((s) => (s.startedAt || '').slice(0, 10)).filter(Boolean)).size,
     costUSD: round(sum(costSessions, (s) => s.costUSD), 2),
     costSessions: costSessions.length,
+    costPartialSessions: costPartial.length,
+    costInWindowUSD: round(sum(costSessions, (s) => s.costUSD) - sum(costPartial, (s) => s.costUSD), 2),
     tokens,
     cacheHitRate: promptTokensAll ? round(tokens.cacheRead / promptTokensAll, 3) : 0,
     linesAdded: sum(S, (s) => s.linesAdded),
@@ -336,6 +385,30 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
     const src = c.scope === 'managed' ? 'managed' : String(c.scope || '').startsWith('plugin:') ? 'plugin' : null;
     if (src && !fixedSource.has(normalizeCmd(c.command))) fixedSource.set(normalizeCmd(c.command), src);
   }
+  // matchers of every configured entry (any scope) by `event|command`: they tell which tool uses a PreToolUse / PostToolUse hook ran on
+  const matchersOf = new Map();
+  for (const c of inventory.hooks.commands) {
+    const k = `${c.event}|${normalizeCmd(c.command)}`;
+    if (!matchersOf.has(k)) matchersOf.set(k, []);
+    matchersOf.get(k).push(c.matcher || '');
+  }
+  const oppCtx = { prompts: sum(S, (s) => s.userMessages), sessions: S.length, compactions: sum(S, (s) => s.compactions), toolUses: {}, toolFailures: {} };
+  for (const s of S) {
+    merge(oppCtx.toolUses, s.hooks.opps && s.hooks.opps.toolUses);
+    merge(oppCtx.toolFailures, s.hooks.opps && s.hooks.opps.toolFailures);
+  }
+  const recordedNorm = {}; // recorded runs by `event|normalized command`
+  for (const [key, n] of Object.entries(hookRunsByCommand)) {
+    const idx = key.indexOf('|');
+    const k = `${key.slice(0, idx)}|${normalizeCmd(key.slice(idx + 1))}`;
+    recordedNorm[k] = (recordedNorm[k] || 0) + n;
+  }
+  // total runs: the recorded ones are a lower bound, so every configured hook is raised to its known run count
+  let hookRunsEstimated = sum(Object.entries(recordedNorm).filter(([k]) => !matchersOf.has(k)), ([, n]) => n);
+  for (const [k, matchers] of matchersOf) {
+    const recorded = recordedNorm[k] || 0;
+    hookRunsEstimated += hookRunCount(k.slice(0, k.indexOf('|')), 0, recorded, matchers, oppCtx) ?? recorded;
+  }
   const failingHooks = Object.entries(errorsByCommand)
     .map(([key, errors]) => {
       const idx = key.indexOf('|');
@@ -344,10 +417,21 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
       const configured = configuredNorm.get(normalizeCmd(command)) || null;
       // `command` is the display copy (redacted); `configuredCommand` stays exactly as written in settings.json for matching
       const source = configured ? null : fixedSource.get(normalizeCmd(command)) || null; // 'managed' / 'plugin': not removable
-      // runs of this very hook (same event and command as the errors, any outcome); an error attachment is a run too, but Stop hooks
-      // are counted from their summary only. hookDurations is keyed by script name and would mix hooks that share it.
-      const runs = Math.max(hookRunsByCommand[key] || 0, errors);
-      return { event, command: redact(command), errors, runs, failureRate: round(errors / runs, 3), configured: !!configured, configuredCommand: configured, ...(source ? { source } : {}) };
+      // runs of this very hook (same event and command as the errors, any outcome). hookDurations is keyed by script name and would
+      // mix hooks that share it. null = not countable (see hookRunCount): the rate is unknown and the digest says so.
+      const recorded = hookRunsByCommand[key] || 0;
+      const runs = hookRunCount(event, errors, recorded, matchersOf.get(`${event}|${normalizeCmd(command)}`) || [], oppCtx);
+      return {
+        event,
+        command: redact(command),
+        errors,
+        runs,
+        runsRecorded: recorded,
+        failureRate: runs === null ? null : round(errors / runs, 3),
+        configured: !!configured,
+        configuredCommand: configured,
+        ...(source ? { source } : {}),
+      };
     })
     .sort((a, b) => b.errors - a.errors)
     .slice(0, 10);
@@ -409,12 +493,13 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
     missingDependency: errorClasses['missing-dependency'] || 0,
     testFailures: sum(S, (s) => s.testFailures),
     toolErrors: toolErrorsTotal,
-    hookRuns,
+    hookRuns, // recorded runs: a lower bound, a hook that succeeds without output leaves no record
+    hookRunsEstimated,
     hookErrors,
     hookNonBlockingErrors: hookNonBlocking,
     hookErrorSamples,
     failingHooks,
-    failingHookCommands: failingHooks.filter((h) => h.configured && h.errors >= FAILING_HOOK_MIN_ERRORS && h.failureRate >= FAILING_HOOK_MIN_RATE).map((h) => h.configuredCommand),
+    failingHookCommands: failingHooks.filter((h) => h.configured && h.errors >= FAILING_HOOK_MIN_ERRORS && (h.failureRate === null || h.failureRate >= FAILING_HOOK_MIN_RATE)).map((h) => h.configuredCommand),
     slowHooks,
     hookTimeouts,
     slowCommands: tools.slowCommandsTotal,
@@ -724,7 +809,9 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
 export const METRIC_DOCS = {
   'totals.sessions': 'Sessions in the window',
   'totals.userMessages': 'Human-written prompts (slash commands and tool results excluded)',
-  'totals.costUSD': 'Sum of per-session cost as recorded by Claude Code (cost-state lines)',
+  'totals.costUSD': 'Sum of per-session cost as recorded by Claude Code (cost-state lines, counted once per session). It is the cost of whole sessions: a session that began before the window contributes all of it',
+  'totals.costPartialSessions': 'Sessions in costUSD that began before the window (their cost includes time outside it)',
+  'totals.costInWindowUSD': 'Part of costUSD that belongs to sessions entirely inside the window',
   'totals.cacheHitRate': 'cache_read / (input + cache_read + cache_create) across assistant messages',
   'sessions.bypassShare': 'Share of user turns in bypassPermissions or dontAsk mode',
   'sessions.longSessions': 'Sessions with 40+ human prompts',
@@ -740,7 +827,9 @@ export const METRIC_DOCS = {
   'friction.userModifiedEdits': 'Edits where the user had changed the file manually in between',
   'friction.timeouts': 'Timed-out tool calls plus timeout-looking errors',
   'friction.hookNonBlockingErrors': 'Hook runs that reported an error (non-blocking)',
-  'friction.failingHookCommands': 'Configured hook commands that failed 20+ times in the window',
+  'friction.hookRuns': 'Hook runs Claude Code recorded (a lower bound: a hook that succeeds without output leaves no record)',
+  'friction.hookRunsEstimated': 'Hook runs with every configured hook raised to the runs it had the chance to make (prompts, tool uses of its matcher, sessions)',
+  'friction.failingHookCommands': 'Configured hook commands that failed 20+ times in the window and, when their runs can be counted, in at least half of them',
   'friction.slowHooks': 'Hooks averaging 1.5 s+ or peaking at 10 s+ (completed runs only)',
   'friction.hookTimeouts': 'Hooks that were killed for exceeding their timeout: count and the configured limit',
   'autonomy.askUserQuestions': 'AskUserQuestion tool uses',

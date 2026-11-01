@@ -115,6 +115,45 @@ describe('renderDigest', () => {
   });
 });
 
+describe('renderDigest: hook failure rate and cost scope (round 8)', () => {
+  const withHooks = (failingHooks, extra = {}) => ({ ...structuredClone(measure), friction: { ...structuredClone(measure.friction), failingHooks, ...extra } });
+  const known = { event: 'PostToolUse', command: 'npx prettier --write', errors: 25, runs: 400, runsRecorded: 25, failureRate: 0.063, configured: true, configuredCommand: 'npx prettier --write' };
+  const unknown = { event: 'Notification', command: 'node notify.mjs', errors: 30, runs: null, runsRecorded: 30, failureRate: null, configured: true, configuredCommand: 'node notify.mjs' };
+
+  it('shows a failing hook with its runs and rate, and a hook whose runs cannot be counted as rate unknown (never 100%)', () => {
+    const md = renderDigest(withHooks([known, unknown]), 'en');
+    assert.ok(md.includes('- `npx prettier --write` (PostToolUse): 25 errors in 400 runs (6.3% of them)'), md);
+    assert.ok(md.includes('- `node notify.mjs` (Notification): 30 errors, failure rate unknown'), md);
+    assert.ok(!/node notify\.mjs.*100%/.test(md));
+  });
+
+  it('says the same in Russian, without English leftovers in the new lines', () => {
+    const md = renderDigest(withHooks([known, unknown]), 'ru');
+    assert.ok(md.includes('- `npx prettier --write` (PostToolUse): 25 ошибок за 400 запусков (6.3% запусков)'), md);
+    assert.ok(md.includes('- `node notify.mjs` (Notification): 30 ошибок, доля сбоев неизвестна'), md);
+    assert.ok(!md.includes('failure rate unknown'));
+  });
+
+  it('marks a failing hook that is not in the settings files, with its source when it has one', () => {
+    const md = renderDigest(withHooks([{ ...known, configured: false, configuredCommand: null }, { ...known, command: 'node corp.mjs', configured: false, configuredCommand: null, source: 'managed' }]), 'en');
+    assert.ok(md.includes('(6.3% of them); not in the settings files'), md);
+    assert.ok(md.includes('`node corp.mjs` (PostToolUse): 25 errors in 400 runs (6.3% of them); managed'), md);
+  });
+
+  it('shows the recorded and the estimated hook runs side by side', () => {
+    assert.ok(renderDigest(withHooks([], { hookRuns: 10, hookRunsEstimated: 480 }), 'en').includes('10 recorded, ~480 estimated'));
+    assert.ok(renderDigest(withHooks([], { hookRuns: 10, hookRunsEstimated: 480 }), 'ru').includes('10 записано, ~480 по оценке'));
+  });
+
+  it('labels the cost as whole-session cost when sessions began before the window, and says nothing otherwise', () => {
+    assert.ok(!renderDigest(measure, 'en').includes('cumulative totals of whole sessions'));
+    const partial = { ...structuredClone(measure), totals: { ...measure.totals, costSessions: 4, costPartialSessions: 3, costInWindowUSD: 1.25 } };
+    assert.ok(renderDigest(partial, 'en').includes('3 of 4 sessions with a cost began before the window'));
+    assert.ok(renderDigest(partial, 'en').includes('$1.25'));
+    assert.ok(renderDigest(partial, 'ru').includes('3 из 4 сессий со стоимостью начались до окна'));
+  });
+});
+
 describe('compareMeasures', () => {
   const t = translator('en');
   const at = (obj) => structuredClone(obj);

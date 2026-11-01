@@ -324,7 +324,9 @@ Generated from `recipes/catalog.json` (31 recipes). Do not edit by hand; run `no
 |---|---|
 | `totals.sessions` | Sessions in the window |
 | `totals.userMessages` | Human-written prompts (slash commands and tool results excluded) |
-| `totals.costUSD` | Sum of per-session cost as recorded by Claude Code (cost-state lines) |
+| `totals.costUSD` | Sum of per-session cost as recorded by Claude Code (cost-state lines, counted once per session). It is the cost of whole sessions: a session that began before the window contributes all of it |
+| `totals.costPartialSessions` | Sessions in costUSD that began before the window (their cost includes time outside it) |
+| `totals.costInWindowUSD` | Part of costUSD that belongs to sessions entirely inside the window |
 | `totals.cacheHitRate` | cache_read / (input + cache_read + cache_create) across assistant messages |
 | `sessions.bypassShare` | Share of user turns in bypassPermissions or dontAsk mode |
 | `sessions.longSessions` | Sessions with 40+ human prompts |
@@ -340,7 +342,9 @@ Generated from `recipes/catalog.json` (31 recipes). Do not edit by hand; run `no
 | `friction.userModifiedEdits` | Edits where the user had changed the file manually in between |
 | `friction.timeouts` | Timed-out tool calls plus timeout-looking errors |
 | `friction.hookNonBlockingErrors` | Hook runs that reported an error (non-blocking) |
-| `friction.failingHookCommands` | Configured hook commands that failed 20+ times in the window |
+| `friction.hookRuns` | Hook runs Claude Code recorded (a lower bound: a hook that succeeds without output leaves no record) |
+| `friction.hookRunsEstimated` | Hook runs with every configured hook raised to the runs it had the chance to make (prompts, tool uses of its matcher, sessions) |
+| `friction.failingHookCommands` | Configured hook commands that failed 20+ times in the window and, when their runs can be counted, in at least half of them |
 | `friction.slowHooks` | Hooks averaging 1.5 s+ or peaking at 10 s+ (completed runs only) |
 | `friction.hookTimeouts` | Hooks that were killed for exceeding their timeout: count and the configured limit |
 | `autonomy.askUserQuestions` | AskUserQuestion tool uses |

@@ -137,6 +137,19 @@ describe('totals', () => {
     assert.equal(measure.totals.costSessions, 2);
   });
 
+  it('says how much of the cost belongs to sessions that began before the window (cost-state has no timestamps)', () => {
+    assert.equal(measure.totals.costPartialSessions, 0, 'the fixture sessions are entirely inside the window');
+    assert.equal(measure.totals.costInWindowUSD, 2);
+    const cut = makeSession({ costUSD: 5, windowCut: true });
+    const whole = makeSession({ costUSD: 1.5, windowCut: false });
+    const copy = makeSession({ costUSD: 2, windowCut: false, costWindowCut: true }); // a session spread over copies, one of which had older lines
+    const t = buildMeasure({ sessions: [cut, whole, copy], inventory: inv, insights: null, env: ENV }).totals;
+    assert.equal(t.costUSD, 8.5);
+    assert.equal(t.costSessions, 3);
+    assert.equal(t.costPartialSessions, 2);
+    assert.equal(t.costInWindowUSD, 1.5);
+  });
+
   it('sums token usage across models', () => {
     assert.deepEqual(measure.totals.tokens, { input: 278, output: 2044, cacheRead: 185000, cacheCreate: 6520 });
   });
@@ -327,12 +340,14 @@ describe('friction', () => {
 
   describe('failure rate of hooks', () => {
     const cmd = 'npx prettier --write'; // configured in the fixture settings
+    // `runs` tool uses of Edit (the hook's matcher is Edit|Write); Claude Code recorded only the failing runs
     const hookSession = (errors, runs) =>
       makeSession({
         hooks: {
           ...newSessionSummary('/p/s.jsonl').hooks,
           errorsByCommand: { [`PostToolUse|${cmd}`]: errors },
-          runsByCommand: { [`PostToolUse|${cmd}`]: runs },
+          runsByCommand: { [`PostToolUse|${cmd}`]: errors },
+          opps: { toolUses: { Edit: runs }, toolFailures: {} },
           durations: { [hookKey(cmd)]: { n: runs, ms: runs * 10, max: 50 } },
         },
       });
@@ -381,6 +396,7 @@ describe('friction', () => {
           ...newSessionSummary('/p/s.jsonl').hooks,
           errorsByCommand: { [`PreToolUse|${a}`]: 30 },
           runsByCommand: { [`PreToolUse|${a}`]: 30, [`PostToolUse|${b}`]: 100 },
+          opps: { toolUses: { Bash: 30 }, toolFailures: {} },
           durations: { [hookKey(a)]: { n: 130, ms: 1300, max: 50 } },
         },
       });
@@ -396,6 +412,7 @@ describe('friction', () => {
           ...newSessionSummary('/p/s.jsonl').hooks,
           errorsByCommand: { [`PostToolUse|${g}`]: 30 },
           runsByCommand: { [`PostToolUse|${g}`]: 40, [`PreToolUse|${g}`]: 500 },
+          opps: { toolUses: { Edit: 40 }, toolFailures: {} },
           durations: { [hookKey(g)]: { n: 540, ms: 5400, max: 50 } },
         },
       });
@@ -406,11 +423,98 @@ describe('friction', () => {
       assert.deepEqual(f.failingHookCommands, [g]);
     });
 
-    it('never reports a rate above 1 when the run count is missing or smaller than the errors', () => {
-      const none = makeSession({ hooks: { ...newSessionSummary('/p/s.jsonl').hooks, errorsByCommand: { [`PostToolUse|${cmd}`]: 30 } } });
-      const h = buildMeasure({ sessions: [none, ...padding()], inventory: inv, insights: null, env: ENV }).friction.failingHooks.find((x) => x.command === cmd);
-      assert.equal(h.runs, 30);
-      assert.equal(h.failureRate, 1);
+    it('does not take a hook that succeeds silently for one that always fails (25 errors, 400 edits, only the failures recorded)', () => {
+      const f = failingOf(25, 400);
+      const h = f.failingHooks.find((x) => x.command === cmd);
+      assert.equal(h.runsRecorded, 25, 'Claude Code left an attachment for the failures only');
+      assert.equal(h.runs, 400);
+      assert.equal(h.failureRate, 0.063);
+      assert.deepEqual(f.failingHookCommands, []);
+    });
+
+    // a hook configured for `event` with `matcher`, failing `errors` times, plus the opportunity counters of the session
+    const scenario = ({ event, matcher = '', errors = 30, recorded = errors, opps = {}, userMessages = 0, command = 'node scenario-hook.mjs' }) => {
+      const withHook = { ...inv, hooks: { ...inv.hooks, commands: [...inv.hooks.commands, { event, matcher, command, file: 'settings.json' }] } };
+      const s = makeSession({
+        userMessages,
+        hooks: {
+          ...newSessionSummary('/p/s.jsonl').hooks,
+          errorsByCommand: { [`${event}|${command}`]: errors },
+          runsByCommand: recorded ? { [`${event}|${command}`]: recorded } : {},
+          opps: { toolUses: {}, toolFailures: {}, ...opps },
+        },
+      });
+      const f = buildMeasure({ sessions: [s, ...padding()], inventory: withHook, insights: null, env: ENV }).friction;
+      return { f, h: f.failingHooks.find((x) => x.command === command), command };
+    };
+
+    it('counts the runs of a PreToolUse hook from the tool uses its matcher selects', () => {
+      const { f, h, command } = scenario({ event: 'PreToolUse', matcher: 'Bash|PowerShell', opps: { toolUses: { Bash: 100, PowerShell: 20, Edit: 5000 } } });
+      assert.equal(h.runs, 120, 'Edit is not selected by the matcher');
+      assert.equal(h.failureRate, 0.25);
+      assert.deepEqual(f.failingHookCommands, []);
+      assert.deepEqual(scenario({ event: 'PreToolUse', matcher: 'Bash', opps: { toolUses: { Bash: 40 } } }).f.failingHookCommands, [command], '30 of 40 runs');
+    });
+
+    it('treats an empty or * matcher as every tool and an MCP pattern as a regex over the whole tool name', () => {
+      assert.equal(scenario({ event: 'PostToolUse', matcher: '*', opps: { toolUses: { Bash: 100, mcp__a__b: 50 } } }).h.runs, 150);
+      assert.equal(scenario({ event: 'PostToolUse', matcher: '', opps: { toolUses: { Bash: 100, mcp__a__b: 50 } } }).h.runs, 150);
+      assert.equal(scenario({ event: 'PostToolUse', matcher: 'mcp__a__.*', opps: { toolUses: { Bash: 100, mcp__a__b: 50, mcp__a__c: 10, xmcp__a__b: 7 } } }).h.runs, 60);
+    });
+
+    it('counts a UserPromptSubmit hook against the prompts and a SessionStart hook against sessions plus compactions', () => {
+      const prompts = scenario({ event: 'UserPromptSubmit', errors: 25, userMessages: 3000 });
+      assert.equal(prompts.h.runs, 3000);
+      assert.equal(prompts.h.failureRate, 0.008);
+      assert.deepEqual(prompts.f.failingHookCommands, []);
+      const start = scenario({ event: 'SessionStart', errors: 2 });
+      assert.equal(start.h.runs, 3, 'the scenario session and its two paddings');
+      assert.equal(start.h.failureRate, 0.667);
+      const tooMany = scenario({ event: 'SessionStart', errors: 25 }).h;
+      assert.equal(tooMany.runs, null, 'more errors than sessions: the count does not describe this hook, so the rate is unknown');
+      assert.equal(tooMany.failureRate, null);
+    });
+
+    it('counts a PostToolUseFailure hook against the failed tool uses', () => {
+      const { f, h } = scenario({ event: 'PostToolUseFailure', matcher: 'Bash', errors: 25, opps: { toolUses: { Bash: 900 }, toolFailures: { Bash: 400, Edit: 9 } } });
+      assert.equal(h.runs, 400);
+      assert.equal(h.failureRate, 0.063);
+      assert.deepEqual(f.failingHookCommands, []);
+    });
+
+    it('takes the runs of a Stop hook from the recorded stop_hook_summary runs', () => {
+      const { f, h } = scenario({ event: 'Stop', errors: 25, recorded: 400 });
+      assert.equal(h.runs, 400);
+      assert.equal(h.failureRate, 0.063);
+      assert.deepEqual(f.failingHookCommands, []);
+    });
+
+    it('marks the rate unknown (null, never a fake 100%) when the runs cannot be counted, and falls back to the error count', () => {
+      for (const noRuns of [
+        { event: 'Notification' }, // no opportunity count for this event
+        { event: 'PostToolUse', matcher: 'Edit', opps: { toolUses: { Edit: 4 } } }, // fewer tool uses than errors: the counters do not describe this hook
+        { event: 'PostToolUse', matcher: '(unclosed', opps: { toolUses: { Edit: 4000 } } }, // not a pattern
+        { event: 'Stop' }, // no summary lines with hookInfos
+      ]) {
+        const { f, h, command } = scenario({ ...noRuns, errors: 30, recorded: noRuns.event === 'Notification' ? 30 : 0 });
+        assert.equal(h.runs, null, JSON.stringify(noRuns));
+        assert.equal(h.failureRate, null, JSON.stringify(noRuns));
+        assert.deepEqual(f.failingHookCommands, [command], 'the absolute error threshold decides');
+      }
+      assert.deepEqual(scenario({ event: 'Notification', errors: 19, recorded: 19 }).f.failingHookCommands, [], 'below the threshold');
+    });
+
+    it('does not count a hook that is not in any settings file against tool uses (its matcher is unknown)', () => {
+      const s = makeSession({ hooks: { ...newSessionSummary('/p/s.jsonl').hooks, errorsByCommand: { 'PostToolUse|node gone.mjs': 30 }, opps: { toolUses: { Edit: 4000 }, toolFailures: {} } } });
+      const h = buildMeasure({ sessions: [s, ...padding()], inventory: inv, insights: null, env: ENV }).friction.failingHooks.find((x) => x.command === 'node gone.mjs');
+      assert.equal(h.runs, null);
+      assert.equal(h.failureRate, null);
+    });
+
+    it('raises the total hook runs to what the configured hooks ran, next to the recorded ones', () => {
+      const { f } = scenario({ event: 'PostToolUse', matcher: 'Edit', errors: 30, opps: { toolUses: { Edit: 400 } } });
+      assert.equal(f.hookRuns, 0, 'hookRuns is what Claude Code recorded');
+      assert.ok(f.hookRunsEstimated >= 400, String(f.hookRunsEstimated));
     });
   });
 });
