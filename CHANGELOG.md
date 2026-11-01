@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [0.1.9] — 2026-11-01
+
+### Fixed
+- `permissions.allowlist-readonly` no longer suggests a rule already covered by a broader allow rule (`Bash(git:*)` or `Bash(git *)` covers `git diff`); an exact rule such as `Bash(git diff)` still covers only itself.
+- A file, secret or path protection hook (`protect-files.mjs`, `protect_env.sh`, …) is no longer mistaken for a destructive-command guard, so `hooks.guard-destructive` is still offered next to it; branch guards such as `protect-main.mjs` still count.
+
 ## [0.1.8] — 2026-11-01
 
 ### Fixed
