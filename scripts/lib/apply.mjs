@@ -204,6 +204,43 @@ const normCommand = (c) => String(c).replace(/\s+/g, ' ').trim();
 
 const recipeNames = (providers) => [...new Set(providers.map((p) => p.recipe.id))].join(', ');
 
+/**
+ * Upgrade from 0.1.4, which wired the shared script (format-on-edit.mjs) in the project: a live batch of this very recipe
+ * still owns that unkeyed hook, and Claude Code runs two different commands twice. The old hook is taken out here, as a
+ * settings.hook.remove entry of THIS batch: undoing this batch puts it back, and the old batch (which may hold other
+ * recipes) does not have to be undone. Undoing the old batch finds the hook gone and drops that removal record.
+ * Runs whenever the keyed hook is wired or already there (0.1.5 left both side by side). Returns the removal entry, or
+ * null when there is nothing to take out.
+ */
+function removeLegacyHook(a, ctx, io, settings, id) {
+  if (!ctx.hookKey) return null;
+  const file = ctx.settingsFile;
+  const list = (settings.hooks && settings.hooks[a.event]) || [];
+  const legacyId = hookIdentity({ type: 'command', command: fill(a.command, { ...ctx, hookKey: null }) });
+  const owners = io
+    .live()
+    .filter((p) => p.entry.type === 'settings.hook' && !p.entry.shared && p.entry.event === a.event && p.entry.identity === legacyId && samePath(p.entry.file, file) && p.recipe.id === io.recipeId);
+  if (legacyId === id || !owners.length) return null;
+  const gone = [];
+  for (const g of list) {
+    const keep = [];
+    for (const h of g.hooks || []) {
+      if (hookIdentity(h) === legacyId) gone.push({ file, event: a.event, matcher: g.matcher || null, hook: h });
+      else keep.push(h);
+    }
+    g.hooks = keep;
+  }
+  if (!gone.length) return null;
+  settings.hooks[a.event] = list.filter((g) => g.hooks && g.hooks.length);
+  const ids = [...new Set(owners.map((p) => p.box.id))];
+  io.describe(io.say(`${file}: remove the ${a.event} hook of an earlier version (shared script)`, `${file}: убрать хук ${a.event} прежней версии (общий скрипт)`));
+  // the old script is one file for every project (and for the user scope): hooks in other settings files may still run it
+  const others = [...new Set(io.live().filter((p) => p.entry.type === 'settings.hook' && p.entry.identity === legacyId && !samePath(p.entry.file, file)).map((p) => p.box.id))].filter((x) => !ids.includes(x));
+  const shared = others.length ? io.say(` and until the other projects that still run it (batch ${others.join(', ')}) are undone too`, ` и пока не откатят другие проекты, которые его ещё запускают (пакет ${others.join(', ')})`) : '';
+  io.note(io.say(`the ${a.event} hook of an earlier version (shared script, batch ${ids.join(', ')}) was removed from ${file} so that it does not run twice next to the new project-specific one; undoing this batch puts it back. The old script file stays until batch ${ids.join(', ')} is undone${shared}`, `хук ${a.event} прежней версии (общий скрипт, пакет ${ids.join(', ')}) убран из ${file}, чтобы он не срабатывал дважды рядом с новым, своим для проекта; откат этого пакета вернёт его. Старый файл скрипта останется, пока не откатят пакет ${ids.join(', ')}${shared}`));
+  return { type: 'settings.hook.remove', removed: gone };
+}
+
 // ------------------------------------------------------------- action handlers
 // Each returns a journal entry (or null when nothing changed). `dry` = describe only: the settings and files a dry run
 // would change are changed in memory (io.load / io.fileText) so that the next action and the next recipe of the run
@@ -249,6 +286,13 @@ const handlers = {
           });
         const own = io.live().some((p) => p.entry.type === 'settings.hook' && p.entry.event === a.event && p.entry.identity === id && samePath(p.entry.file, file) && p.recipe.id === io.recipeId);
         const claim = { type: 'settings.hook', file, event: a.event, matcher: null, wanted: a.matcher || null, identity: id, shared: true };
+        // 0.1.5 left the old shared-script hook next to the keyed one: take it out now, as a real journal entry of this batch
+        const legacy = removeLegacyHook(a, ctx, io, settings, id);
+        if (legacy) {
+          if (!io.dry) io.save(file, settings);
+          if (own || lenders.length) io.also(claim);
+          return legacy;
+        }
         if (own) return { skipped: true, reason: io.t('apply.skip.hook_present'), file, event: a.event, command: entry.command, claim };
         if (!lenders.length) return { skipped: true, reason: io.t('apply.skip.hook_present'), file, event: a.event, command: entry.command };
         io.describe(io.say(`hook for ${a.event} is already installed by ${[...new Set(lenders.map((p) => p.recipe.id))].join(', ')}; shared`, `хук ${a.event} уже установлен рецептом ${[...new Set(lenders.map((p) => p.recipe.id))].join(', ')}; используется совместно`));
@@ -260,37 +304,9 @@ const handlers = {
     if (matcher) group.matcher = matcher;
     io.describe(io.t('apply.plan.hook_add', { file, event: a.event, matcher: matcher ? ` [${matcher}]` : '', command: entry.command }));
     list.push(group);
-    // Upgrade from 0.1.4, which wired the shared script (format-on-edit.mjs) in the project: a live batch of this very recipe
-    // still owns that unkeyed hook, and Claude Code runs two different commands twice. The old hook is taken out here, as a
-    // settings.hook.remove entry of THIS batch: undoing this batch puts it back, and the old batch (which may hold other
-    // recipes) does not have to be undone. Undoing the old batch finds the hook gone and drops that removal record.
-    if (ctx.hookKey) {
-      const legacyId = hookIdentity({ type: 'command', command: fill(a.command, { ...ctx, hookKey: null }) });
-      const owners = io
-        .live()
-        .filter((p) => p.entry.type === 'settings.hook' && !p.entry.shared && p.entry.event === a.event && p.entry.identity === legacyId && samePath(p.entry.file, file) && p.recipe.id === io.recipeId);
-      if (legacyId !== id && owners.length) {
-        const gone = [];
-        for (const g of list) {
-          const keep = [];
-          for (const h of g.hooks || []) {
-            if (hookIdentity(h) === legacyId) gone.push({ file, event: a.event, matcher: g.matcher || null, hook: h });
-            else keep.push(h);
-          }
-          g.hooks = keep;
-        }
-        if (gone.length) {
-          settings.hooks[a.event] = list.filter((g) => g.hooks && g.hooks.length);
-          const ids = [...new Set(owners.map((p) => p.box.id))];
-          io.describe(io.say(`${file}: remove the ${a.event} hook of an earlier version (shared script)`, `${file}: убрать хук ${a.event} прежней версии (общий скрипт)`));
-          // the old script is one file for every project (and for the user scope): hooks in other settings files may still run it
-          const others = [...new Set(io.live().filter((p) => p.entry.type === 'settings.hook' && p.entry.identity === legacyId && !samePath(p.entry.file, file)).map((p) => p.box.id))].filter((id) => !ids.includes(id));
-          const shared = others.length ? io.say(` and until the other projects that still run it (batch ${others.join(', ')}) are undone too`, ` и пока не откатят другие проекты, которые его ещё запускают (пакет ${others.join(', ')})`) : '';
-          io.note(io.say(`the ${a.event} hook of an earlier version (shared script, batch ${ids.join(', ')}) was removed from ${file} so that it does not run twice next to the new project-specific one; undoing this batch puts it back. The old script file stays until batch ${ids.join(', ')} is undone${shared}`, `хук ${a.event} прежней версии (общий скрипт, пакет ${ids.join(', ')}) убран из ${file}, чтобы он не срабатывал дважды рядом с новым, своим для проекта; откат этого пакета вернёт его. Старый файл скрипта останется, пока не откатят пакет ${ids.join(', ')}${shared}`));
-          io.also({ type: 'settings.hook.remove', removed: gone });
-        }
-      }
-    }
+    // Upgrade from 0.1.4: the old shared-script hook is taken out as a settings.hook.remove entry of THIS batch.
+    const legacy = removeLegacyHook(a, ctx, io, settings, id);
+    if (legacy) io.also(legacy);
     if (!io.dry) io.save(file, settings);
     // wanted: the whole matcher the recipe asked for (matcher is only what this batch added), so that undoing another
     // batch can put back the part of the coverage this recipe still depends on
@@ -492,6 +508,7 @@ const handlers = {
         settings.hooks[event] = groups.filter((g) => g.hooks && g.hooks.length);
         if (!settings.hooks[event].length) delete settings.hooks[event];
       }
+      if (changed && settings.hooks && !Object.keys(settings.hooks).length) delete settings.hooks;
       if (changed) {
         const n = removed.filter((r) => r.file === file).length;
         io.describe(io.t(n === 1 ? 'apply.plan.hook_remove_one' : 'apply.plan.hook_remove_many', { file, n }));
@@ -639,13 +656,52 @@ function sameRemovedHook(a, b) {
  */
 function forgetRemovals(io, e) {
   const ref = { file: e.file, event: e.event, command: String(e.identity).slice(String(e.identity).indexOf('|') + 1) };
+  // Another batch in force may still own or rely on this very hook (the same command wired for other matchers by another
+  // recipe): the removal record of a group it needs is its own way back, so that stays, and that batch takes over the group
+  // the record brings back (adoptGroup): nobody else would remove it again. Only the records nobody needs go.
+  const wants = io.peers(e).filter((p) => p.entry.type === 'settings.hook');
+  const keep = (c) => {
+    if (!sameRemovedHook(c, ref)) return true;
+    const ct = tokensOf(c.matcher);
+    const who = wants.filter((p) => {
+      const nt = tokensOf(needOf(p.entry));
+      return !nt || !ct || nt.some((x) => ct.includes(x));
+    });
+    if (c.hook) for (const p of who) adoptGroup(io, p, c.matcher);
+    return who.length > 0;
+  };
   for (const p of io.live()) {
     if (p.entry.type !== 'settings.hook.remove') continue;
     const before = (p.entry.removed || []).length + (p.entry.claimed || []).length;
-    p.entry.removed = (p.entry.removed || []).filter((c) => !sameRemovedHook(c, ref));
-    if (p.entry.claimed) p.entry.claimed = p.entry.claimed.filter((c) => !sameRemovedHook(c, ref));
+    p.entry.removed = (p.entry.removed || []).filter(keep);
+    if (p.entry.claimed) p.entry.claimed = p.entry.claimed.filter(keep);
     if (p.entry.removed.length + (p.entry.claimed || []).length !== before) io.touch(p.box);
   }
+}
+
+/**
+ * A settings.hook entry in force (p) that needs a hook group which is not its own to be taken out again: the group is
+ * (or will be, when its removal is undone) in the file, and the batch that installed it is gone, so p takes the matcher
+ * alternatives over and removes them with its own undo. A p that already owns all of them changes nothing.
+ */
+function adoptGroup(io, p, matcher) {
+  const e = p.entry;
+  const rt = tokensOf(matcher);
+  const own = e.shared ? [] : tokensOf(e.matcher);
+  if (!e.shared && (!own || (rt && rt.every((x) => own.includes(x))))) {
+    // its tokens already cover the group, but an owner that is not adopted removes only the group whose matcher equals its own
+    // string on undo: mark it adopted so the restored group (another string) goes too
+    if ((e.matcher || null) !== (matcher || null) && !e.adopted) {
+      e.adopted = true;
+      io.touch(p.box);
+    }
+    return;
+  }
+  const order = tokensOf(needOf(e)) || [];
+  e.matcher = rt ? [...new Set([...(own || []), ...rt])].sort((x, y) => (order.indexOf(x) + 1 || 1e9) - (order.indexOf(y) + 1 || 1e9)).join('|') : null;
+  e.adopted = true;
+  delete e.shared;
+  io.touch(p.box);
 }
 
 /** The other entries in force that removed a hook, or rely on it being gone, oldest first. */
@@ -1166,7 +1222,11 @@ function undoEntry(e, io) {
     case 'settings.hook': {
       const s = io.load(e.file);
       const list = s.hooks && s.hooks[e.event];
-      if (e.shared) return 'ok'; // used another recipe's hook and installed nothing of its own
+      if (e.shared) {
+        // used another recipe's hook and installed nothing of its own; its need ends here, so a removal record nobody needs now goes
+        forgetRemovals(io, e);
+        return 'ok';
+      }
       if (!Array.isArray(list)) {
         forgetRemovals(io, e);
         return 'hook list missing';
@@ -1241,10 +1301,12 @@ function undoEntry(e, io) {
       if (!s.hooks[e.event].length) delete s.hooks[e.event];
       if (!Object.keys(s.hooks).length) delete s.hooks;
       if (!io.dry) io.save(e.file, s);
+      // a batch that took the hook out earlier (disable-failing) must not bring it back for a batch that is gone, whether
+      // the hook was still in the file now or not; the records another batch in force needs stay
+      forgetRemovals(io, e);
       // the hook is still in the file when another batch adopted it: say that, not that it was removed
       if (kept) return `shared: ${e.file} [${e.event}] still in use by ${recipeNames(adopters)}`;
       if (removed) io.describe(io.t('undo.plan.hook_remove', { file: e.file, event: e.event, command: e.identity.split('|')[1] }));
-      else forgetRemovals(io, e);
       return removed ? 'ok' : 'hook was already gone';
     }
     case 'settings.set': {
@@ -1394,12 +1456,27 @@ function undoEntry(e, io) {
         const s = io.load(r.file);
         s.hooks ||= {};
         const list = (s.hooks[r.event] ||= []);
-        const present = list.some((g) => (g.hooks || []).some((h) => hookIdentity(h) === hookIdentity(r.hook)));
-        if (present) continue;
+        // The hook may be back for some matchers only (another recipe wired it for its own): put back the rest, not nothing
+        const have = list.filter((g) => (g.hooks || []).some((h) => hookIdentity(h) === hookIdentity(r.hook)));
+        let matcher = r.matcher || null;
+        if (have.length) {
+          const wantT = tokensOf(r.matcher);
+          const covered = new Set(have.flatMap((g) => tokensOf(g.matcher) || []));
+          if (!wantT || have.some((g) => !tokensOf(g.matcher))) continue;
+          const missing = wantT.filter((x) => !covered.has(x));
+          if (!missing.length) continue;
+          matcher = missing.join('|');
+        }
         const group = { hooks: [r.hook] };
-        if (r.matcher) group.matcher = r.matcher;
+        if (matcher) group.matcher = matcher;
         list.push(group);
         restored++;
+        // a batch in force that needs the hook owns what is back now (the batch that installed it may be gone)
+        const back = tokensOf(matcher);
+        for (const p of io.peers({ type: 'settings.hook', file: r.file, event: r.event, identity: hookIdentity(r.hook) })) {
+          const nt = tokensOf(needOf(p.entry));
+          if (!nt || !back || nt.some((x) => back.includes(x))) adoptGroup(io, p, matcher);
+        }
         io.describe(io.t('undo.plan.restore_hook', { file: r.file, event: r.event, command: hookIdentity(r.hook).split('|')[1] }));
         if (!io.dry) io.save(r.file, s);
       }

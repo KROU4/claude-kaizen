@@ -2662,6 +2662,122 @@ describe('claims: a batch that relies on what an earlier batch provides', () => 
       }
     });
 
+    it('undoing a batch whose hook was removed by disable-failing keeps the removal record another batch still needs', async () => {
+      const groups = () => ((readSettings().hooks || {}).SessionStart || []).map((g) => g.matcher || null);
+      await at(1, { recipe: 'hooks.precompact-handoff', scope: 'user' });
+      await at(2, { recipe: 'hooks.session-context', scope: 'user' });
+      assert.deepEqual(groups(), ['compact|resume|fork', 'startup|clear']);
+      const command = readSettings().hooks.SessionStart[0].hooks[0].command;
+      await at(3, { recipe: 'hooks.disable-failing', scope: 'user', param: [`hooks.disable-failing.hooks=${command}`] });
+      assert.deepEqual(groups(), []);
+      assert.deepEqual(actions(3).find((a) => a.type === 'settings.hook.remove').removed.map((r) => r.matcher), ['compact|resume|fork', 'startup|clear']);
+      // the first batch is undone while its hook is gone: batch 2 (still applied) must keep its way back
+      await runUndo({}, [batch(1)]);
+      assert.ok(actions(3).find((a) => a.type === 'settings.hook.remove').removed.length >= 1, 'the removal record of batch 2 is still there');
+      await runUndo({}, [batch(3)]);
+      assert.ok(groups().includes('startup|clear'), `the hook of the session-context batch is back: ${JSON.stringify(groups())}`);
+      assert.ok(fs.existsSync(path.join(hooksDir(), 'session-context.mjs')));
+    });
+
+    it('undoing the disable-failing batch puts back every removed group, also the ones whose command is already wired for other matchers', async () => {
+      const groups = () => ((readSettings().hooks || {}).SessionStart || []).map((g) => g.matcher || null).sort();
+      await at(1, { recipe: 'hooks.precompact-handoff', scope: 'user' });
+      await at(2, { recipe: 'hooks.session-context', scope: 'user' });
+      const command = readSettings().hooks.SessionStart[0].hooks[0].command;
+      await at(3, { recipe: 'hooks.disable-failing', scope: 'user', param: [`hooks.disable-failing.hooks=${command}`] });
+      await runUndo({}, [batch(3)]);
+      assert.deepEqual(groups(), ['compact|resume|fork', 'startup|clear']);
+    });
+
+    // A hook that disable-failing took out and that other batches still want: whatever the order the batches are undone in,
+    // the hook is never left pointing at a deleted script, a batch that still wants it gets it back when disable-failing is
+    // undone, and once the last of them is undone nothing of it is left (no hook, no script, no removal record that
+    // could bring a hook back later).
+    describe('a hook removed by disable-failing, undone in every order', () => {
+      const permutations = (xs) => (xs.length <= 1 ? [xs] : xs.flatMap((x, i) => permutations([...xs.slice(0, i), ...xs.slice(i + 1)]).map((p) => [x, ...p])));
+      const projA = () => path.join(ctx.root, 'projA');
+      const projSettings = () => path.join(projA(), '.claude', 'settings.json');
+      const scriptsOf = (groups) => groups.flatMap((g) => g.hooks.map((h) => (h.command.match(/"([^"]+\.mjs)"\s*$/) || [])[1]));
+
+      const scenarios = [
+        {
+          name: 'SessionStart hook of precompact-handoff (3 matchers) and session-context (5 matchers)',
+          applyOrders: [['b1', 'b2', 'd'], ['b1', 'd', 'b2']],
+          wants: { b1: ['compact', 'resume', 'fork'], b2: ['startup', 'resume', 'clear', 'compact', 'fork'] },
+          flags: { b1: () => ({ recipe: 'hooks.precompact-handoff', scope: 'user' }), b2: () => ({ recipe: 'hooks.session-context', scope: 'user' }) },
+          groups: () => ((readSettings().hooks || {}).SessionStart || []).filter((g) => g.hooks.some((h) => /session-context\.mjs/.test(h.command))),
+          settings: () => readSettings(),
+          scriptPattern: /session-context/,
+        },
+        {
+          name: 'PostToolUse hook of format-on-edit applied twice to a project (a claim) ',
+          applyOrders: [['b1', 'b2', 'd'], ['b1', 'd', 'b2']],
+          wants: { b1: null, b2: null },
+          flags: {
+            b1: () => ({ recipe: 'hooks.format-on-edit', scope: 'project', project: projA(), param: ['hooks.format-on-edit.formatter=ruff'] }),
+            b2: () => ({ recipe: 'hooks.format-on-edit', scope: 'project', project: projA(), param: ['hooks.format-on-edit.formatter=prettier'] }),
+          },
+          groups: () => (((fs.existsSync(projSettings()) ? readJson(projSettings()) : {}).hooks || {}).PostToolUse || []).filter((g) => g.hooks.some((h) => /format-on-edit/.test(h.command))),
+          settings: () => (fs.existsSync(projSettings()) ? readJson(projSettings()) : {}), // undo leaves an empty file behind
+          scriptPattern: /format-on-edit/,
+        },
+      ];
+
+      for (const sc of scenarios) {
+        it(`${sc.name}: every undo order, from each way of applying`, async () => {
+          fs.mkdirSync(projA(), { recursive: true });
+          const original = JSON.stringify({ settings: sc.settings(), files: hookFiles() });
+          const scripts = () => hookFiles().filter((f) => sc.scriptPattern.test(f));
+          for (const applyOrder of sc.applyOrders) {
+            for (const undoOrder of permutations(['b1', 'b2', 'd'])) {
+              fs.rmSync(appliedDir(), { recursive: true, force: true });
+              const where = `applied ${applyOrder.join(',')}, undone ${undoOrder.join(',')}`;
+              const ids = {};
+              for (const [i, key] of applyOrder.entries()) {
+                let flags;
+                if (key === 'd') {
+                  const g = sc.groups()[0];
+                  const command = g.hooks.find((h) => sc.scriptPattern.test(h.command)).command;
+                  flags = { recipe: 'hooks.disable-failing', scope: sc.flags.b1().scope, ...(sc.flags.b1().project ? { project: sc.flags.b1().project } : {}), param: [`hooks.disable-failing.hooks=${command}`] };
+                } else flags = sc.flags[key]();
+                await at(i + 1, flags);
+                ids[key] = batch(i + 1);
+              }
+              const live = new Set(['b1', 'b2', 'd']);
+              const check = (step) => {
+                const groups = sc.groups();
+                const wanters = ['b1', 'b2'].filter((k) => live.has(k));
+                const at_ = `${where}, after ${step}`;
+                // never a hook that runs a script which is not there
+                for (const script of scriptsOf(groups)) assert.ok(fs.existsSync(script), `${at_}: the hook runs a missing script ${script}`);
+                if (wanters.length) assert.ok(scripts().length > 0, `${at_}: a batch that wants the hook lost its script`);
+                else {
+                  assert.deepEqual(groups, [], `${at_}: nobody wants the hook any more, but it is wired`);
+                  assert.deepEqual(scripts(), [], `${at_}: nobody wants the script any more, but it is there`);
+                }
+                if (wanters.length && !live.has('d')) {
+                  assert.ok(groups.length > 0, `${at_}: the hook is gone although a batch wants it`);
+                  const covered = new Set(groups.flatMap((g) => (g.matcher ? g.matcher.split('|') : ['*'])));
+                  for (const k of wanters) {
+                    const need = sc.wants[k];
+                    if (need && !covered.has('*')) for (const tok of need) assert.ok(covered.has(tok), `${at_}: ${k} wants ${tok}, covered: ${[...covered]}`);
+                  }
+                }
+              };
+              check('applying');
+              for (const key of undoOrder) {
+                const out = await runUndo({}, [ids[key]]);
+                assert.ok(!/error/i.test(out.stdout), `${where}: ${out.stdout}`);
+                live.delete(key);
+                check(`undo ${key}`);
+              }
+              assert.equal(JSON.stringify({ settings: sc.settings(), files: hookFiles() }), original, `${where}: not back to the original`);
+            }
+          }
+        });
+      }
+    });
+
     it('undo --all --dry-run agrees with undo --all', async () => {
       addRecipes(...recipes());
       await applyCustom(1, 'custom.rmA');
@@ -3129,6 +3245,37 @@ describe('hook scripts of a project-scope recipe belong to that project', () => 
       assert.deepEqual(eventCommands(readJson(path.join(projA(), '.claude', 'settings.json')), 'PreToolUse'), guardBefore);
       assert.equal(hookCommands(projA()).length, 1);
       assert.ok(hookFiles().includes('guard-destructive.mjs'));
+    });
+
+    it('the state 0.1.5 left (the old hook next to the keyed one): re-applying takes the old hook out, journaled and undoable', async () => {
+      await at(1, { recipe: 'hooks.format-on-edit', scope: 'project', project: projA(), param: ['hooks.format-on-edit.formatter=ruff'] });
+      downgradeBatch(batch(1), projA());
+      const settingsFile = path.join(projA(), '.claude', 'settings.json');
+      const legacyGroups = readJson(settingsFile).hooks.PostToolUse;
+      await at(2, { recipe: 'hooks.format-on-edit', scope: 'project', project: projA(), param: ['hooks.format-on-edit.formatter=ruff'] });
+      // 0.1.5 added the keyed hook next to the old one and journaled no removal
+      const s = readJson(settingsFile);
+      s.hooks.PostToolUse = [...legacyGroups, ...s.hooks.PostToolUse.filter((g) => !legacyGroups.some((l) => JSON.stringify(l) === JSON.stringify(g)))];
+      writeJson(settingsFile, s);
+      const manifestFile = path.join(appliedDir(), batch(2), 'manifest.json');
+      const m = readJson(manifestFile);
+      for (const r of m.recipes) r.actions = r.actions.filter((e) => e.type !== 'settings.hook.remove');
+      writeJson(manifestFile, m);
+      const keyed = `format-on-edit.${apply.projectKey(projA())}.mjs`;
+      assert.equal(hookCommands(projA()).length, 2, 'the 0.1.5 state: both hooks');
+      const out = await at(3, { recipe: 'hooks.format-on-edit', scope: 'project', project: projA(), param: ['hooks.format-on-edit.formatter=prettier'] });
+      assert.match(out.stdout, new RegExp(`earlier version.*batch ${batch(1)}.*was removed`));
+      const left = hookCommands(projA());
+      assert.equal(left.length, 1, 'the formatter runs once');
+      assert.ok(scriptOf(left[0]).endsWith(keyed));
+      const removal = readManifest(batch(3)).recipes[0].actions.find((e) => e.type === 'settings.hook.remove');
+      assert.equal(removal.removed.length, 1, 'journaled in the new batch');
+      // a further re-apply has nothing left to remove
+      const again = await at(4, { recipe: 'hooks.format-on-edit', scope: 'project', project: projA(), param: ['hooks.format-on-edit.formatter=prettier'] });
+      assert.ok(!/earlier version/.test(again.stdout), again.stdout);
+      // undoing the batch gives the old hook back
+      await runUndo({}, [batch(3)]);
+      assert.equal(hookCommands(projA()).length, 2);
     });
 
     it('the Russian run says it in Russian', async () => {
