@@ -1004,6 +1004,13 @@ describe('suggestAllowRules', () => {
     assert.equal(rules[0].count, 3);
   });
 
+  it('skips verbs already covered by a broader allow rule, but not by an exact one', () => {
+    const rules = suggestAllowRules({ 'git status': 30, 'git diff': 20, 'git log': 10, ls: 10 }, { exclude: ['Bash(git:*)', 'Bash(cat:*)'] });
+    assert.deepEqual(rules.map((r) => r.rule), ['Bash(ls:*)']);
+    assert.deepEqual(suggestAllowRules({ 'git diff': 5, 'git log': 5 }, { exclude: ['Bash(git *)'] }), []);
+    assert.equal(suggestAllowRules({ 'git diff': 5 }, { exclude: ['Bash(git diff)'] }).length, 1, 'an exact rule allows only that command line');
+  });
+
   it('never suggests unsafe or unknown verbs, however often they ran', () => {
     assert.deepEqual(suggestAllowRules({ rm: 50, curl: 50, sudo: 50, 'git push': 50, 'git reset': 50, 'docker rm': 50, bash: 50, sh: 50 }), []);
   });

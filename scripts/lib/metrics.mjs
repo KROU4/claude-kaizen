@@ -276,11 +276,14 @@ export const SAFE_VERBS = new Set([
 
 export function suggestAllowRules(bashVerbs, { minCount = 3, exclude = [] } = {}) {
   const have = new Set(exclude);
+  // `Bash(git:*)` / `Bash(git *)` already allow every `git ...` verb; an exact `Bash(git diff)` allows only itself.
+  const prefixes = exclude.map((r) => /^Bash\((.+?)(?::\*| \*)\)$/.exec(String(r))).filter(Boolean).map((m) => m[1].trim());
+  const covered = (verb) => prefixes.some((p) => verb === p || verb.startsWith(p + ' '));
   const out = [];
   for (const [verb, n] of Object.entries(bashVerbs)) {
     if (n < minCount || !SAFE_VERBS.has(verb)) continue;
     const rule = `Bash(${verb}:*)`;
-    if (have.has(rule)) continue; // already allowed: nothing to ask for
+    if (have.has(rule) || covered(verb)) continue; // already allowed: nothing to ask for
     out.push({ rule, count: n });
   }
   return out.sort((a, b) => b.count - a.count).slice(0, 40);
@@ -753,7 +756,7 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
     hookCommandsText: inventory.hooks.commands.map((c) => `${c.event}:${c.command}`).join('\n').toLowerCase(),
     kaizenHooks: inventory.hooks.commands.filter((c) => /kaizen[\\/]hooks/i.test(c.command)).length,
     hasFormatterHook: inventory.hooks.commands.some((c) => /prettier|ruff|black|gofmt|rustfmt|format-on-edit|eslint --fix|biome/i.test(c.command)),
-    hasGuardHook: inventory.hooks.commands.some((c) => /guard|block-force|destructive|protect(?!-secrets)/i.test(c.command)),
+    hasGuardHook: inventory.hooks.commands.some((c) => /guard|block-force|destructive|protect(?![-_.]?(?:secrets?|files?|env|keys?|paths?|credentials?)\b)/i.test(c.command)),
     hasNotifyHook: inventory.hooks.commands.some((c) => /notify|notification|telegram|ntfy|toast/i.test(c.command)) || !!inventory.hooks.events.Notification,
     hasSessionStartHook: !!inventory.hooks.events.SessionStart,
     hasPreCompactHook: !!inventory.hooks.events.PreCompact,

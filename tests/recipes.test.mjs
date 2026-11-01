@@ -972,6 +972,8 @@ describe('triggers read the real measure (round 10)', () => {
     assert.equal(withSecrets.context.hasGuardHook, false);
     assert.ok(rec(withSecrets, 'hooks.guard-destructive'), 'offered next to protect-secrets');
     assert.equal(rec(withSecrets, 'hooks.protect-secrets'), undefined, 'protect-secrets itself is recognised');
+    const withFiles = measureOf(risky, inv({ hooks: { total: 1, events: { PreToolUse: 1 }, commands: [hook('node ~/.claude/hooks/protect-files.mjs', 'PreToolUse')] } }));
+    assert.equal(withFiles.context.hasGuardHook, false, 'a file-protection hook is not a destructive-command guard');
   });
 
   it('guard-destructive is not offered when the user has a guard of their own (including a "protect-*" hook)', () => {
