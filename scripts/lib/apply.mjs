@@ -265,7 +265,10 @@ const handlers = {
       if (stillWired && owners.length) {
         const ids = [...new Set(owners.map((p) => p.box.id))];
         const undo = ids.map((id) => `kaizen undo ${id}`).join('; ');
-        io.note(io.say(`${file} still has the ${a.event} hook of an earlier version (shared script, batch ${ids.join(', ')}) next to the new project-specific one, so it runs twice. Remove the old one with: ${undo}`, `в ${file} остался хук ${a.event} прежней версии (общий скрипт, пакет ${ids.join(', ')}) рядом с новым, своим для проекта, поэтому он сработает дважды. Уберите старый: ${undo}`));
+        // the old script is one file for every project (and for the user scope): hooks in other settings files may still run it
+        const others = [...new Set(io.live().filter((p) => p.entry.type === 'settings.hook' && p.entry.identity === legacyId && !samePath(p.entry.file, file)).map((p) => p.box.id))].filter((id) => !ids.includes(id));
+        const shared = others.length ? io.say(`. The old script is shared with other projects (batch ${others.join(', ')}), so it stays until those are undone too`, `. Старый скрипт общий с другими проектами (пакет ${others.join(', ')}), поэтому он останется, пока не откатят и их`) : '';
+        io.note(io.say(`${file} still has the ${a.event} hook of an earlier version (shared script, batch ${ids.join(', ')}) next to the new project-specific one, so it runs twice. Remove the old one with: ${undo}${shared}`, `в ${file} остался хук ${a.event} прежней версии (общий скрипт, пакет ${ids.join(', ')}) рядом с новым, своим для проекта, поэтому он сработает дважды. Уберите старый: ${undo}${shared}`));
       }
     }
     if (!io.dry) io.save(file, settings);
@@ -513,6 +516,7 @@ const handlers = {
     const changed = [];
     const claimed = []; // already off because a batch in force switched it off
     const blocked = []; // on in the organisation's managed settings, which Kaizen never edits
+    let offIn = null; // a file that already switches a plugin off (not one of ours)
     const files = new Map();
     for (const p of plugins) {
       let win = null;
@@ -520,8 +524,12 @@ const handlers = {
         const map = readMap(layer);
         if (map && Object.prototype.hasOwnProperty.call(map, p)) win = { layer, value: map[p] };
       }
-      if (win && !win.value) {
+      const claimOff = () => {
         if (pluginHolders(io, { plugin: p, file: win.layer.file }).length) claimed.push({ plugin: p, file: win.layer.file });
+        else offIn ||= win.layer.file;
+      };
+      if (win && !win.value && win.layer.readOnly) {
+        claimOff(); // off for everybody by the organisation's managed settings
         continue;
       }
       if (win && win.layer.readOnly) {
@@ -529,15 +537,25 @@ const handlers = {
         continue;
       }
       // Switched off in EVERY file that enables it, not only where the winning `true` is: a plugin enabled in the user and in
-      // the project settings would otherwise stay on in every other project. The project file belongs to the repository
-      // and is shared, so a `true` there is switched off for this user in settings.local.json, which comes later in the
-      // order and is not committed.
+      // the project settings would otherwise stay on in every other project, and so would one that is on in the user
+      // settings while a higher layer already switches it off here (off in this project only). The project file belongs
+      // to the repository and is shared, so a `true` there is switched off for this user in settings.local.json, which
+      // comes later in the order and is not committed (unless that file already says `false`).
       const targets = new Set();
       for (const layer of layers) {
         const map = layer.readOnly ? null : readMap(layer);
-        if (map && map[p] === true) targets.add(layer.scope === 'project' ? localLayer : layer);
+        if (!map || map[p] !== true) continue;
+        const target = layer.scope === 'project' ? localLayer : layer;
+        const tmap = readMap(target);
+        if (!(tmap && tmap[p] === false)) targets.add(target);
       }
-      if (!targets.size) targets.add(userLayer); // not mentioned anywhere: the user settings
+      if (!targets.size) {
+        if (win && !win.value) {
+          claimOff(); // already off wherever it was on
+          continue;
+        }
+        targets.add(userLayer); // not mentioned anywhere: the user settings
+      }
       for (const target of targets) {
         const settings = io.load(target.file);
         settings.enabledPlugins ||= {};
@@ -548,7 +566,7 @@ const handlers = {
     }
     if (blocked.length) io.note(io.say(`not disabled (enabled by the managed settings of your organisation, which Kaizen never edits): ${blocked.join(', ')}`, `не выключено (включено управляемыми настройками вашей организации, которые Kaizen не правит): ${blocked.join(', ')}`));
     if (!changed.length) {
-      const skip = { skipped: true, reason: blocked.length && !claimed.length ? io.say('none could be disabled', 'ни один не удалось выключить') : io.t('apply.skip.already_disabled'), file: userLayer.file };
+      const skip = { skipped: true, reason: blocked.length && !claimed.length ? io.say('none could be disabled', 'ни один не удалось выключить') : io.t('apply.skip.already_disabled'), file: claimed.length ? claimed[0].file : offIn || userLayer.file };
       if (!claimed.length) return skip;
       const claim = { type: 'plugins.disable', file: claimed[0].file, changed: [], claimed };
       const providers = claimed.flatMap((c) => pluginHolders(io, c));
@@ -586,6 +604,33 @@ function hookRemoveHolders(io, ref, except) {
   return io
     .live()
     .filter((p) => p.entry.type === 'settings.hook.remove' && p.entry !== except && [...(p.entry.removed || []), ...(p.entry.claimed || [])].some((c) => sameRemovedHook(c, ref)))
+    .sort((x, y) => cmpSeq(x.seq, y.seq));
+}
+
+/** A path as a hook command spells it: forward slashes, and lower case where the file system ignores case (Windows). */
+function foldPath(p) {
+  const s = String(p).replace(/\\/g, '/');
+  return process.platform === 'win32' ? s.toLowerCase() : s;
+}
+
+/** True when a hook command names this very file (not a longer file name that merely starts with its path). */
+function commandRunsFile(command, file) {
+  const hay = foldPath(command);
+  const needle = foldPath(path.resolve(file));
+  for (let i = hay.indexOf(needle); i !== -1; i = hay.indexOf(needle, i + 1)) {
+    if (!/[\w.-]/.test(hay[i + needle.length] || ' ')) return true;
+  }
+  return false;
+}
+
+/**
+ * The hooks in force (outside the batch `exceptBox`) whose command runs a script, oldest first. Batches of 0.1.4 and
+ * earlier record no claim on a script they share, so the hook itself is the only trace that it is still needed.
+ */
+function hookUsersOfFile(io, file, exceptBox) {
+  return io
+    .live()
+    .filter((p) => p.entry.type === 'settings.hook' && p.box !== exceptBox && typeof p.entry.identity === 'string' && commandRunsFile(p.entry.identity, file))
     .sort((x, y) => cmpSeq(x.seq, y.seq));
 }
 
@@ -1003,6 +1048,18 @@ function undoFile(e, io) {
   const cur = sha(text);
   const peers = io.peers(e); // other entries in force that use this file, oldest first
   if (!peers.length) {
+    // A Kaizen script that a hook of another batch in force still runs stays, whatever that batch's journal says (batches
+    // of 0.1.4 and earlier have no claim entry for a script they share); that batch takes the file over, so that its own
+    // undo removes it.
+    const me = io.live().find((p) => p.entry === e);
+    const inState = foldPath(path.resolve(e.file)).startsWith(foldPath(path.resolve(stateDir())) + '/');
+    const users = inState ? hookUsersOfFile(io, e.file, me && me.box) : [];
+    if (users.length) {
+      const heir = users[users.length - 1];
+      heir.recipe.actions.push({ type: 'file', file: e.file, existedBefore: e.existedBefore, hash: e.hash, createdDir: null });
+      io.touch(heir.box);
+      return `shared: ${e.file} still in use by ${recipeNames(users)}`;
+    }
     if (cur !== e.hash && !io.revertEdited) return `kept: ${e.file} modified since apply`;
     io.describe(io.t('undo.plan.delete', { file: e.file }));
     io.removeFile(e.file);

@@ -588,6 +588,26 @@ describe('kaizen end to end: measure, recommend, apply, verify, undo', () => {
     assert.deepEqual(fs.readdirSync(path.join(home.stateDir, 'hooks')), []);
   });
 
+  it('skills.prune-unused: a plugin on in the user settings but off in the project is switched off in the user settings too, and undo gives it back', () => {
+    const home = measured();
+    const proj = path.join(home.root, 'projPlugin');
+    fs.mkdirSync(path.join(proj, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(proj, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { 'x@m': false } }));
+    const userFile = path.join(home.configDir, 'settings.json');
+    const user = JSON.parse(fs.readFileSync(userFile, 'utf8'));
+    user.enabledPlugins = { ...(user.enabledPlugins || {}), 'x@m': true };
+    fs.writeFileSync(userFile, JSON.stringify(user));
+    const before = JSON.parse(fs.readFileSync(userFile, 'utf8'));
+    const args = ['apply', '--recipe', 'skills.prune-unused', '--project', proj, '--param', 'skills.prune-unused.plugins=x@m'];
+    const r = cli(home, args);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(r.stdout.includes(`${userFile}: disable plugins x@m`), r.stdout);
+    assert.equal(JSON.parse(fs.readFileSync(userFile, 'utf8')).enabledPlugins['x@m'], false);
+    assert.ok(!fs.existsSync(path.join(proj, '.claude', 'settings.local.json')));
+    assert.equal(cli(home, ['undo']).status, 0);
+    assert.deepEqual(JSON.parse(fs.readFileSync(userFile, 'utf8')), before);
+  });
+
   it('apply --recipe for a defaultScope-project recipe that was never recommended plans the project settings, not the user ones', () => {
     const home = measured();
     const proj = path.join(home.root, 'projScope');

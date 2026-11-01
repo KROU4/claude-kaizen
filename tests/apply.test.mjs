@@ -2711,16 +2711,71 @@ describe('claims: a batch that relies on what an earlier batch provides', () => 
       assert.equal(readSettings().enabledPlugins['idle@fixture-market'], true);
     });
 
-    it('a plugin the project settings disable although the user settings enable it is already off: nothing is written', () => {
+    it('a plugin the project settings disable although the user settings enable it is off only here: it is switched off in the user settings too, the project and local files are not touched', () => {
       installX();
       writeJson(projSettings(), { enabledPlugins: { 'x@m': false } });
       writeSettings({ ...readSettings(), enabledPlugins: { ...readSettings().enabledPlugins, 'x@m': true } });
+      const userBefore = readSettings();
+      const projBytes = read(projSettings());
+      const { entry } = disable(['x@m']);
+      assert.ok(!entry.skipped, 'other projects would keep the plugin on');
+      assert.equal(entry.file, ctx.settingsFile);
+      assert.equal(readSettings().enabledPlugins['x@m'], false);
+      assert.equal(read(projSettings()), projBytes);
+      assert.ok(!fs.existsSync(localSettings()));
+      assert.deepEqual(entry.changed.map((c) => [c.plugin, c.previous]), [['x@m', true]]);
+      assert.equal(undoEntry(entry).result, 'ok');
+      assert.deepEqual(readSettings(), userBefore);
+    });
+
+    it('user true, project false, local false: only the user settings are written (the local file already says false)', () => {
+      installX();
+      writeJson(projSettings(), { enabledPlugins: { 'x@m': true } });
+      writeJson(localSettings(), { enabledPlugins: { 'x@m': false }, model: 'sonnet' });
+      writeSettings({ ...readSettings(), enabledPlugins: { ...readSettings().enabledPlugins, 'x@m': true } });
+      const localBytes = read(localSettings());
+      const { entry } = disable(['x@m']);
+      assert.deepEqual(entry.changed.map((c) => [c.plugin, c.file || entry.file]), [['x@m', ctx.settingsFile]]);
+      assert.equal(read(localSettings()), localBytes);
+      assert.equal(readSettings().enabledPlugins['x@m'], false);
+    });
+
+    it('a plugin only the project settings mention, as false, is already off: nothing is written, and the message names that file', () => {
+      installX();
+      writeJson(projSettings(), { enabledPlugins: { 'x@m': false } });
       const userBytes = read(ctx.settingsFile);
       const { entry } = disable(['x@m']);
       assert.equal(entry.skipped, true);
       assert.equal(entry.reason, 'already disabled');
+      assert.equal(entry.file, projSettings());
       assert.equal(read(ctx.settingsFile), userBytes);
       assert.ok(!fs.existsSync(localSettings()));
+    });
+
+    it('a plugin the managed settings disable is off for everybody: the user\'s true is left alone', () => {
+      installX();
+      writeJson(path.join(ctx.root, 'managed', 'managed-settings.json'), { enabledPlugins: { 'x@m': false } });
+      writeSettings({ ...readSettings(), enabledPlugins: { ...readSettings().enabledPlugins, 'x@m': true } });
+      const userBytes = read(ctx.settingsFile);
+      const { entry } = disable(['x@m']);
+      assert.equal(entry.skipped, true);
+      assert.equal(read(ctx.settingsFile), userBytes);
+    });
+
+    it('through apply: user true + project false switches the plugin off in the user settings and says so; undo gives it back', async () => {
+      installX();
+      writeJson(projSettings(), { enabledPlugins: { 'x@m': false } });
+      writeSettings({ ...readSettings(), enabledPlugins: { ...readSettings().enabledPlugins, 'x@m': true } });
+      const userBefore = readSettings();
+      addRecipes(customRecipe('custom.off', [{ type: 'plugins.disable', plugins: ['x@m'] }]));
+      const dry = await applyCustom(1, 'custom.off', { 'dry-run': true, project: proj() });
+      assert.ok(dry.stdout.includes(`${ctx.settingsFile}: disable plugins x@m`), dry.stdout);
+      assert.deepEqual(readSettings(), userBefore);
+      const real = await applyCustom(1, 'custom.off', { project: proj() });
+      assert.ok(real.stdout.includes(`${ctx.settingsFile}: disable plugins x@m`), real.stdout);
+      assert.equal(readSettings().enabledPlugins['x@m'], false);
+      await runUndo({}, [batch(1)]);
+      assert.deepEqual(readSettings(), userBefore);
     });
 
     it('a plugin the organisation enables in its managed settings cannot be disabled: it is reported, nothing is written', () => {
@@ -3004,6 +3059,87 @@ describe('hook scripts of a project-scope recipe belong to that project', () => 
         captureOutput(() => apply.cmdApply({ _: ['apply'], flags: { recipe: 'hooks.format-on-edit', scope: 'project', project: projA() } }, { loadMeasure: () => fixtureMeasure, pickLang: () => 'ru' })),
       );
       assert.match(out.stdout, new RegExp(`прежней версии.*kaizen undo ${batch(1)}`));
+    });
+
+    /** What 0.1.4 left for a project that found the shared script already there: the unkeyed hook, and no entry for the script. */
+    function downgradeClaimless(id, proj) {
+      const key = apply.projectKey(proj);
+      const settingsFile = path.join(proj, '.claude', 'settings.json');
+      writeText(settingsFile, read(settingsFile).split(`.${key}.mjs`).join('.mjs'));
+      const manifestFile = path.join(appliedDir(), id, 'manifest.json');
+      const manifest = readJson(manifestFile);
+      for (const r of manifest.recipes) {
+        for (const e of r.actions) if (e.type === 'file') fs.rmSync(e.file, { force: true });
+        r.actions = r.actions.filter((e) => e.type !== 'file');
+        for (const e of r.actions) if (e.type === 'settings.hook') e.identity = e.identity.replace(`.${key}.mjs`, '.mjs');
+      }
+      writeJson(manifestFile, manifest);
+    }
+
+    it('the old script is shared with another project (a 0.1.4 batch without a claim): the note says so, and undoing the old batch keeps the script for that project', async () => {
+      await at(1, { recipe: 'hooks.format-on-edit', scope: 'project', project: projA(), param: ['hooks.format-on-edit.formatter=ruff'] });
+      await at(2, { recipe: 'hooks.format-on-edit', scope: 'project', project: projB(), param: ['hooks.format-on-edit.formatter=ruff'] });
+      downgradeBatch(batch(1), projA());
+      downgradeClaimless(batch(2), projB());
+      assert.deepEqual(hookFiles(), ['format-on-edit.mjs']);
+      const upgrade = await at(3, { recipe: 'hooks.format-on-edit', scope: 'project', project: projA(), param: ['hooks.format-on-edit.formatter=prettier'] });
+      assert.match(upgrade.stdout, new RegExp(`kaizen undo ${batch(1)}\\. The old script is shared with other projects \\(batch ${batch(2)}\\)`));
+      const legacy = path.join(hooksDir(), 'format-on-edit.mjs');
+      const dry = await runUndo({ 'dry-run': true }, [batch(1)]);
+      assert.match(dry.stdout, /format-on-edit\.mjs still in use by hooks\.format-on-edit/);
+      assert.ok(!/format-on-edit\.mjs: delete/.test(dry.stdout), dry.stdout);
+      const real = await runUndo({}, [batch(1)]);
+      assert.equal(normalizeUndoOutput(dry.stdout), normalizeUndoOutput(real.stdout));
+      assert.ok(fs.existsSync(legacy), 'project B\'s hook still runs it');
+      assert.equal(hookCommands(projA()).length, 1);
+      assert.ok(scriptOf(hookCommands(projB())[0]).endsWith('format-on-edit.mjs'));
+      assert.equal(readManifest(batch(1)).undone, true);
+      // project B\'s own undo now owns the file and removes it
+      assert.ok(readManifest(batch(2)).recipes[0].actions.some((e) => e.type === 'file' && samePath(e.file, legacy)));
+      await runUndo({}, [batch(2)]);
+      assert.ok(!fs.existsSync(legacy));
+      assert.deepEqual(hookFiles(), [`format-on-edit.${apply.projectKey(projA())}.mjs`]);
+    });
+
+    it('the script goes when no other hook runs it, and the Russian note names the shared script too', async () => {
+      await at(1, { recipe: 'hooks.format-on-edit', scope: 'project', project: projA(), param: ['hooks.format-on-edit.formatter=ruff'] });
+      await at(2, { recipe: 'hooks.format-on-edit', scope: 'project', project: projB(), param: ['hooks.format-on-edit.formatter=ruff'] });
+      downgradeBatch(batch(1), projA());
+      downgradeClaimless(batch(2), projB());
+      const ru = await withFrozenDate('2026-10-30T14:00:03.000Z', () =>
+        captureOutput(() => apply.cmdApply({ _: ['apply'], flags: { recipe: 'hooks.format-on-edit', scope: 'project', project: projA() } }, { loadMeasure: () => fixtureMeasure, pickLang: () => 'ru' })),
+      );
+      assert.match(ru.stdout, new RegExp(`Старый скрипт общий с другими проектами \\(пакет ${batch(2)}\\)`));
+      await runUndo({}, [batch(2)]); // project B first: its hook goes, the script is still the journal of A's old batch
+      assert.ok(fs.existsSync(path.join(hooksDir(), 'format-on-edit.mjs')), 'A\'s old hook still runs it');
+      await runUndo({}, [batch(1)]);
+      assert.deepEqual(hookFiles(), [`format-on-edit.${apply.projectKey(projA())}.mjs`]);
+    });
+
+    describe('what counts as a hook that runs the script', () => {
+      const old = '2026-01-01T00-00-00';
+      const later = '2026-01-01T00-00-01';
+      const manifest = (id, actions) => writeJson(path.join(appliedDir(), id, 'manifest.json'), { id, at: '2026-01-01T00:00:00.000Z', kitVersion: '0.1.4', lang: 'en', projectDir: ctx.root, dry: false, recipes: [{ id: 'old.recipe', scope: 'user', params: {}, actions }] });
+      const setup = (command) => {
+        const script = path.join(hooksDir(), 'shared.mjs');
+        writeText(script, '// shared\n');
+        manifest(old, [{ type: 'file', file: script, existedBefore: false, hash: apply.__test.sha('// shared\n'), createdDir: null }]);
+        manifest(later, [{ type: 'settings.hook', file: ctx.settingsFile, event: 'Stop', matcher: null, identity: `command|${command(script)}` }]);
+        return script;
+      };
+
+      it('backslashes (and, on Windows, another letter case) in the command still name the script', async () => {
+        const script = setup((s) => `node "${(process.platform === 'win32' ? s.toUpperCase() : s).replace(/\//g, '\\')}"`);
+        const out = await runUndo({}, [old]);
+        assert.match(out.stdout, /shared\.mjs still in use by old\.recipe/);
+        assert.ok(fs.existsSync(script));
+      });
+
+      it('a longer file name that merely starts with the same path is not a use: the script goes', async () => {
+        const script = setup((s) => `node "${toPosix(s)}.bak"`);
+        await runUndo({}, [old]);
+        assert.ok(!fs.existsSync(script));
+      });
     });
 
     it('no note when there is no old hook (a fresh project, or a second batch of the new kind)', async () => {
