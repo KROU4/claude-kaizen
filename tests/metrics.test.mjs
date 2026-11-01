@@ -457,10 +457,36 @@ describe('friction', () => {
       assert.deepEqual(scenario({ event: 'PreToolUse', matcher: 'Bash', opps: { toolUses: { Bash: 40 } } }).f.failingHookCommands, [command], '30 of 40 runs');
     });
 
-    it('treats an empty or * matcher as every tool and an MCP pattern as a regex over the whole tool name', () => {
+    it('treats an empty or * matcher as every tool and an MCP pattern as an unanchored regex', () => {
       assert.equal(scenario({ event: 'PostToolUse', matcher: '*', opps: { toolUses: { Bash: 100, mcp__a__b: 50 } } }).h.runs, 150);
       assert.equal(scenario({ event: 'PostToolUse', matcher: '', opps: { toolUses: { Bash: 100, mcp__a__b: 50 } } }).h.runs, 150);
-      assert.equal(scenario({ event: 'PostToolUse', matcher: 'mcp__a__.*', opps: { toolUses: { Bash: 100, mcp__a__b: 50, mcp__a__c: 10, xmcp__a__b: 7 } } }).h.runs, 60);
+      assert.equal(scenario({ event: 'PostToolUse', matcher: 'mcp__a__.*', opps: { toolUses: { Bash: 100, mcp__a__b: 50, mcp__a__c: 10, xmcp__a__b: 7 } } }).h.runs, 67, 'Claude Code tests the regex anywhere in the name');
+    });
+
+    it('reads a hook matcher the way Claude Code does: a list split on | or , (trimmed), otherwise an unanchored regex', () => {
+      const uses = { Edit: 300, Write: 100, Bash: 50, mcp__filesystem__write_file: 40, Editor: 9 };
+      for (const matcher of ['Edit, Write', 'Edit | Write', 'Edit|Write', ' Edit ,Write,']) {
+        const { f, h } = scenario({ event: 'PostToolUse', matcher, errors: 25, opps: { toolUses: uses } });
+        assert.equal(h.runs, 400, matcher);
+        assert.equal(h.failureRate, 0.063, matcher);
+        assert.deepEqual(f.failingHookCommands, [], matcher);
+      }
+      assert.equal(scenario({ event: 'PreToolUse', matcher: 'mcp__.*__write', errors: 25, opps: { toolUses: uses } }).h.runs, 40);
+      assert.equal(scenario({ event: 'PreToolUse', matcher: 'Edit.*', errors: 25, opps: { toolUses: uses } }).h.runs, 309, 'unanchored: Editor matches too');
+      const start = scenario({ event: 'SessionStart', errors: 1, matcher: 'startup, compact', compactions: 3 });
+      assert.equal(start.h.runs, 4, 'a comma list works for SessionStart as well');
+    });
+
+    it('does not offer a hook on an event without a run count when its recorded runs show a low failure rate (25 errors in 500 recorded)', () => {
+      for (const event of ['Notification', 'PreCompact', 'SessionEnd', 'SubagentStart']) {
+        const { f, h } = scenario({ event, errors: 25, recorded: 500 });
+        assert.equal(h.runs, null, event);
+        assert.equal(h.failureRate, null, event);
+        assert.equal(h.runsRecorded, 500, event);
+        assert.deepEqual(f.failingHookCommands, [], event);
+      }
+      assert.deepEqual(scenario({ event: 'Notification', errors: 25, recorded: 50 }).f.failingHookCommands.length, 1, 'half of the recorded runs fail: still offered');
+      assert.deepEqual(scenario({ event: 'Notification', errors: 25, recorded: 51 }).f.failingHookCommands, [], 'just under half of the recorded runs');
     });
 
     it('counts a UserPromptSubmit hook against the prompts and a SessionStart hook against sessions plus compactions', () => {

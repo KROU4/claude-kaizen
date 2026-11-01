@@ -10,17 +10,27 @@ export const MEASURE_VERSION = 1;
 export const MIN_SESSIONS_FOR_UNUSED = 3;
 /**
  * A configured hook is offered for removal only when it failed at least this many times AND, when its runs can be counted,
- * in at least this share of them. When they cannot (see hookRunCount) the rate is unknown and the error count decides alone.
+ * in at least this share of them. When they cannot (see hookRunCount) the rate is unknown, but the recorded runs are a lower
+ * bound on the runs, so errors / recorded is an upper bound on the rate: the hook is offered only if even that reaches the share.
  */
 export const FAILING_HOOK_MIN_ERRORS = 20;
 export const FAILING_HOOK_MIN_RATE = 0.5;
 
-/** The tool names a hook matcher selects: '' and '*' select every tool, anything else is a regex over the whole name. null = not usable. */
+/**
+ * The names a hook matcher selects, with Claude Code's own rules: '' and '*' select everything; a matcher made only of
+ * letters, digits, _ | , space and - is an exact list split on | or , (entries trimmed), so 'Edit, Write' and 'Edit | Write'
+ * select Edit and Write; anything else is a regex tested anywhere in the name, unanchored ('mcp__.*__write' selects
+ * mcp__filesystem__write_file). null = not a usable pattern.
+ */
 function matcherTest(matcher) {
   const m = String(matcher || '').trim();
   if (!m || m === '*') return () => true;
+  if (/^[a-zA-Z0-9_|, -]+$/.test(m)) {
+    const names = new Set(m.split(/[|,]/).map((x) => x.trim()).filter(Boolean));
+    return (name) => names.has(name);
+  }
   try {
-    const re = new RegExp(`^(?:${m})$`);
+    const re = new RegExp(m);
     return (name) => re.test(name);
   } catch {
     return null;
@@ -571,7 +581,7 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
     hookNonBlockingErrors: hookNonBlocking,
     hookErrorSamples,
     failingHooks,
-    failingHookCommands: failingHooks.filter((h) => h.configured && h.errors >= FAILING_HOOK_MIN_ERRORS && (h.failureRate === null || h.failureRate >= FAILING_HOOK_MIN_RATE)).map((h) => h.configuredCommand),
+    failingHookCommands: failingHooks.filter((h) => h.configured && h.errors >= FAILING_HOOK_MIN_ERRORS && (h.failureRate ?? h.errors / Math.max(h.runsRecorded, h.errors)) >= FAILING_HOOK_MIN_RATE).map((h) => h.configuredCommand),
     slowHooks,
     hookTimeouts,
     slowCommands: tools.slowCommandsTotal,
@@ -901,7 +911,7 @@ export const METRIC_DOCS = {
   'friction.hookNonBlockingErrors': 'Hook runs that reported an error (non-blocking)',
   'friction.hookRuns': 'Hook runs Claude Code recorded (a lower bound: a hook that succeeds without output leaves no record)',
   'friction.hookRunsEstimated': 'Hook runs with every configured hook raised to the runs it had the chance to make (prompts, tool uses of its matcher, sessions) in the window; failure rates use only the sessions where that hook left a record',
-  'friction.failingHookCommands': 'Configured hook commands that failed 20+ times in the window and, when their runs can be counted, in at least half of them',
+  'friction.failingHookCommands': 'Configured hook commands that failed 20+ times in the window and, when their runs can be counted, in at least half of them (when they cannot, in at least half of the runs that were recorded)',
   'friction.slowHooks': 'Hooks averaging 1.5 s+ or peaking at 10 s+ (completed runs only)',
   'friction.hookTimeouts': 'Hooks that were killed for exceeding their timeout: count and the configured limit',
   'autonomy.askUserQuestions': 'AskUserQuestion tool uses',
