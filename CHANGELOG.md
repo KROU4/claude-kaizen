@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [0.1.10] — 2026-11-01
+
+### Fixed
+- `verify-before-stop`: Gradle/Maven detection runs in linear time (a command with dozens of flags no longer stalls the Stop hook), accepts flags with values (`mvn -pl core -am test`, `mvn -Dtest=Foo#bar test`, `./gradlew -p backend test`, `./gradlew :app:test`) and goals followed by `;`, `)`, `>` or `&&`, and no longer counts `./gradlew build -x test` (tests excluded) as a test run.
+- `guard-destructive`: cmd.exe `rd /s/q` (combined switches) and `rd /s /q a=C:\` (`=` as a separator) are judged like `rd /s /q C:\`.
+- Destructive-command guards are recognised by the words in their name (`protect-main`, `protect-git`, `protect-file-deletion`, `branch-protection`, …), while secret, env and file protectors (`protect-secrets`, `protect-env-vars`, `protect-files`) are not, so `hooks.guard-destructive` is offered next to the latter.
+- `permissions.allowlist-readonly`: a blanket `Bash` / `Bash(*)` allow rule or a `Bash(git diff*)` prefix rule counts as already allowing the covered commands.
+- `skills.prune-unused`: a plugin whose slash command or skill (`plugin:name`) was used is not offered for disabling.
+
+### Known issues
+- `guard-destructive` judges SQL `DROP`/`TRUNCATE` text by the command that owns it. Some indirect routes reach an interpreter without being blocked: SQL written to a file and run by `npx prisma db execute --file`, `>(...)` output process substitution, `printf -v`, PowerShell `(...)` grouping, and `cmd /c "rd /s /q a;C:\"` (`;` inside a cmd script). A rewrite that closed these opened other gaps in review and was held back.
+- `verify-before-stop` still counts `mvn -DskipTests verify` and `mvn -P test package` as test runs, and misses monorepo forms such as `pnpm --filter web test`.
+
 ## [0.1.9] — 2026-11-01
 
 ### Fixed

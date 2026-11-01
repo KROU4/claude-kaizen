@@ -23,8 +23,8 @@ No install at all: ask Claude Code to *"clone https://github.com/KROU4/claude-ka
 Just the numbers, from a shell:
 
 ```bash
-npx github:KROU4/claude-kaizen#v0.1.9 measure
-npx github:KROU4/claude-kaizen#v0.1.9 recommend
+npx github:KROU4/claude-kaizen#v0.1.10 measure
+npx github:KROU4/claude-kaizen#v0.1.10 recommend
 ```
 
 ## What it does
