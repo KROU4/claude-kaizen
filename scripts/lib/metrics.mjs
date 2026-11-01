@@ -27,20 +27,74 @@ function matcherTest(matcher) {
   }
 }
 
+/** True when a session ran in the project (or below it); unknown on either side counts as inside, so nothing is dropped on a guess. */
+function inProject(cwd, projectDir) {
+  if (!projectDir || !cwd) return true;
+  const norm = (p) => String(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  const c = norm(cwd);
+  const p = norm(projectDir);
+  return c === p || c.startsWith(`${p}/`);
+}
+
 /**
- * How many times a hook had the chance to run: prompts for UserPromptSubmit, sessions (plus compactions) for SessionStart,
- * the tool uses of the tools its matcher selects for PreToolUse / PostToolUse, the failed ones for PostToolUseFailure.
+ * How many times a hook had the chance to run in ONE session, from `snap` on (see hooks.oppsSince; null = the whole session,
+ * which is what the callers pass). `tests` are the matchers that apply to this session.
+ * UserPromptSubmit: the prompts. SessionStart: one start (matcher startup|resume|clear) plus the compactions (matcher compact).
+ * PreToolUse: the tool uses its matcher selects. PostToolUse: the same minus the failed ones (it does not run on a failure).
+ * PostToolUseFailure: the failed ones. The run that wrote the first record is counted (+1) whichever line came first.
+ * null when the event has no such count.
+ */
+function sessionOpportunities(event, tests, s, snap) {
+  const since = snap || {};
+  const trigger = snap ? 1 : 0;
+  const prompts = s.userMessages || 0;
+  if (event === 'UserPromptSubmit') return Math.min(prompts, Math.max(0, prompts - (since.prompts || 0)) + trigger);
+  if (event === 'SessionStart') {
+    const match = (source) => tests.some((x) => x(source));
+    return (['startup', 'resume', 'clear'].some(match) ? 1 : 0) + (match('compact') ? Math.max(0, (s.compactions || 0) - (since.compactions || 0)) : 0);
+  }
+  const opps = (s.hooks && s.hooks.opps) || {};
+  const uses = opps.toolUses || {};
+  const fails = opps.toolFailures || {};
+  const delta = (cur, base, name) => Math.max(0, (cur[name] || 0) - ((base && base[name]) || 0));
+  let n = 0;
+  for (const name of new Set([...Object.keys(uses), ...Object.keys(fails)])) {
+    if (!tests.some((x) => x(name))) continue;
+    const used = delta(uses, since.toolUses, name);
+    const failed = delta(fails, since.toolFailures, name);
+    n += event === 'PreToolUse' ? used : event === 'PostToolUse' ? Math.max(0, used - failed) : failed;
+  }
+  return n > 0 ? n + trigger : 0;
+}
+
+/**
+ * How many times a hook had the chance to run, summed over the sessions in which it left at least one record (a session
+ * without a record says nothing about this hook: it may not have existed yet, or belong to another project). `entries` are
+ * the configured {matcher, scope} of the hook; a project or local entry applies only to sessions of the project.
  * null when there is no such count (other events, or a matcher that is unknown or not a valid pattern).
  */
-function hookOpportunities(event, matchers, ctx) {
-  if (event === 'UserPromptSubmit') return ctx.prompts;
-  if (event === 'SessionStart') return ctx.sessions + ctx.compactions;
-  const byTool = event === 'PreToolUse' || event === 'PostToolUse' ? ctx.toolUses : event === 'PostToolUseFailure' ? ctx.toolFailures : null;
-  if (!byTool || !matchers.length) return null;
-  const tests = matchers.map(matcherTest);
-  if (tests.some((x) => !x)) return null;
+function hookOpportunities(event, entries, records, projectDir) {
+  if (!['UserPromptSubmit', 'SessionStart', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure'].includes(event)) return null;
+  const takesMatcher = event !== 'UserPromptSubmit' && event !== 'SessionStart';
+  if (takesMatcher && !entries.length) return null; // not in any settings file: its matcher is unknown
+  // an unconfigured UserPromptSubmit / SessionStart hook is counted without a matcher
+  const applicable = entries.length ? entries : [{ matcher: '', scope: 'user' }];
   let n = 0;
-  for (const [name, c] of Object.entries(byTool)) if (tests.some((x) => x(name))) n += c;
+  for (const { s, snap, recorded } of records) {
+    const here = inProject(s.cwd, projectDir);
+    const tests = [];
+    for (const e of applicable) {
+      if ((e.scope === 'project' || e.scope === 'local') && !here) continue;
+      const test = event === 'UserPromptSubmit' ? () => true : matcherTest(e.matcher);
+      if (!test) return null;
+      tests.push(test);
+    }
+    // A session of another project can hold a hook of the same text that is not this one: only its recorded runs are certain.
+    // The whole session is counted, not only from the first record on: silent successes leave no trace, so the first record
+    // is usually a failure, and counting from it would inflate the failure rate of a hook that fails late in a session.
+    void snap;
+    n += tests.length ? Math.max(recorded, sessionOpportunities(event, tests, s, null)) : recorded;
+  }
   return n;
 }
 
@@ -50,9 +104,9 @@ function hookOpportunities(event, matchers, ctx) {
  * hook that ran) the recorded runs are a lower bound, and runs == errors would make any hook look like it fails every time.
  * Those events use max(recorded, opportunities) when the opportunities are known and at least the errors; otherwise null.
  */
-function hookRunCount(event, errors, recorded, matchers, ctx) {
+function hookRunCount(event, errors, recorded, entries, records, projectDir) {
   if (event === 'Stop' || event === 'SubagentStop') return recorded > 0 && recorded >= errors ? recorded : null;
-  const opps = hookOpportunities(event, matchers, ctx);
+  const opps = hookOpportunities(event, entries, records, projectDir);
   return opps !== null && opps >= errors ? Math.max(recorded, opps) : null;
 }
 
@@ -390,24 +444,41 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
   for (const c of inventory.hooks.commands) {
     const k = `${c.event}|${normalizeCmd(c.command)}`;
     if (!matchersOf.has(k)) matchersOf.set(k, []);
-    matchersOf.get(k).push(c.matcher || '');
+    matchersOf.get(k).push({ matcher: c.matcher || '', scope: c.scope || 'user' });
   }
-  const oppCtx = { prompts: sum(S, (s) => s.userMessages), sessions: S.length, compactions: sum(S, (s) => s.compactions), toolUses: {}, toolFailures: {} };
+  // the sessions in which each `event|normalized command` left a record, with the counters at its first record there
+  const recordsOf = new Map();
   for (const s of S) {
-    merge(oppCtx.toolUses, s.hooks.opps && s.hooks.opps.toolUses);
-    merge(oppCtx.toolFailures, s.hooks.opps && s.hooks.opps.toolFailures);
+    const seen = new Map();
+    const normKeyOf = (key) => `${key.slice(0, key.indexOf('|'))}|${normalizeCmd(key.slice(key.indexOf('|') + 1))}`;
+    const note = (key, snap) => {
+      const k = normKeyOf(key);
+      if (!seen.has(k)) seen.set(k, { snap: null, recorded: 0 });
+      if (snap && !seen.get(k).snap) seen.get(k).snap = snap;
+    };
+    for (const key of Object.keys(s.hooks.oppsSince || {})) note(key, s.hooks.oppsSince[key]);
+    for (const key of [...Object.keys(s.hooks.runsByCommand || {}), ...Object.keys(s.hooks.errorsByCommand || {})]) note(key, null);
+    for (const [key, n] of Object.entries(s.hooks.runsByCommand || {})) seen.get(normKeyOf(key)).recorded += n;
+    for (const [k, { snap, recorded }] of seen) {
+      if (!recordsOf.has(k)) recordsOf.set(k, []);
+      recordsOf.get(k).push({ s, snap, recorded });
+    }
   }
+  const projectDir = env.projectDir || null;
   const recordedNorm = {}; // recorded runs by `event|normalized command`
   for (const [key, n] of Object.entries(hookRunsByCommand)) {
     const idx = key.indexOf('|');
     const k = `${key.slice(0, idx)}|${normalizeCmd(key.slice(idx + 1))}`;
     recordedNorm[k] = (recordedNorm[k] || 0) + n;
   }
-  // total runs: the recorded ones are a lower bound, so every configured hook is raised to its known run count
+  // Total runs: the recorded ones are a lower bound, so every configured hook is raised to the runs it had the chance to make
+  // in every session of the window (a hook that always succeeds silently leaves no record at all). The failure rate below is
+  // stricter: it counts only the sessions where the hook left a record.
+  const everySession = S.map((s) => ({ s, snap: null, recorded: 0 }));
   let hookRunsEstimated = sum(Object.entries(recordedNorm).filter(([k]) => !matchersOf.has(k)), ([, n]) => n);
   for (const [k, matchers] of matchersOf) {
     const recorded = recordedNorm[k] || 0;
-    hookRunsEstimated += hookRunCount(k.slice(0, k.indexOf('|')), 0, recorded, matchers, oppCtx) ?? recorded;
+    hookRunsEstimated += hookRunCount(k.slice(0, k.indexOf('|')), 0, recorded, matchers, everySession, projectDir) ?? recorded;
   }
   const failingHooks = Object.entries(errorsByCommand)
     .map(([key, errors]) => {
@@ -420,7 +491,8 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
       // runs of this very hook (same event and command as the errors, any outcome). hookDurations is keyed by script name and would
       // mix hooks that share it. null = not countable (see hookRunCount): the rate is unknown and the digest says so.
       const recorded = hookRunsByCommand[key] || 0;
-      const runs = hookRunCount(event, errors, recorded, matchersOf.get(`${event}|${normalizeCmd(command)}`) || [], oppCtx);
+      const normKey = `${event}|${normalizeCmd(command)}`;
+      const runs = hookRunCount(event, errors, recorded, matchersOf.get(normKey) || [], recordsOf.get(normKey) || [], projectDir);
       return {
         event,
         command: redact(command),
@@ -828,7 +900,7 @@ export const METRIC_DOCS = {
   'friction.timeouts': 'Timed-out tool calls plus timeout-looking errors',
   'friction.hookNonBlockingErrors': 'Hook runs that reported an error (non-blocking)',
   'friction.hookRuns': 'Hook runs Claude Code recorded (a lower bound: a hook that succeeds without output leaves no record)',
-  'friction.hookRunsEstimated': 'Hook runs with every configured hook raised to the runs it had the chance to make (prompts, tool uses of its matcher, sessions)',
+  'friction.hookRunsEstimated': 'Hook runs with every configured hook raised to the runs it had the chance to make (prompts, tool uses of its matcher, sessions) in the window; failure rates use only the sessions where that hook left a record',
   'friction.failingHookCommands': 'Configured hook commands that failed 20+ times in the window and, when their runs can be counted, in at least half of them',
   'friction.slowHooks': 'Hooks averaging 1.5 s+ or peaking at 10 s+ (completed runs only)',
   'friction.hookTimeouts': 'Hooks that were killed for exceeding their timeout: count and the configured limit',

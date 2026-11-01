@@ -923,3 +923,17 @@ describe('recommendation summaries name the script apply will really write', () 
     assert.notEqual(projectKey(dir), projectKey(dir + '2'));
   });
 });
+
+describe('cost wording in the catalog (round 8)', () => {
+  it('says that totals.costUSD is the cost of whole sessions, not of the window (totals.costInWindowUSD is the one inside it)', () => {
+    for (const r of loadCatalog().recipes) {
+      for (const lang of ['en', 'ru']) {
+        for (const field of ['why', 'evidence', 'title']) {
+          const text = r[field] && r[field][lang];
+          if (!text || !text.includes('totals.costUSD')) continue;
+          assert.match(text, lang === 'en' ? /whole sessions/ : /сессии целиком/, `${r.id}.${field}.${lang}: ${text}`);
+        }
+      }
+    }
+  });
+});

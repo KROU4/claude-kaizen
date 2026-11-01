@@ -343,7 +343,7 @@ Generated from `recipes/catalog.json` (31 recipes). Do not edit by hand; run `no
 | `friction.timeouts` | Timed-out tool calls plus timeout-looking errors |
 | `friction.hookNonBlockingErrors` | Hook runs that reported an error (non-blocking) |
 | `friction.hookRuns` | Hook runs Claude Code recorded (a lower bound: a hook that succeeds without output leaves no record) |
-| `friction.hookRunsEstimated` | Hook runs with every configured hook raised to the runs it had the chance to make (prompts, tool uses of its matcher, sessions) |
+| `friction.hookRunsEstimated` | Hook runs with every configured hook raised to the runs it had the chance to make (prompts, tool uses of its matcher, sessions) in the window; failure rates use only the sessions where that hook left a record |
 | `friction.failingHookCommands` | Configured hook commands that failed 20+ times in the window and, when their runs can be counted, in at least half of them |
 | `friction.slowHooks` | Hooks averaging 1.5 s+ or peaking at 10 s+ (completed runs only) |
 | `friction.hookTimeouts` | Hooks that were killed for exceeding their timeout: count and the configured limit |

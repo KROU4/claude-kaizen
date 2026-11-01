@@ -433,10 +433,11 @@ describe('friction', () => {
     });
 
     // a hook configured for `event` with `matcher`, failing `errors` times, plus the opportunity counters of the session
-    const scenario = ({ event, matcher = '', errors = 30, recorded = errors, opps = {}, userMessages = 0, command = 'node scenario-hook.mjs' }) => {
+    const scenario = ({ event, matcher = '', errors = 30, recorded = errors, opps = {}, userMessages = 0, compactions = 0, command = 'node scenario-hook.mjs' }) => {
       const withHook = { ...inv, hooks: { ...inv.hooks, commands: [...inv.hooks.commands, { event, matcher, command, file: 'settings.json' }] } };
       const s = makeSession({
         userMessages,
+        compactions,
         hooks: {
           ...newSessionSummary('/p/s.jsonl').hooks,
           errorsByCommand: { [`${event}|${command}`]: errors },
@@ -467,12 +468,12 @@ describe('friction', () => {
       assert.equal(prompts.h.runs, 3000);
       assert.equal(prompts.h.failureRate, 0.008);
       assert.deepEqual(prompts.f.failingHookCommands, []);
-      const start = scenario({ event: 'SessionStart', errors: 2 });
-      assert.equal(start.h.runs, 3, 'the scenario session and its two paddings');
-      assert.equal(start.h.failureRate, 0.667);
+      const start = scenario({ event: 'SessionStart', errors: 1, matcher: 'startup|resume|clear|compact', compactions: 4 });
+      assert.equal(start.h.runs, 5, 'one start of the session that left a record plus its 4 compactions; the paddings left no record');
+      assert.equal(start.h.failureRate, 0.2);
       const tooMany = scenario({ event: 'SessionStart', errors: 25 }).h;
-      assert.equal(tooMany.runs, null, 'more errors than sessions: the count does not describe this hook, so the rate is unknown');
-      assert.equal(tooMany.failureRate, null);
+      assert.equal(tooMany.runs, 25, 'more recorded runs than starts: the recorded runs are the lower bound');
+      assert.equal(tooMany.failureRate, 1);
     });
 
     it('counts a PostToolUseFailure hook against the failed tool uses', () => {
@@ -509,6 +510,88 @@ describe('friction', () => {
       const h = buildMeasure({ sessions: [s, ...padding()], inventory: inv, insights: null, env: ENV }).friction.failingHooks.find((x) => x.command === 'node gone.mjs');
       assert.equal(h.runs, null);
       assert.equal(h.failureRate, null);
+    });
+
+    describe('opportunities are counted where the hook left a record (round 8)', () => {
+      const command = 'node .claude/hooks/lint.mjs';
+      const key = (event) => `${event}|${command}`;
+      const withEntries = (event, entries) => ({ ...inv, hooks: { ...inv.hooks, commands: [...inv.hooks.commands, ...entries.map((e) => ({ event, command, file: 'settings.json', matcher: '', ...e }))] } });
+      // a session that left `errors` records of the hook (and optionally the counters at its first one) and did `uses` tool uses
+      const sess = ({ event = 'PostToolUse', errors = 0, uses = {}, failures = {}, since = null, cwd = null, userMessages = 0, compactions = 0 }) =>
+        makeSession({
+          cwd,
+          userMessages,
+          compactions,
+          hooks: {
+            ...newSessionSummary('/p/s.jsonl').hooks,
+            errorsByCommand: errors ? { [key(event)]: errors } : {},
+            runsByCommand: errors ? { [key(event)]: errors } : {},
+            oppsSince: since ? { [key(event)]: since } : {},
+            opps: { toolUses: uses, toolFailures: failures },
+          },
+        });
+      const run = (sessions, inventoryWith, projectDir = null) => {
+        const f = buildMeasure({ sessions: [...sessions, ...padding()], inventory: inventoryWith, insights: null, env: { ...ENV, projectDir } }).friction;
+        return { f, h: f.failingHooks.find((x) => x.command === command) };
+      };
+
+      it('ignores the sessions in which the hook left no record: an always-failing project hook is still offered (30 of 30, 1200 edits elsewhere)', () => {
+        const mine = sess({ errors: 30, uses: { Edit: 30 } });
+        const others = [1, 2, 3].map(() => sess({ uses: { Edit: 400 } }));
+        const { f, h } = run([mine, ...others], withEntries('PostToolUse', [{ matcher: 'Edit', scope: 'project' }]), '/work/proj');
+        assert.equal(h.runs, 30);
+        assert.equal(h.failureRate, 1);
+        assert.deepEqual(f.failingHookCommands, [command]);
+      });
+
+      it('counts only the sessions of the project for a project-scope hook, and every session for a user-scope one', () => {
+        const here = sess({ errors: 25, uses: { Edit: 25 }, cwd: 'C:\\Work\\Proj\\sub' });
+        const elsewhere = sess({ errors: 1, uses: { Edit: 1000 }, cwd: 'C:\\Work\\Other' });
+        assert.equal(run([here, elsewhere], withEntries('PostToolUse', [{ matcher: 'Edit', scope: 'project' }]), 'C:\\Work\\Proj').h.runs, 26, 'the other project adds its recorded run only');
+        assert.equal(run([here, elsewhere], withEntries('PostToolUse', [{ matcher: 'Edit', scope: 'user' }]), 'C:\\Work\\Proj').h.runs, 1025);
+        assert.equal(run([here, elsewhere], withEntries('PostToolUse', [{ matcher: 'Edit', scope: 'project' }, { matcher: 'Edit', scope: 'user' }]), 'C:\\Work\\Proj').h.runs, 1025, 'a user entry of the same command applies everywhere');
+        assert.equal(run([here, elsewhere], withEntries('PostToolUse', [{ matcher: 'Edit', scope: 'project' }]), 'C:\\Work\\Pro').h.runs, 26, 'a sibling folder with the same prefix is not inside the project');
+      });
+
+      it('takes the failed tool uses off a PostToolUse hook (it does not run on them) and keeps them for PostToolUseFailure', () => {
+        const s = sess({ errors: 100, uses: { Bash: 250 }, failures: { Bash: 150 } });
+        const post = run([s], withEntries('PostToolUse', [{ matcher: 'Bash', scope: 'user' }]));
+        assert.equal(post.h.runs, 100);
+        assert.deepEqual(post.f.failingHookCommands, [command]);
+        const fail = sess({ event: 'PostToolUseFailure', errors: 100, uses: { Bash: 250 }, failures: { Bash: 150 } });
+        assert.equal(run([fail], withEntries('PostToolUseFailure', [{ matcher: 'Bash', scope: 'user' }])).h.runs, 150);
+      });
+
+      it('counts the whole session, not from the first record (silent successes before it are real runs)', () => {
+        // the first record is usually a failure, so starting there would inflate the rate of a hook that fails late
+        const s = sess({ errors: 25, uses: { Edit: 2025 }, since: { toolUses: { Edit: 2000 }, toolFailures: {}, prompts: 0, compactions: 0 } });
+        const { f, h } = run([s], withEntries('PostToolUse', [{ matcher: 'Edit|Write', scope: 'user' }]));
+        assert.equal(h.runs, 2025);
+        assert.deepEqual(f.failingHookCommands, [], 'a conservative rate: never offer a mostly healthy hook for removal');
+      });
+
+      it('a session with a record counts at least its recorded runs (no off-by-one when the record is on the last call)', () => {
+        const sessions = Array.from({ length: 25 }, () => sess({ errors: 1, uses: { Edit: 1 } }));
+        const { f, h } = run(sessions, withEntries('PostToolUse', [{ matcher: 'Edit', scope: 'user' }]));
+        assert.equal(h.runs, 25);
+        assert.equal(h.failureRate, 1);
+        assert.deepEqual(f.failingHookCommands, [command]);
+      });
+
+      it('counts a SessionStart hook with the sources its matcher selects', () => {
+        const ev = 'SessionStart';
+        const s = sess({ event: ev, errors: 1, compactions: 3 });
+        assert.equal(run([s], withEntries(ev, [{ matcher: 'startup|resume|clear|compact', scope: 'user' }])).h.runs, 4);
+        assert.equal(run([s], withEntries(ev, [{ matcher: 'startup', scope: 'user' }])).h.runs, 1, 'the compactions are not a startup');
+        assert.equal(run([s], withEntries(ev, [{ matcher: 'compact', scope: 'user' }])).h.runs, 3, 'no session start for a compact-only matcher');
+      });
+
+      it('counts a UserPromptSubmit hook against the prompts of the sessions where it left a record', () => {
+        const ev = 'UserPromptSubmit';
+        const s = sess({ event: ev, errors: 30, userMessages: 40 });
+        const quiet = sess({ event: ev, userMessages: 5000 });
+        assert.equal(run([s, quiet], withEntries(ev, [{ matcher: '', scope: 'user' }])).h.runs, 40);
+      });
     });
 
     it('raises the total hook runs to what the configured hooks ran, next to the recorded ones', () => {

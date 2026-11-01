@@ -12,7 +12,7 @@ import { readJsonl } from './jsonl.mjs';
 import { redact, snippet } from './redact.mjs';
 import { ensureDir, readJsonSafe, writeJsonAtomic } from './paths.mjs';
 
-export const SUMMARY_VERSION = 23;
+export const SUMMARY_VERSION = 24;
 
 const INTERRUPT_RE = /\[Request interrupted by user/;
 const COMPACT_RE = /^This session is being continued from a previous conversation/;
@@ -274,8 +274,11 @@ export function newSessionSummary(file) {
     // that succeeds without output leaves no attachment (see the hook_* branch of summarizeTranscript), so for every event except
     // Stop / SubagentStop it is a lower bound. opps counts what a hook had the chance to run on (tool uses and tool failures by
     // tool name, main session and subagents), metrics turns it into the run count of a hook with a known matcher.
+    // oppsSince holds, per `event|command` that left a record in THIS session, the counters at its first record ({toolUses,
+    // toolFailures, prompts, compactions}): metrics counts opportunities only in the sessions where the hook left a record and
+    // only from that point on, so the sessions before the hook existed (or of other projects) do not dilute its failure rate.
     // durations/timeouts are keyed by hookKey() (script name), which two hooks or two events can share.
-    hooks: { summaries: 0, hookRuns: 0, errors: 0, events: {}, durations: {}, timeouts: {}, nonBlockingErrors: 0, errorSamples: [], errorsByCommand: {}, runsByCommand: {}, opps: { toolUses: {}, toolFailures: {} } },
+    hooks: { summaries: 0, hookRuns: 0, errors: 0, events: {}, durations: {}, timeouts: {}, nonBlockingErrors: 0, errorSamples: [], errorsByCommand: {}, runsByCommand: {}, opps: { toolUses: {}, toolFailures: {} }, oppsSince: {} },
     attachments: {},
     toolTimeouts: 0,
     toolInterrupted: 0,
@@ -306,6 +309,7 @@ function finalize(s) {
   s.hooks.runsByCommand = runs;
   s.hooks.opps.toolUses = topN(s.hooks.opps.toolUses, 200);
   s.hooks.opps.toolFailures = topN(s.hooks.opps.toolFailures, 200);
+  for (const k of Object.keys(s.hooks.oppsSince)) if (!(k in s.hooks.runsByCommand) && !(k in s.hooks.errorsByCommand)) delete s.hooks.oppsSince[k];
   for (const k of Object.keys(s.promptSamples)) if (!(k in s.promptStems)) delete s.promptSamples[k];
   s.slowCommands.sort((a, b) => b.ms - a.ms);
   s.slowCommandCount = s.slowCommands.length;
@@ -337,6 +341,12 @@ function uuidKey(uuid) {
  */
 function hookRunKey(event, command) {
   return `${String(event || '?').split(':')[0]}|${String(command).slice(0, 300)}`;
+}
+
+/** The first record of a hook in this session: remember what it could have run on up to that point (see hooks.oppsSince). */
+function noteHookRecord(s, key) {
+  if (key in s.hooks.oppsSince) return;
+  s.hooks.oppsSince[key] = { toolUses: { ...s.hooks.opps.toolUses }, toolFailures: { ...s.hooks.opps.toolFailures }, prompts: s.userMessages, compactions: s.compactions };
 }
 
 async function* readSources(sources) {
@@ -452,11 +462,15 @@ export async function summarizeTranscript(file, opts = {}) {
         }
         if (!stopEvent) {
           s.hooks.hookRuns++;
-          inc(s.hooks.runsByCommand, hookRunKey(a.hookEvent || a.hookName, a.command));
+          const rk = hookRunKey(a.hookEvent || a.hookName, a.command);
+          inc(s.hooks.runsByCommand, rk);
+          noteHookRecord(s, rk);
         }
       } else if (typeof a.type === 'string' && a.type.startsWith('hook_') && typeof a.command === 'string' && !stopEvent) {
         s.hooks.hookRuns++;
-        inc(s.hooks.runsByCommand, hookRunKey(a.hookEvent || a.hookName, a.command));
+        const rk = hookRunKey(a.hookEvent || a.hookName, a.command);
+        inc(s.hooks.runsByCommand, rk);
+        noteHookRecord(s, rk);
         const d = (s.hooks.durations[hookKey(a.command)] ||= { n: 0, ms: 0, max: 0 });
         d.n++;
         if (typeof a.durationMs === 'number') {

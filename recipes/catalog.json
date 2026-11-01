@@ -424,7 +424,7 @@
       "defaultScope": "user",
       "title": { "en": "Route mechanical subagent work to cheaper models", "ru": "Отдавать механическую работу субагентов более дешёвым моделям" },
       "why": { "en": "Exploration, test running and formatting do not need the top model. Setting `model: haiku` or `sonnet` in those agents' frontmatter cuts cost and speeds them up without touching your main model.", "ru": "Поиск по коду, запуск тестов и форматирование не требуют топовой модели. `model: haiku` или `sonnet` во frontmatter таких агентов снижает стоимость и ускоряет их, не трогая основную модель." },
-      "evidence": { "en": "{delegation.spawns} subagent spawns; models requested: {delegation.models}; reported cost in window: ${totals.costUSD}.", "ru": "{delegation.spawns} запусков субагентов; запрошенные модели: {delegation.models}; стоимость за период: ${totals.costUSD}." },
+      "evidence": { "en": "{delegation.spawns} subagent spawns; models requested: {delegation.models}; reported cost of the sessions active in the window (whole sessions, including time before it): ${totals.costUSD}.", "ru": "{delegation.spawns} запусков субагентов; запрошенные модели: {delegation.models}; стоимость сессий, активных в периоде (сессии целиком, включая время до него): ${totals.costUSD}." },
       "when": { "all": [ { "metric": "delegation.spawns", "gte": 20 }, { "not": { "metric": "delegation.models", "includes": "haiku" } } ] },
       "actions": []
     },

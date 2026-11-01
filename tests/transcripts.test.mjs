@@ -1975,9 +1975,10 @@ describe('hook runs Claude Code does not record (round 8)', () => {
   const att = (type, extra, command = 'node "/x/fmt.mjs"') => ({ type: 'attachment', uuid: `h-${Math.random()}`, attachment: { type, command, durationMs: 10, ...extra } });
 
   it('bumps the summary version so that caches written without the opportunity counters are rebuilt', () => {
-    assert.ok(SUMMARY_VERSION >= 23, String(SUMMARY_VERSION));
+    assert.ok(SUMMARY_VERSION >= 24, String(SUMMARY_VERSION));
     const hooks = newSessionSummary('/p/s.jsonl').hooks;
     assert.deepEqual(hooks.opps, { toolUses: {}, toolFailures: {} });
+    assert.deepEqual(hooks.oppsSince, {});
   });
 
   it('puts an attachment that names the event only in hookName (PostToolUse:Edit) under the same key as one with hookEvent', async () => {
@@ -1996,6 +1997,25 @@ describe('hook runs Claude Code does not record (round 8)', () => {
     ]);
     assert.deepEqual(s.hooks.opps, { toolUses: { Edit: 2, Bash: 1 }, toolFailures: { Bash: 1, Edit: 1 } });
     assert.deepEqual(s.toolUses, { Edit: 1, Bash: 1 }, 'the main-session counter is unchanged');
+  });
+
+  it('remembers the counters at the first record of a hook in the session, and only for hooks that left a record', async () => {
+    const cmd = 'node "/x/fmt.mjs"';
+    const s = await summarizeLines([
+      userLine('please edit the files', { uuid: 'since-u1' }),
+      asstTools('s1', [useTool('s1', 'Edit', { file_path: '/x/a.js' }), useTool('s2', 'Bash', { command: 'ls' })]),
+      userLine([resultOf('s1', 'ok'), resultOf('s2', 'Error: boom', true)], { uuid: 'since-r1' }),
+      att('hook_non_blocking_error', { hookName: 'PostToolUse:Edit', hookEvent: 'PostToolUse' }),
+      asstTools('s3', [useTool('s3', 'Edit', { file_path: '/x/b.js' })]),
+      att('hook_success', { hookName: 'PostToolUse:Edit', hookEvent: 'PostToolUse' }),
+    ]);
+    assert.deepEqual(s.hooks.oppsSince, { [`PostToolUse|${cmd}`]: { toolUses: { Edit: 1, Bash: 1 }, toolFailures: { Bash: 1 }, prompts: 1, compactions: 0 } }, 'taken once, at the first record');
+    assert.deepEqual(s.hooks.opps.toolUses, { Edit: 2, Bash: 1 });
+  });
+
+  it('does not take a snapshot for a Stop hook (its runs are counted exactly from the summary line)', async () => {
+    const s = await summarizeLines([att('hook_success', { hookName: 'Stop', hookEvent: 'Stop' })]);
+    assert.deepEqual(s.hooks.oppsSince, {});
   });
 
   it('leaves the tool uses before the window out of the opportunity counters, like every other counter', async () => {
