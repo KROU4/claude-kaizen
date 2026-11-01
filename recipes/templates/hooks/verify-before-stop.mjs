@@ -16,7 +16,7 @@ const MODE_RAW = '{{mode}}';
 const PATTERN_RAW = '{{testPattern}}';
 const unset = (v) => typeof v !== 'string' || v.startsWith('{' + '{') || v.trim() === '';
 const MODE = !unset(MODE_RAW) && MODE_RAW.trim().toLowerCase() === 'remind' ? 'remind' : 'block';
-const DEFAULT_RE = /\b(?:pytest|unittest|tox|nox|(?:npm|pnpm|yarn|bun)(?:\.cmd|\.exe)?\s+(?:run\s+)?(?:test|lint|typecheck|check)|vitest|jest|mocha|playwright\s+test|go\s+(?:test|vet)|cargo\s+(?:test|clippy|check)|dotnet\s+test|mvnw?(?:\.cmd)?(?:\s+(?:(?!-x\b|--exclude-task\b)-{1,2}[\w.:=-]+|clean|compile|install|package))*\s+(?:test|verify)(?=\s|$)|gradlew?(?:\.bat)?(?:\s+(?:(?!-x\b|--exclude-task\b)-{1,2}[\w.:=-]+|clean|compile\w*|assemble|build))*\s+(?:test|check|build)(?=\s|$)|phpunit|rspec|mix\s+test|make\s+(?:test|check|lint)|node\s+--test|ruff|eslint|tsc|mypy|pyright|flake8|pylint|golangci-lint|biome)\b/i;
+const DEFAULT_RE = /\b(?:pytest|unittest|tox|nox|(?:npm|pnpm|yarn|bun)(?:\.cmd|\.exe)?\s+(?:run\s+)?(?:test|lint|typecheck|check)|vitest|jest|mocha|playwright\s+test|go\s+(?:test|vet)|cargo\s+(?:test|clippy|check)|dotnet\s+test|mvnw?(?:\.cmd)?(?:\s+[^\s;&|<>]+)*?\s+(?:test|verify)(?![\w:.-])|gradlew?(?:\.bat)?(?![^;&|\n]*\s(?:-x|--exclude-task)(?:\s+|=)["']?(?:\S*:)?test\b)(?:\s+[^\s;&|<>]+)*?\s+(?:\S*:)?(?:test|check|build)(?![\w:.-])|phpunit|rspec|mix\s+test|make\s+(?:test|check|lint)|node\s+--test|ruff|eslint|tsc|mypy|pyright|flake8|pylint|golangci-lint|biome)\b/i;
 const CODE_EXT = /\.(?:js|jsx|ts|tsx|mjs|cjs|py|go|rs|java|kt|cs|rb|php|swift|c|cpp|h|vue|svelte|sql|sh|ps1)$/i;
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 
@@ -105,12 +105,19 @@ function selftest() {
     const r1 = ev(transcript(user('fix it'), edit('C:\\p\\src\\a.ts'), result, edit('/p/b.py')));
     check('code edited, no checks -> block', r1 && r1.decision === 'block' && r1.reason.includes('2 source file(s)') && r1.reason.includes('a.ts, b.py'), JSON.stringify(r1));
     check('tests ran -> silent', ev(transcript(user('fix'), edit('/p/a.ts'), result, bash('cd p && npm test -- --run'))) === null, 'expected silence');
-    for (const c of ['npm.cmd test', 'pnpm.cmd run lint', 'yarn.cmd test', './mvnw test', 'mvnw.cmd verify', '.\\gradlew.bat test', './gradlew --no-daemon check', 'mvn -q verify']) {
+    for (const c of ['npm.cmd test', 'pnpm.cmd run lint', 'yarn.cmd test', './mvnw test', 'mvnw.cmd verify', '.\\gradlew.bat test', './gradlew --no-daemon check', 'mvn -q verify',
+      'mvn -pl core -am test', 'mvn -f x/pom.xml test', 'mvn -T 4 test', 'mvn -Dtest=FooTest#works test', 'mvn -X test', './gradlew test; echo', '(cd a && ./gradlew test)', 'bash -c "./gradlew test"',
+      './gradlew test&&echo ok', './gradlew test>build.log 2>&1', './gradlew :app:test', './gradlew -p backend test', './gradlew build', './gradlew test -x lint']) {
       check(`tests ran (${c}) -> silent`, ev(transcript(user('fix'), edit('C:\\p\\src\\a.ts'), asst(use('PowerShell', { command: c })))) === null, 'expected silence');
     }
-    for (const c of ['./gradlew bootRun 2>&1 | tee build.log', './gradlew assemble -x test', 'gradle wrapper && echo check', './mvnw spring-boot:run | tee test.log']) {
+    for (const c of ['./gradlew bootRun 2>&1 | tee build.log', './gradlew assemble -x test', 'gradle wrapper && echo check', './mvnw spring-boot:run | tee test.log',
+      './gradlew build -x test', './gradlew clean build -x test', 'gradle build --exclude-task test', "./gradlew build -x 'test'", './gradlew test-compile']) {
       check(`not a test run (${c}) -> block`, ev(transcript(user('fix'), edit('/p/a.ts'), bash(c)))?.decision === 'block', 'expected block');
     }
+    // linear time: a long flag list without a test goal must not backtrack exponentially
+    const t0 = Date.now(), many = './gradlew ' + Array.from({ length: 40 }, (_, i) => `--flag-${i}`).join(' ') + ' bootRun';
+    ev(transcript(user('fix'), edit('/p/a.ts'), bash(many), bash('mvn ' + Array.from({ length: 40 }, (_, i) => `-Dk${i}=v`).join(' ') + ' exec:java')));
+    check('40 flags judged quickly', Date.now() - t0 < 200, `${Date.now() - t0} ms`);
     check('echo of a test name is not a run', ev(transcript(user('fix'), edit('/p/a.ts'), bash('echo done')))?.decision === 'block', 'expected block');
     check('only docs/config edited -> silent', ev(transcript(user('docs'), edit('/p/README.md'), edit('/p/package.json'), edit('/p/x.yaml'))) === null, 'expected silence');
     check('stop_hook_active -> silent', ev({ ...transcript(user('fix'), edit('/p/a.ts')), stop_hook_active: true }) === null, 'expected silence');

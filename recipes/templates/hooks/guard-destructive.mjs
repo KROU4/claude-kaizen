@@ -129,7 +129,8 @@ function checkDelete(name, args, ps) {
   const isFlag = (a) => a.startsWith('-') || (cmdStyle && /^\/[a-z](?::\w+)?$/i.test(a));
   let rec = false, skip = false, dashdash = false;
   const targets = [];
-  for (const a of args) {
+  // cmd.exe reads `/s/q` as two switches
+  for (const a of cmdStyle ? args.flatMap((x) => (/^(?:\/[a-z])+$/i.test(x) ? x.match(/\/[a-z]/gi) : [x])) : args) {
     if (skip) skip = false;
     else if (!dashdash && a === '--') dashdash = true;
     else if (!dashdash && /^-(?:ea|erroraction|include|exclude|filter|stream|credential)$/i.test(a)) skip = true;
@@ -138,7 +139,7 @@ function checkDelete(name, args, ps) {
   }
   // PowerShell `Remove-Item a, b` / `a,b` is an array of paths and cmd.exe splits `rd a,b` on commas; Bash expands `{a,b}`.
   const brace = (x) => { const m = /^(.*?)\{([^{}]*,[^{}]*)\}(.*)$/.exec(x); return m ? m[2].split(',').flatMap((s) => brace(m[1] + s + m[3])) : [x]; };
-  const list = ps || cmdStyle ? targets.flatMap((x) => x.split(',')).filter(Boolean) : targets.flatMap(brace);
+  const list = ps || cmdStyle ? targets.flatMap((x) => x.split(cmdStyle ? /[,=]/ : ',')).filter(Boolean) : targets.flatMap(brace);
   for (const t of rec ? list : []) {
     const why = riskyTarget(t);
     if (why) return `recursive delete of "${t}" (${why}) is not recoverable`;
@@ -308,7 +309,7 @@ function selftest() {
     'python3 - <<EOF\nimport sqlite3\nsqlite3.connect("a.db").execute("DROP TABLE t")\nEOF', 'node --input-type=module <<EOF\nawait db.query("DROP TABLE users")\nEOF',
     'python manage.py dbshell <<EOF\nDROP TABLE x;\nEOF', 'rails dbconsole <<EOF\nDROP TABLE x;\nEOF', 'cat <<EOF | python3 -\nTRUNCATE TABLE a\nEOF',
     'cat <<EOF | tr a b | mysql\nDROP TABLE x;\nEOF', 'sudo -u postgres psql -c "DROP TABLE x"', 'docker exec db psql -c "TRUNCATE TABLE logs"',
-    ...(WIN ? ['rm -rf /c/Users/me', 'rm -rf /c/Windows', 'rm -rf /c/'] : []), 'rm -rf /mnt/c/Users/me', 'rm -rf {dist,/}', 'cmd //c "rd /s /q .\\out\\a,C:\\"',
+    ...(WIN ? ['rm -rf /c/Users/me', 'rm -rf /c/Windows', 'rm -rf /c/'] : []), 'rm -rf /mnt/c/Users/me', 'rm -rf {dist,/}', 'cmd /c "rd /s/q C:\\"', 'cmd /c "del /s/q C:\\"', 'cmd /c "rd /s /q .\\out\\a=C:\\"','cmd //c "rd /s /q .\\out\\a,C:\\"',
     'python run.py $(echo "DROP TABLE users")', 'python run.py `echo "DROP TABLE users"`', 'python run.py <(echo "DROP TABLE users")', 'python run.py $(printf "DROP TABLE %s" users)',
     'echo "DROP TABLE x" > q.sql && docker exec -i db psql < q.sql', 'ssh host mysql -e "TRUNCATE TABLE logs"', 'cmd //c "rd /s /q C:\\"', "cmd //c 'rd /s /q C:\\'", 'cmd //c rd /s /q C:\\', 'cmd //c "rd /s /q C:/"',
     'cd db && psql -c "DROP TABLE x"', 'git log -S"drop table" && psql -c "select 1"', 'q="DROP TABLE x"; python run.py "$q"', 'cd x && python migrate.py "drop table y"',
