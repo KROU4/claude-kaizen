@@ -141,7 +141,7 @@ Generated from `recipes/catalog.json` (31 recipes). Do not edit by hand; run `no
 *Отключить плагины, скиллы которых вы не используете*
 
 - Impact: **medium**, risk: low, scope: user
-- Why: Every installed skill's description is in the prompt of every request. Plugins with zero invocations in the window can be disabled (not uninstalled) and re-enabled in one command.
+- Why: Every installed skill's description is in the prompt of every request. Plugins with zero invocations in the window can be disabled (not uninstalled) and re-enabled in one command. A plugin counts as used when any of its skills or commands ran, one of its subagents was spawned or one of its MCP servers was called; a plugin that ships hooks is never offered, because disabling it would switch the hooks off too.
 - Trigger: `{"all":[{"metric":"skills.unusedShare","gte":0.5},{"metric":"skills.installed","gte":20},{"metric":"skills.unusedPlugins.length","gte":1}]}`
 - Actions: plugins.disable
 - Inspired by: Anthropic /skill-doctor; rohitg00 skills-janitor
@@ -277,7 +277,7 @@ Generated from `recipes/catalog.json` (31 recipes). Do not edit by hand; run `no
 *Хуки падают — выяснить какие*
 
 - Impact: **high**, risk: low, scope: user
-- Why: Failing hooks add latency and error noise to every tool call and often mean the behaviour you wanted is silently not happening. The failing commands are not in your current settings (plugin or project hooks, or already removed); samples with stderr are in measure.md.
+- Why: Failing hooks add latency and error noise to every tool call and often mean the behaviour you wanted is silently not happening. Kaizen removes a hook from your settings only when it fails in at least half of its runs (20+ errors). Failures that are rarer, or come from plugin or project hooks, or from hooks already removed, need a manual look: samples with stderr and the failure rate of each hook are in measure.md.
 - Trigger: `{"all":[{"metric":"friction.hookNonBlockingErrors","gte":20},{"metric":"friction.failingHookCommands.length","lt":1}]}`
 - Actions: advice only (Claude discusses it with you)
 - Inspired by: yurukusa/cc-safe-setup --verify (hook failure taxonomy)
@@ -332,7 +332,7 @@ Generated from `recipes/catalog.json` (31 recipes). Do not edit by hand; run `no
 | `sessions.longSessions` | Sessions with 40+ human prompts |
 | `tools.errorRate` | tool_result is_error / tool_use |
 | `tools.slowCommandsTotal` | Bash commands that took 30 s or longer |
-| `tools.suggestedAllowRules` | Strictly read-only Bash verbs (git status/diff/log, ls, grep, ...; never runners or writers) run 3+ times, formatted as permission rules |
+| `tools.suggestedAllowRules` | Strictly read-only Bash verbs (git status/diff/log, ls, grep, ...; never runners or writers) run 3+ times, formatted as permission rules; rules already in an allow list are left out |
 | `friction.interruptions` | User pressed Esc while Claude worked |
 | `friction.compactions` | Context compactions (summaries injected into sessions) |
 | `friction.permissionPrompts` | Permission decisions made interactively (not by mode, rule, hook or classifier) |
@@ -345,6 +345,7 @@ Generated from `recipes/catalog.json` (31 recipes). Do not edit by hand; run `no
 | `friction.hookRuns` | Hook runs Claude Code recorded (a lower bound: a hook that succeeds without output leaves no record) |
 | `friction.hookRunsEstimated` | Hook runs with every configured hook raised to the runs it had the chance to make (prompts, tool uses of its matcher, sessions) in the window; failure rates use only the sessions where that hook left a record |
 | `friction.failingHookCommands` | Configured hook commands that failed 20+ times in the window and, when their runs can be counted, in at least half of them (when they cannot, in at least half of the runs that were recorded) |
+| `friction.flakyConfiguredHooks` | Failing hooks that are configured in user, project or local settings but stay below the removal threshold of failingHookCommands (fewer than 20 errors, or under half of their runs) |
 | `friction.slowHooks` | Hooks averaging 1.5 s+ or peaking at 10 s+ (completed runs only) |
 | `friction.hookTimeouts` | Hooks that were killed for exceeding their timeout: count and the configured limit |
 | `autonomy.askUserQuestions` | AskUserQuestion tool uses |

@@ -6,6 +6,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { loadLocale } from '../scripts/lib/i18n.mjs';
+import * as apply from '../scripts/lib/apply.mjs';
+import { renderTemplate } from '../scripts/lib/apply.mjs';
+import { buildMeasure } from '../scripts/lib/metrics.mjs';
+import { newSessionSummary } from '../scripts/lib/transcripts.mjs';
 import { IMPACT_WEIGHT, RISK_PENALTY, actionApplies, addExtraRecipes, readExtraRecipes, resolveExtraFile, defaultParams, evaluate, loadCatalog, projectKey, recommend, renderText, resolvePath, score, validateCatalog } from '../scripts/lib/recipes.mjs';
 import { KIT_ROOT, buildFixtureMeasure, cleanupTempDirs, makeTempDir, setEnv, writeJson, writeText } from './helpers.mjs';
 
@@ -935,5 +939,160 @@ describe('cost wording in the catalog (round 8)', () => {
         }
       }
     }
+  });
+});
+
+describe('triggers read the real measure (round 10)', () => {
+  const ENV = { windowDays: 30, since: '2026-10-01', configDir: '/c', projectDir: '/p/proj', platform: {}, kitVersion: 't' };
+  const session = (i, patch = {}) => Object.assign(newSessionSummary(`/p/proj/s${i}.jsonl`), { filesEdited: 0, codeFilesEdited: 0, durationMin: 10, cwd: '/p/proj', startedAt: '2026-10-10T10:00:00Z', userMessages: 5 }, patch);
+  const sessions = (patch = {}, n = 10) => Array.from({ length: n }, (_, i) => session(i, patch));
+  const inv = (patch = {}) => ({
+    settings: [],
+    hooks: { total: 0, events: {}, commands: [] },
+    permissions: { allow: 0, deny: 0, ask: 0, defaultMode: 'default', allowRules: [], denyRules: [] },
+    statusLine: true,
+    skills: [],
+    legacyCommands: [],
+    agents: [],
+    plugins: { installed: [], marketplaces: [] },
+    mcp: { user: [], project: [], local: [], disabledProject: [], pendingProject: [], disabledHere: [] },
+    claudeMd: [],
+    claudeMdTokens: 0,
+    skillDescriptionTokens: 0,
+    ...patch,
+  });
+  const measureOf = (S, i) => buildMeasure({ sessions: S, inventory: i, insights: { available: false }, env: ENV, scan: null });
+  const rec = (m, id, lang = 'en') => recommend(loadCatalog(), m, { lang }).recommended.find((r) => r.id === id);
+  const hook = (command, event = 'PreToolUse') => ({ scope: 'user', event, matcher: 'Bash', type: 'command', command });
+
+  it('guard-destructive is still offered when only the protect-secrets hook of Kaizen is installed', () => {
+    const risky = sessions({ forcePushes: 2, destructive: 3 });
+    assert.ok(rec(measureOf(risky, inv()), 'hooks.guard-destructive'), 'offered without any hook');
+    const withSecrets = measureOf(risky, inv({ hooks: { total: 1, events: { PreToolUse: 1 }, commands: [hook('"node" "/state/hooks/protect-secrets.mjs"')] } }));
+    assert.equal(withSecrets.context.hasGuardHook, false);
+    assert.ok(rec(withSecrets, 'hooks.guard-destructive'), 'offered next to protect-secrets');
+    assert.equal(rec(withSecrets, 'hooks.protect-secrets'), undefined, 'protect-secrets itself is recognised');
+  });
+
+  it('guard-destructive is not offered when the user has a guard of their own (including a "protect-*" hook)', () => {
+    const risky = sessions({ forcePushes: 2, destructive: 3 });
+    for (const command of ['node "/state/hooks/guard-destructive.mjs"', 'bash ~/bin/block-force.sh', 'node protect-main.mjs']) {
+      const m = measureOf(risky, inv({ hooks: { total: 1, events: { PreToolUse: 1 }, commands: [hook(command)] } }));
+      assert.equal(rec(m, 'hooks.guard-destructive'), undefined, command);
+    }
+  });
+
+  const plugin = { name: 'helper-kit', marketplace: 'mkt', version: '1', installPath: '/x', components: { skills: 5, agents: 12, hooks: false, mcp: false }, enabled: true };
+  const skills = Array.from({ length: 25 }, (_, i) => ({ name: `sk${i}`, source: i < 5 ? 'plugin:helper-kit' : 'user', descriptionChars: 100 }));
+  const pruneInv = (over = {}, comp = {}) => inv({ skills, plugins: { installed: [{ ...plugin, components: { ...plugin.components, ...comp } }], marketplaces: ['mkt'] }, ...over });
+
+  it('skills.prune-unused offers a plugin nothing was invoked from, and not one whose subagents run every day', () => {
+    assert.deepEqual(measureOf(sessions(), pruneInv()).skills.unusedPlugins, ['helper-kit@mkt']);
+    assert.deepEqual(rec(measureOf(sessions(), pruneInv()), 'skills.prune-unused').params[0].options, ['helper-kit@mkt']);
+    const viaAgents = measureOf(sessions({ subagents: { 'helper-kit:executor': 4 } }), pruneInv());
+    assert.deepEqual(viaAgents.skills.unusedPlugins, []);
+    assert.equal(rec(viaAgents, 'skills.prune-unused'), undefined);
+  });
+
+  it('skills.prune-unused does not offer a plugin that ships hooks (disabling it would switch them off)', () => {
+    assert.deepEqual(measureOf(sessions(), pruneInv({}, { hooks: true })).skills.unusedPlugins, []);
+    const hookCmd = { scope: 'plugin:helper-kit', event: 'PreToolUse', matcher: 'Bash', type: 'command', command: 'node guard.mjs' };
+    const viaScope = measureOf(sessions(), pruneInv({ hooks: { total: 1, events: { PreToolUse: 1 }, commands: [hookCmd] } }));
+    assert.deepEqual(viaScope.skills.unusedPlugins, []);
+    assert.equal(rec(viaScope, 'skills.prune-unused'), undefined);
+  });
+
+  const prompts = { permissionDecisions: { 'accept/?/user_temporary': 20 }, permissionModes: { default: 10 } };
+  const allowSessions = (verbs) => [session(0, { bashVerbs: verbs, ...prompts }), ...sessions({ permissionModes: { default: 1 } }, 9)];
+  const allowInv = (allowRules) => inv({ permissions: { allow: allowRules.length, deny: 0, ask: 0, defaultMode: 'default', allowRules, denyRules: [] } });
+
+  it('allowlist-readonly counts only the read-only commands that are not allowed yet', () => {
+    const verbs = { 'git status': 30, 'git diff': 20, ls: 10 };
+    const fresh = measureOf(allowSessions(verbs), inv());
+    assert.equal(fresh.tools.suggestedAllowRules.length, 3);
+    assert.match(rec(fresh, 'permissions.allowlist-readonly').evidence, /3 frequently used read-only commands/);
+    const covered = measureOf(allowSessions(verbs), allowInv(['Bash(git status:*)', 'Bash(git diff:*)', 'Bash(ls:*)']));
+    assert.deepEqual(covered.tools.suggestedAllowRules, []);
+    assert.equal(rec(covered, 'permissions.allowlist-readonly'), undefined);
+    const partly = measureOf(allowSessions({ ...verbs, head: 5, wc: 4 }), allowInv(['Bash(ls:*)']));
+    assert.deepEqual(partly.tools.suggestedAllowRules.map((r) => r.rule).sort(), ['Bash(git diff:*)', 'Bash(git status:*)', 'Bash(head:*)', 'Bash(wc:*)']);
+    assert.match(rec(partly, 'permissions.allowlist-readonly').evidence, /4 frequently used/);
+  });
+
+  it('settings.append applies its limit to the new values, not to ones the list already holds', () => {
+    const dir = makeTempDir('kaizen-limit-');
+    const cfg = path.join(dir, 'claude');
+    const state = path.join(dir, 'state');
+    const restoreEnv = setEnv({ CLAUDE_CONFIG_DIR: cfg, KAIZEN_STATE_DIR: state, KAIZEN_MANAGED_SETTINGS_DIR: path.join(dir, 'managed'), CLAUDE_PROJECT_DIR: undefined });
+    try {
+      const top = Array.from({ length: 20 }, (_, i) => `Bash(already${i}:*)`);
+      writeJson(path.join(cfg, 'settings.json'), { permissions: { allow: top } });
+      const m = { tools: { suggestedAllowRules: [...top.map((rule, i) => ({ rule, count: 100 - i })), ...Array.from({ length: 5 }, (_, i) => ({ rule: `Bash(new${i}:*)`, count: 10 - i }))] } };
+      const action = loadCatalog().recipes.find((r) => r.id === 'permissions.allowlist-readonly').actions[0];
+      const io = apply.__test.makeIo({ dry: false, force: false, measure: m, batchDir: path.join(state, 'applied', 'b1'), recipeId: 'permissions.allowlist-readonly', live: () => [] });
+      const res = apply.__test.handlers['settings.append'](action, apply.buildContext({ scope: 'user' }), io);
+      assert.deepEqual(res.added, Array.from({ length: 5 }, (_, i) => `Bash(new${i}:*)`));
+    } finally {
+      restoreEnv();
+    }
+  });
+
+  const failing = (errors, runs) => {
+    const cmd = 'npx prettier --write';
+    const hooks = { ...newSessionSummary('/p/s.jsonl').hooks, nonBlockingErrors: errors, errorsByCommand: { [`PostToolUse|${cmd}`]: errors }, runsByCommand: { [`PostToolUse|${cmd}`]: errors }, opps: { toolUses: { Edit: runs }, toolFailures: {} } };
+    return [session(0, { hooks }), ...sessions({}, 9)];
+  };
+  const configured = inv({ hooks: { total: 1, events: { PostToolUse: 1 }, commands: [{ scope: 'user', event: 'PostToolUse', matcher: 'Edit|Write', type: 'command', command: 'npx prettier --write' }] } });
+
+  it('advice.hook-health never says a configured hook is missing from the settings', () => {
+    const flaky = measureOf(failing(30, 200), configured);
+    assert.deepEqual(flaky.friction.failingHookCommands, []);
+    assert.equal(flaky.friction.flakyConfiguredHooks.length, 1);
+    for (const lang of ['en', 'ru']) {
+      const r = rec(flaky, 'advice.hook-health', lang);
+      assert.ok(r, lang);
+      assert.doesNotMatch(r.why, /not in your current settings|не найдены в текущих настройках/, lang);
+      assert.match(r.evidence, /npx prettier --write \(30\/200, 15%\)/, lang);
+    }
+    assert.equal(rec(flaky, 'hooks.disable-failing'), undefined);
+  });
+
+  it('advice.hook-health lists nothing as configured when the failing command is not in the settings, and hands removable hooks to disable-failing', () => {
+    const missing = measureOf(failing(30, 200), inv());
+    assert.deepEqual(missing.friction.flakyConfiguredHooks, []);
+    assert.ok(rec(missing, 'advice.hook-health'));
+    const always = measureOf(failing(30, 30), configured);
+    assert.equal(always.friction.flakyConfiguredHooks.length, 0);
+    assert.equal(always.friction.failingHookCommands.length, 1);
+    assert.ok(rec(always, 'hooks.disable-failing'));
+    assert.equal(rec(always, 'advice.hook-health'), undefined);
+  });
+
+  it('every {{placeholder}} of a hook template is a parameter of some recipe that installs it', () => {
+    // a recipe may bundle a template whose parameters belong to another recipe (precompact-handoff ships session-context with its defaults)
+    const declared = new Map();
+    for (const r of loadCatalog().recipes) {
+      for (const a of r.actions || []) {
+        if (!a.template) continue;
+        if (!declared.has(a.template)) declared.set(a.template, new Set());
+        for (const p of r.params || []) declared.get(a.template).add(p.name);
+      }
+    }
+    const problems = [];
+    for (const [template, names] of declared) {
+      const text = fs.readFileSync(path.join(KIT_ROOT, 'recipes', 'templates', template), 'utf8');
+      for (const m of text.matchAll(/'{{([a-zA-Z0-9_]+)}}'/g)) if (!names.has(m[1])) problems.push(`${template} reads {{${m[1]}}} but no recipe declares a parameter ${m[1]}`);
+    }
+    assert.deepEqual(problems, []);
+  });
+
+  it('verify-before-stop takes a testPattern that reaches the installed script', () => {
+    const p = loadCatalog().recipes.find((r) => r.id === 'hooks.verify-before-stop').params.find((x) => x.name === 'testPattern');
+    assert.equal(p.type, 'text');
+    assert.equal(p.default, '');
+    const tpl = fs.readFileSync(path.join(KIT_ROOT, 'recipes', 'templates', 'hooks', 'verify-before-stop.mjs'), 'utf8');
+    const rendered = renderTemplate(tpl, { mode: 'block', testPattern: "npm run verify|it's" }, { js: true });
+    assert.ok(rendered.includes("const PATTERN_RAW = 'npm run verify|it\\'s';"));
+    assert.ok(renderTemplate(tpl, { mode: 'block', testPattern: '' }, { js: true }).includes("const PATTERN_RAW = '';"));
   });
 });

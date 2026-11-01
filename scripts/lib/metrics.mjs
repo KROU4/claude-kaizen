@@ -274,11 +274,14 @@ export const SAFE_VERBS = new Set([
   'npm ls', 'npm view', 'npm outdated', 'docker ps', 'docker logs', 'kubectl get',
 ]);
 
-export function suggestAllowRules(bashVerbs, { minCount = 3 } = {}) {
+export function suggestAllowRules(bashVerbs, { minCount = 3, exclude = [] } = {}) {
+  const have = new Set(exclude);
   const out = [];
   for (const [verb, n] of Object.entries(bashVerbs)) {
     if (n < minCount || !SAFE_VERBS.has(verb)) continue;
-    out.push({ rule: `Bash(${verb}:*)`, count: n });
+    const rule = `Bash(${verb}:*)`;
+    if (have.has(rule)) continue; // already allowed: nothing to ask for
+    out.push({ rule, count: n });
   }
   return out.sort((a, b) => b.count - a.count).slice(0, 40);
 }
@@ -432,7 +435,7 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
       .map(([verb, v]) => ({ verb, count: v.count, maxSec: Math.round(v.maxMs / 1000), avgSec: Math.round(v.totalMs / v.count / 1000) })),
     // per-session lists are capped; the per-session count keeps the true total
     slowCommandsTotal: sum(S, (s) => (typeof s.slowCommandCount === 'number' ? s.slowCommandCount : (s.slowCommands || []).length)),
-    suggestedAllowRules: suggestAllowRules(bashVerbs),
+    suggestedAllowRules: suggestAllowRules(bashVerbs, { exclude: inventory.permissions.allowRules }),
   };
 
   // ---- friction
@@ -548,6 +551,9 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
     })
     .sort((a, b) => b.errors - a.errors)
     .slice(0, 10);
+  const failingHookCommands = failingHooks.filter((h) => h.configured && h.errors >= FAILING_HOOK_MIN_ERRORS && (h.failureRate ?? h.errors / Math.max(h.runsRecorded, h.errors)) >= FAILING_HOOK_MIN_RATE).map((h) => h.configuredCommand);
+  // configured in the user's settings and failing, but below the removal threshold: "not in your settings" is false for them
+  const flakyConfiguredHooks = failingHooks.filter((h) => h.configured && !failingHookCommands.includes(h.configuredCommand));
   const slowHooks = Object.entries(hookDurations)
     .map(([hook, d]) => ({ hook, runs: d.n, avgMs: d.n ? Math.round(d.ms / d.n) : 0, maxMs: d.max }))
     .filter((h) => h.avgMs >= 1500 || h.maxMs >= 10000)
@@ -612,7 +618,8 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
     hookNonBlockingErrors: hookNonBlocking,
     hookErrorSamples,
     failingHooks,
-    failingHookCommands: failingHooks.filter((h) => h.configured && h.errors >= FAILING_HOOK_MIN_ERRORS && (h.failureRate ?? h.errors / Math.max(h.runsRecorded, h.errors)) >= FAILING_HOOK_MIN_RATE).map((h) => h.configuredCommand),
+    failingHookCommands,
+    flakyConfiguredHooks,
     slowHooks,
     hookTimeouts,
     slowCommands: tools.slowCommandsTotal,
@@ -677,8 +684,11 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
     p.skills++;
     if (used) p.used++;
   }
+  // A plugin is also in use through its subagents ('plugin:agent' spawn types) and its hooks, which disabling would switch off.
+  const pluginsWithSubagents = new Set(Object.keys(subagentsByType).filter((k) => k.includes(':')).map((k) => k.slice(0, k.indexOf(':'))));
+  const pluginsWithHooks = new Set(inventory.hooks.commands.filter((c) => typeof c.scope === 'string' && c.scope.startsWith('plugin:')).map((c) => c.scope.slice(7)));
   const unusedPlugins = (enoughUsage ? inventory.plugins.installed : [])
-    .filter((p) => pluginUsage[p.name] && pluginUsage[p.name].used === 0 && !Object.keys(mcpUsedByPlugin(S)).includes(p.name))
+    .filter((p) => pluginUsage[p.name] && pluginUsage[p.name].used === 0 && !Object.keys(mcpUsedByPlugin(S)).includes(p.name) && !pluginsWithSubagents.has(p.name) && !pluginsWithHooks.has(p.name) && !(p.components && p.components.hooks))
     .map((p) => `${p.name}@${p.marketplace}`);
   const skills = {
     used: topN(skillsUsed, 40),
@@ -743,7 +753,7 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
     hookCommandsText: inventory.hooks.commands.map((c) => `${c.event}:${c.command}`).join('\n').toLowerCase(),
     kaizenHooks: inventory.hooks.commands.filter((c) => /kaizen[\\/]hooks/i.test(c.command)).length,
     hasFormatterHook: inventory.hooks.commands.some((c) => /prettier|ruff|black|gofmt|rustfmt|format-on-edit|eslint --fix|biome/i.test(c.command)),
-    hasGuardHook: inventory.hooks.commands.some((c) => /guard|block-force|destructive|protect/i.test(c.command)),
+    hasGuardHook: inventory.hooks.commands.some((c) => /guard|block-force|destructive|protect(?!-secrets)/i.test(c.command)),
     hasNotifyHook: inventory.hooks.commands.some((c) => /notify|notification|telegram|ntfy|toast/i.test(c.command)) || !!inventory.hooks.events.Notification,
     hasSessionStartHook: !!inventory.hooks.events.SessionStart,
     hasPreCompactHook: !!inventory.hooks.events.PreCompact,
@@ -930,7 +940,7 @@ export const METRIC_DOCS = {
   'sessions.longSessions': 'Sessions with 40+ human prompts',
   'tools.errorRate': 'tool_result is_error / tool_use',
   'tools.slowCommandsTotal': 'Bash commands that took 30 s or longer',
-  'tools.suggestedAllowRules': 'Strictly read-only Bash verbs (git status/diff/log, ls, grep, ...; never runners or writers) run 3+ times, formatted as permission rules',
+  'tools.suggestedAllowRules': 'Strictly read-only Bash verbs (git status/diff/log, ls, grep, ...; never runners or writers) run 3+ times, formatted as permission rules; rules already in an allow list are left out',
   'friction.interruptions': 'User pressed Esc while Claude worked',
   'friction.compactions': 'Context compactions (summaries injected into sessions)',
   'friction.permissionPrompts': 'Permission decisions made interactively (not by mode, rule, hook or classifier)',
@@ -943,6 +953,7 @@ export const METRIC_DOCS = {
   'friction.hookRuns': 'Hook runs Claude Code recorded (a lower bound: a hook that succeeds without output leaves no record)',
   'friction.hookRunsEstimated': 'Hook runs with every configured hook raised to the runs it had the chance to make (prompts, tool uses of its matcher, sessions) in the window; failure rates use only the sessions where that hook left a record',
   'friction.failingHookCommands': 'Configured hook commands that failed 20+ times in the window and, when their runs can be counted, in at least half of them (when they cannot, in at least half of the runs that were recorded)',
+  'friction.flakyConfiguredHooks': 'Failing hooks that are configured in user, project or local settings but stay below the removal threshold of failingHookCommands (fewer than 20 errors, or under half of their runs)',
   'friction.slowHooks': 'Hooks averaging 1.5 s+ or peaking at 10 s+ (completed runs only)',
   'friction.hookTimeouts': 'Hooks that were killed for exceeding their timeout: count and the configured limit',
   'autonomy.askUserQuestions': 'AskUserQuestion tool uses',

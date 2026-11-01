@@ -179,6 +179,7 @@ function fmtItem(x, t) {
   if (!x || typeof x !== 'object') return String(x);
   if (x.hook && typeof x.timeouts === 'number') return `${x.hook} (${x.timeouts}× > ${x.limitMs ? x.limitMs / 1000 : '?'} ${t('digest.unit_s')})`;
   if (x.hook && typeof x.avgMs === 'number') return `${x.hook} (${t('digest.avg')} ${x.avgMs} ${t('digest.unit_ms')}, ${t('digest.max')} ${x.maxMs} ${t('digest.unit_ms')})`;
+  if (x.command && typeof x.errors === 'number') return `${x.command} (${x.errors}${typeof x.runs === 'number' && typeof x.failureRate === 'number' ? `/${x.runs}, ${Math.round(x.failureRate * 100)}%` : '×'})`;
   return x.name || x.server || x.command || x.hook || x.id || JSON.stringify(x);
 }
 

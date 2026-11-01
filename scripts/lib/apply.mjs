@@ -340,9 +340,10 @@ const handlers = {
       const src = resolvePath(io.measure || {}, a.valuesFrom) || [];
       values = values.concat(src.map((x) => (a.field && x && typeof x === 'object' ? x[a.field] : x)).filter((x) => typeof x === 'string'));
     }
-    if (a.limit) values = values.slice(0, a.limit);
     const current = getPath(settings, a.path);
     const arr = Array.isArray(current) ? current : [];
+    // the limit caps what is new: values already in the list must not use it up (the top 20 suggestions may all be allowed already)
+    if (a.limit) values = [...values.filter((v) => !arr.includes(v)), ...values.filter((v) => arr.includes(v))].slice(0, a.limit);
     const added = values.filter((v) => !arr.includes(v));
     // Values that are already in the list because a batch still in force added them: this batch relies on them, so that
     // undoing the other batch leaves them in place.
