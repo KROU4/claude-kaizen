@@ -547,18 +547,21 @@ const handlers = {
         const map = readMap(layer);
         if (map && Object.prototype.hasOwnProperty.call(map, p)) win = { layer, value: map[p] };
       }
-      // Already off: rely on EVERY file that says `false` and was written by a batch in force (not only the winning layer's
-      // file), so that undoing the older batch does not switch the plugin back on in a file the newer one still needs off.
-      const claimOff = () => {
-        const held = layers.filter((layer) => {
-          const map = readMap(layer);
-          return map && map[p] === false && pluginHolders(io, { plugin: p, file: layer.file }).length;
-        });
-        if (held.length) for (const layer of held) claimed.push({ plugin: p, file: layer.file });
-        else offIn ||= win.layer.file;
+      // Rely on EVERY file that says `false` and was written by a batch in force (not only the winning layer's file), so
+      // that undoing the older batch does not switch the plugin back on in a file the newer one still needs off. That holds
+      // also when this batch switches the plugin off somewhere else itself (the user turned it on globally after the older
+      // batch switched it off in the project): the older `false` is what keeps it off there.
+      const held = layers.filter((layer) => {
+        const map = readMap(layer);
+        return map && map[p] === false && pluginHolders(io, { plugin: p, file: layer.file }).length;
+      });
+      const claimHeld = () => {
+        for (const layer of held) claimed.push({ plugin: p, file: layer.file });
       };
       if (win && !win.value && win.layer.readOnly) {
-        claimOff(); // off for everybody by the organisation's managed settings
+        // off for everybody by the organisation's managed settings
+        if (held.length) claimHeld();
+        else offIn ||= win.layer.file;
         continue;
       }
       if (win && win.layer.readOnly) {
@@ -570,6 +573,7 @@ const handlers = {
       // settings while a higher layer already switches it off here (off in this project only). The project file belongs
       // to the repository and is shared, so a `true` there is switched off for this user in settings.local.json, which
       // comes later in the order and is not committed (unless that file already says `false`).
+      claimHeld();
       const targets = new Set();
       for (const layer of layers) {
         const map = layer.readOnly ? null : readMap(layer);
@@ -580,7 +584,7 @@ const handlers = {
       }
       if (!targets.size) {
         if (win && !win.value) {
-          claimOff(); // already off wherever it was on
+          if (!held.length) offIn ||= win.layer.file; // already off wherever it was on
           continue;
         }
         targets.add(userLayer); // not mentioned anywhere: the user settings
@@ -864,14 +868,16 @@ function makeIo({ dry, force, measure, batchDir, recipeId, t = translator('en'),
     note(line) {
       notes.push(line);
     },
+    // keyed like `sim`: the same file spelled C:p and c:/p is one settings object
     load(file) {
-      if (!cache.has(file)) cache.set(file, readJsonOrEmpty(file));
-      return cache.get(file);
+      const key = pathKey(file);
+      if (!cache.has(key)) cache.set(key, readJsonOrEmpty(file));
+      return cache.get(key);
     },
     save(file, data) {
       this.backup(file);
       writeJsonPretty(file, data);
-      cache.set(file, data);
+      cache.set(pathKey(file), data);
     },
     backup(file) {
       if (dry || backedUp.has(file) || !exists(file)) return;

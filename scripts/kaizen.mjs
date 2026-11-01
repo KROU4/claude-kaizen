@@ -402,15 +402,21 @@ function applyArgsFromBatch(args) {
     throw new UserError(t('err.from_batch_project_gone', { id, dir: manifest.projectDir }));
   }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kaizen-from-batch-'));
-  const file = path.join(dir, 'choices.json');
-  const flags = { ...args.flags };
-  const extraFile = customRecipesFromBatch(picked, args.flags, id, dir, t);
-  if (extraFile) flags.add = extraFile;
-  writeJsonAtomic(file, choices);
-  delete flags['from-batch'];
-  delete flags.recipe;
-  if (!flags.project && typeof manifest.projectDir === 'string' && manifest.projectDir) flags.project = manifest.projectDir;
-  return { _: [args._[0], file], flags };
+  try {
+    const file = path.join(dir, 'choices.json');
+    const flags = { ...args.flags };
+    const extraFile = customRecipesFromBatch(picked, args.flags, id, dir, t);
+    if (extraFile) flags.add = extraFile;
+    writeJsonAtomic(file, choices);
+    delete flags['from-batch'];
+    delete flags.recipe;
+    if (!flags.project && typeof manifest.projectDir === 'string' && manifest.projectDir) flags.project = manifest.projectDir;
+    return { _: [args._[0], file], flags };
+  } catch (err) {
+    // the caller removes the folder only for args it got back
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw err;
+  }
 }
 
 /**
@@ -436,7 +442,7 @@ function customRecipesFromBatch(picked, flags, id, dir, t) {
   }
   const draft = current && Array.isArray(current.recipes) ? current.recipes : [];
   const gone = legacy.filter((r) => !draft.some((x) => x && x.id === r.id));
-  if (gone.length) throw new UserError(t('err.from_batch_custom_gone', { id, ids: gone.map((r) => r.id).join(', ') }));
+  if (gone.length) throw new UserError(t(current ? 'err.from_batch_custom_gone' : 'err.from_batch_custom_nofile', { id, ids: gone.map((r) => r.id).join(', ') }));
   const differs = legacy.filter((r) => !r.digest || recipeDigest(draft.find((x) => x && x.id === r.id)) !== r.digest);
   if (differs.length) process.stderr.write(t('cli.from_batch_custom_draft', { id, ids: differs.map((r) => r.id).join(', ') }) + '\n');
   if (!stored.length) return null; // only drafts: cmdApply loads them the way it always does

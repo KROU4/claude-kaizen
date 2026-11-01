@@ -44,6 +44,7 @@
     "from_batch_no_manifest": "--from-batch: no manifest at {file}",
     "from_batch_no_recipe": "--from-batch: batch {id} has no recipe {missing} (it has: {have})",
     "from_batch_custom_gone": "--from-batch: batch {id} did not save the text of the custom recipe(s) {ids} (a batch of an older version) and the current extra-recipes file has no such recipe. Nothing was applied. Pass --add FILE with the draft to use, or leave them out with --recipe.",
+    "from_batch_custom_nofile": "--from-batch: batch {id} did not save the text of the custom recipe(s) {ids} (a batch of an older version) and the extra-recipes file with the draft is missing (none was passed with --add and none is remembered, or it no longer exists). Nothing was applied. Pass --add FILE with the draft to use, or leave them out with --recipe.",
     "from_batch_project_gone": "--from-batch: the project folder of batch {id} no longer exists: {dir}. Pass --project DIR to apply it elsewhere.",
     "add_expects_file": "--add expects a file",
     "add_unreadable": "--add: cannot read {file}",

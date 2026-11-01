@@ -401,12 +401,31 @@ describe('apply --from-batch with custom.* recipes', () => {
       const rest = cli(home, ['apply', '--from-batch', id, '--add', extra, '--recipe', 'custom.corrections-rules,hooks.guard-destructive']);
       assert.equal(rest.status, 0, rest.stderr + rest.stdout);
     });
+
+    it('says the extra-recipes file is missing when there is none at all, and leaves no temp folder behind', () => {
+      const { home, id } = old();
+      const tmp = makeTempDir('kaizen-tmp-');
+      const env = { ...home.env, TEMP: tmp, TMP: tmp, TMPDIR: tmp };
+      const before = batchIds(home).length;
+      const r = cli(home, ['apply', '--from-batch', id, '--recipe', 'custom.skill-deploy-check'], { env });
+      assert.equal(r.status, 1, r.stdout);
+      assert.match(r.stderr, /extra-recipes file with the draft is missing/);
+      assert.doesNotMatch(r.stderr, /has no such recipe/);
+      assert.match(r.stderr, /Nothing was applied/);
+      assert.match(cli(home, ['apply', '--from-batch', id, '--recipe', 'custom.skill-deploy-check', '--lang', 'ru'], { env }).stderr, /файла дополнительных рецептов с черновиком нет/);
+      assert.deepEqual(fs.readdirSync(tmp).filter((n) => n.startsWith('kaizen-from-batch-')), [], 'the temp folder of the failed run is removed');
+      assert.equal(batchIds(home).length, before);
+      // a file that exists but lacks the recipe keeps the other wording
+      const extra = draft(home, 'v2', { skill: false });
+      assert.match(cli(home, ['apply', '--from-batch', id, '--add', extra, '--recipe', 'custom.skill-deploy-check'], { env }).stderr, /has no such recipe/);
+      assert.deepEqual(fs.readdirSync(tmp).filter((n) => n.startsWith('kaizen-from-batch-')), []);
+    });
   });
 
   it('en and ru have the new messages', () => {
     for (const lang of ['en', 'ru']) {
       const loc = readJson(path.join(KIT_ROOT, 'locales', `${lang}.json`));
-      assert.ok(loc.err.from_batch_custom_gone && loc.cli.from_batch_custom_draft, lang);
+      assert.ok(loc.err.from_batch_custom_gone && loc.err.from_batch_custom_nofile && loc.cli.from_batch_custom_draft, lang);
     }
   });
 });

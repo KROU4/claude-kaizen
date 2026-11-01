@@ -1732,6 +1732,19 @@ describe('two recipes sharing session-context.mjs across separate batches', () =
       assertPristine();
     });
 
+    it('the same project spelled with a different drive-letter case is one file in the dry run, as in the real run', async () => {
+      const P = path.join(ctx.root, 'p');
+      fs.mkdirSync(P, { recursive: true });
+      const lower = P[0].toLowerCase() + P.slice(1);
+      await at(1, { recipe: 'hooks.guard-destructive', project: P, scope: 'project' });
+      const command = readJson(path.join(P, '.claude', 'settings.json')).hooks.PreToolUse[0].hooks[0].command;
+      await at(2, { recipe: 'hooks.disable-failing', project: lower, param: `hooks.disable-failing.hooks=${command}` });
+      const dry = await runUndo({ all: true, 'dry-run': true });
+      const real = await runUndo({ all: true });
+      assert.equal(normalizeUndoOutput(dry.stdout), normalizeUndoOutput(real.stdout));
+      assert.deepEqual(readJson(path.join(P, '.claude', 'settings.json')), {});
+    });
+
     it('three applies of one recipe: dry run and real run agree', async () => {
       for (const [n, v] of [[1, 1001], [2, 2002], [3, 3003]]) await at(n, { recipe: SC, param: ['hooks.session-context.maxChars=' + v] });
       const dry = await runUndo({ all: true, 'dry-run': true });
@@ -2851,6 +2864,27 @@ describe('claims: a batch that relies on what an earlier batch provides', () => 
       await runUndo({}, [batch(1)]);
       assert.deepEqual(readSettings(), userBefore);
       assert.ok(!fs.existsSync(localSettings()));
+    });
+
+    it('a batch that switches the plugin off in one file still relies on the older false in another layer', async () => {
+      installX();
+      writeJson(projSettings(), { enabledPlugins: { 'x@m': true } });
+      addRecipes(customRecipe('custom.off', [{ type: 'plugins.disable', plugins: ['x@m'] }]));
+      await applyCustom(1, 'custom.off', { project: proj() });
+      assert.deepEqual(readJson(localSettings()), { enabledPlugins: { 'x@m': false } });
+      // the user turns the plugin on globally afterwards
+      writeSettings({ ...readSettings(), enabledPlugins: { ...readSettings().enabledPlugins, 'x@m': true } });
+      const userOn = readSettings();
+      await applyCustom(2, 'custom.off', { project: proj() });
+      const second = actions(2).find((a) => a.type === 'plugins.disable');
+      assert.deepEqual(second.changed.map((c) => c.file || second.file), [ctx.settingsFile]);
+      assert.deepEqual(second.claimed, [{ plugin: 'x@m', file: localSettings() }]);
+      await runUndo({}, [batch(1)]);
+      assert.equal(readJson(localSettings()).enabledPlugins['x@m'], false, 'the second batch still needs it off here');
+      assert.equal(xEnabled(), false);
+      await runUndo({}, [batch(2)]);
+      assert.deepEqual(readSettings(), userOn);
+      assert.ok(!fs.existsSync(localSettings()), 'the file the first batch created goes with the last claimant');
     });
 
     it('two batches that switch the same plugin off: undoing the first leaves it off, the second restores it', async () => {
