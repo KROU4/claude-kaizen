@@ -10,7 +10,7 @@
       "name": "kaizen",
       "source": "./",
       "description": "Continuous improvement for Claude Code: measure → choose → apply → undo. Hooks, skills, subagents, CLAUDE.md rules, permissions, MCP cleanup, status line. Local-only, en/ru.",
-      "version": "0.1.7",
+      "version": "0.1.8",
       "category": "productivity",
       "tags": ["insights", "hooks", "skills", "permissions", "configuration", "self-improvement"]
     }

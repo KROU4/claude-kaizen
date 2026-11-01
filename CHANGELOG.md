@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [0.1.8] — 2026-11-01
+
+### Fixed
+- `guard-destructive`: SQL is judged by the command that owns it, so `cd x && git commit -m "drop table y"` passes while `python run.py $(echo "DROP TABLE users")`, backtick and `<(...)` substitutions, and `docker exec … psql` / `ssh host mysql` are blocked. cmd.exe comma lists (`rd /s /q a,C:\`) and Bash brace expansion (`rm -rf {dist,/}`) are split into their real targets. Git Bash `/c/...` and WSL/Cygwin `/mnt/c`, `/cygdrive/c` paths are judged like `C:\` (bare `/c` only on Windows).
+- `protect-secrets`: public keys (`*.pub`) under `~/.ssh` are readable; private keys and the rest of `.ssh` stay denied.
+- `verify-before-stop`: `npm.cmd test`, `./mvnw verify`, `gradlew.bat check` count as checks; `./gradlew bootRun | tee build.log`, `./gradlew assemble -x test` and `./mvnw spring-boot:run | tee test.log` do not.
+- `hooks.guard-destructive` is offered again when Kaizen's own `protect-secrets` hook is the only "protect" hook installed.
+- `skills.prune-unused` no longer offers to disable a plugin whose subagents or hooks are in use.
+- `permissions.allowlist-readonly` skips rules that are already allowed and no longer fires when nothing new qualifies.
+- `advice.hook-health` finds failing hooks that are configured in settings.
+- `verify-before-stop`'s `testPattern` parameter can be set from the console and with `--param`.
+
+### Known issues
+- `permissions.allowlist-readonly` removes only exact duplicates of existing allow rules; a rule already covered by a broader one (`Bash(git:*)` vs `Bash(git diff:*)`) may still be suggested.
+- `hooks.guard-destructive` is still treated as present when another hook with "protect" in its name is installed.
+
 ## [0.1.7] — 2026-11-01
 
 ### Fixed

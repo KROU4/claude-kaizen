@@ -77,8 +77,8 @@ node scripts/kaizen.mjs undo --last
 Or without cloning, straight from GitHub (pin a tag for repeatable runs):
 
 ```bash
-npx github:KROU4/claude-kaizen#v0.1.7 measure
-npx github:KROU4/claude-kaizen#v0.1.7 recommend
+npx github:KROU4/claude-kaizen#v0.1.8 measure
+npx github:KROU4/claude-kaizen#v0.1.8 recommend
 ```
 
 Run `measure` again a week later: the digest ends with a **what moved** table (interruptions, permission prompts, timeouts, compactions, corrections, cost…) comparing the two measurements.
