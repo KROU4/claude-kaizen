@@ -477,6 +477,40 @@ describe('friction', () => {
       assert.equal(start.h.runs, 4, 'a comma list works for SessionStart as well');
     });
 
+    it('applies the tool-name aliases of Claude Code to a matcher: Task selects Agent, KillShell / KillBash select TaskStop, and so on', () => {
+      const runsOf = (matcher, toolUses) => scenario({ event: 'PreToolUse', matcher, errors: 25, opps: { toolUses } }).h.runs;
+      // list entries are mapped through the aliases
+      assert.equal(runsOf('Task', { Agent: 400 }), 400);
+      assert.equal(runsOf('Task|Edit', { Agent: 300, Edit: 100, Bash: 7 }), 400);
+      assert.equal(runsOf('Agent', { Agent: 400 }), 400);
+      assert.equal(runsOf('KillShell', { TaskStop: 400 }), 400);
+      assert.equal(runsOf('KillBash, Edit', { TaskStop: 300, Edit: 100 }), 400);
+      assert.equal(runsOf('ListPeers', { ListAgents: 400 }), 400);
+      assert.equal(runsOf('Brief', { SendUserMessage: 400 }), 400);
+      assert.equal(runsOf('ListMcpResources', { ListMcpResourcesTool: 400 }), 400);
+      assert.equal(runsOf('ReadMcpResource', { ReadMcpResourceTool: 400, ReadMcpResourceDirTool: 9 }), 400, 'ReadMcpResource is not ReadMcpResourceDir');
+      assert.equal(runsOf('ReadMcpResourceDir', { ReadMcpResourceDirTool: 400, ReadMcpResourceTool: 9 }), 400);
+      // an old transcript that logged the legacy name is the same tool
+      assert.equal(runsOf('Agent', { Task: 400 }), 400);
+      assert.equal(runsOf('Task', { Task: 150, Agent: 250 }), 400);
+      // a regex is also tested against the legacy names
+      assert.equal(runsOf('^Task$', { Agent: 400, Edit: 9 }), 400);
+      assert.equal(runsOf('^Agent$', { Agent: 400 }), 400);
+      assert.equal(runsOf('^Kill(Shell|Bash)$', { TaskStop: 400 }), 400);
+      assert.equal(runsOf('^Task', { Agent: 400, TaskStop: 50 }), 450, 'unanchored at the end: Agent (via Task) and TaskStop (by its own name) both match');
+      assert.equal(runsOf('^TaskStop$', { TaskStop: 400 }), 400);
+      // the Artifact entry covers the whole family; a regex is unchanged
+      assert.equal(runsOf('Artifact', { Artifact: 100, ArtifactComments: 100, ArtifactData: 100, ArtifactCheck: 100, Edit: 9 }), 400);
+      assert.equal(runsOf('ArtifactData', { ArtifactData: 400, ArtifactCheck: 9 }), 400);
+      assert.equal(runsOf('Artifact.*', { Artifact: 100, ArtifactComments: 300 }), 400);
+      // an unrelated name is not affected
+      assert.equal(runsOf('Task', { Edit: 400, Agent: 25 }), 25);
+      // so a hook matching a renamed tool is no longer a false 100% failure: 25 errors in 400 runs is healthy
+      const { f, h } = scenario({ event: 'PreToolUse', matcher: 'Task', errors: 25, opps: { toolUses: { Agent: 400 } } });
+      assert.equal(h.failureRate, 0.063);
+      assert.deepEqual(f.failingHookCommands, []);
+    });
+
     it('does not offer a hook on an event without a run count when its recorded runs show a low failure rate (25 errors in 500 recorded)', () => {
       for (const event of ['Notification', 'PreCompact', 'SessionEnd', 'SubagentStart']) {
         const { f, h } = scenario({ event, errors: 25, recorded: 500 });

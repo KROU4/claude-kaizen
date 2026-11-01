@@ -17,21 +17,52 @@ export const FAILING_HOOK_MIN_ERRORS = 20;
 export const FAILING_HOOK_MIN_RATE = 0.5;
 
 /**
+ * Tool renames Claude Code still honours in hook matchers (legacy name -> current name). A list entry is mapped through them
+ * (a matcher 'Task' selects Agent, 'KillShell' / 'KillBash' select TaskStop) and a regex is also tested against the legacy
+ * names of the tool ('^Task$' selects Agent). Transcripts log the current names, so without this such a matcher selects no call.
+ */
+const LEGACY_TOOL_NAMES = {
+  Task: 'Agent',
+  KillShell: 'TaskStop',
+  KillBash: 'TaskStop',
+  ListPeers: 'ListAgents',
+  Brief: 'SendUserMessage',
+  ListMcpResources: 'ListMcpResourcesTool',
+  ReadMcpResource: 'ReadMcpResourceTool',
+  ReadMcpResourceDir: 'ReadMcpResourceDirTool'
+};
+/** List entries that stand for a family of tools: 'Artifact' also covers these. */
+const TOOL_FAMILIES = { Artifact: ['ArtifactComments', 'ArtifactData', 'ArtifactCheck'] };
+/** current tool name -> its legacy names */
+const LEGACY_OF = new Map();
+for (const [legacy, current] of Object.entries(LEGACY_TOOL_NAMES)) LEGACY_OF.set(current, [...(LEGACY_OF.get(current) || []), legacy]);
+
+/**
  * The names a hook matcher selects, with Claude Code's own rules: '' and '*' select everything; a matcher made only of
- * letters, digits, _ | , space and - is an exact list split on | or , (entries trimmed), so 'Edit, Write' and 'Edit | Write'
- * select Edit and Write; anything else is a regex tested anywhere in the name, unanchored ('mcp__.*__write' selects
- * mcp__filesystem__write_file). null = not a usable pattern.
+ * letters, digits, _ | , space and - is an exact list split on | or , (entries trimmed, mapped through the tool aliases),
+ * so 'Edit, Write' and 'Edit | Write' select Edit and Write and 'Task' selects Agent; anything else is a regex tested
+ * anywhere in the name (or in one of its legacy names), unanchored ('mcp__.*__write' selects mcp__filesystem__write_file).
+ * null = not a usable pattern.
  */
 function matcherTest(matcher) {
   const m = String(matcher || '').trim();
   if (!m || m === '*') return () => true;
   if (/^[a-zA-Z0-9_|, -]+$/.test(m)) {
-    const names = new Set(m.split(/[|,]/).map((x) => x.trim()).filter(Boolean));
-    return (name) => names.has(name);
+    const names = new Set();
+    for (const entry of m.split(/[|,]/).map((x) => x.trim()).filter(Boolean)) {
+      names.add(entry);
+      if (LEGACY_TOOL_NAMES[entry]) names.add(LEGACY_TOOL_NAMES[entry]);
+      for (const member of TOOL_FAMILIES[entry] || []) names.add(member);
+    }
+    // an old transcript may log a legacy name: it is the same tool as its current name
+    return (name) => names.has(name) || names.has(LEGACY_TOOL_NAMES[name]);
   }
   try {
     const re = new RegExp(m);
-    return (name) => re.test(name);
+    return (name) => {
+      const current = LEGACY_TOOL_NAMES[name] || name;
+      return re.test(name) || re.test(current) || (LEGACY_OF.get(current) || []).some((legacy) => re.test(legacy));
+    };
   } catch {
     return null;
   }
