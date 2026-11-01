@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [0.1.6] — 2026-11-01
+
+### Fixed
+- Failing hooks: Claude Code records a hook run only when the hook printed something or failed, so the recorded runs made almost any hook look like it fails every time. The run count is now estimated from the prompts, sessions and tool calls its matcher selects, only in the sessions (and, for project hooks, the project) where the hook left a record; when it cannot be estimated the rate is shown as unknown and the old absolute threshold applies. A mostly healthy hook is no longer offered for removal, an always-failing one still is.
+- Cost: a relocated or forked copy of a session no longer adds its parent's cost again; the digest says the cost covers whole sessions and shows the part inside the window.
+- Upgrading from 0.1.4: the old shared-script hook of `format-on-edit` / `verify-before-stop` is removed inside the new batch (undoing it puts the old hook back), instead of asking to undo the whole old batch with its other recipes.
+- `settings.hook.remove` claims only removals in the settings files the run looked at, so undoing one project's batch restores its hooks; `plugins.disable` claims every layer where a live batch switched the plugin off; path comparisons for claims are case-insensitive on Windows.
+- `apply --from-batch` re-applies the body of a `custom.*` recipe the batch used (stored in the journal), warns when an older journal has to fall back to the current draft, and leaves no temporary folder behind on errors.
+- `undo --dry-run` reads the same settings cache as the simulation, so it matches the real run when a path is spelled with a different drive-letter case.
+
 ## [0.1.5] — 2026-11-01
 
 ### Added

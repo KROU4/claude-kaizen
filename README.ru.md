@@ -77,8 +77,8 @@ node scripts/kaizen.mjs undo --last
 Или без клонирования, прямо с GitHub (закрепите тег, чтобы запуски были повторяемыми):
 
 ```bash
-npx github:KROU4/claude-kaizen#v0.1.5 measure
-npx github:KROU4/claude-kaizen#v0.1.5 recommend
+npx github:KROU4/claude-kaizen#v0.1.6 measure
+npx github:KROU4/claude-kaizen#v0.1.6 recommend
 ```
 
 Запустите `measure` ещё раз через неделю: дайджест завершится таблицей **что изменилось** (прерывания, запросы разрешений, таймауты, компакции, исправления, стоимость…) со сравнением двух измерений.
