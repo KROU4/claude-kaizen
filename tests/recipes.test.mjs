@@ -974,6 +974,29 @@ describe('triggers read the real measure (round 10)', () => {
     assert.equal(rec(withSecrets, 'hooks.protect-secrets'), undefined, 'protect-secrets itself is recognised');
     const withFiles = measureOf(risky, inv({ hooks: { total: 1, events: { PreToolUse: 1 }, commands: [hook('node ~/.claude/hooks/protect-files.mjs', 'PreToolUse')] } }));
     assert.equal(withFiles.context.hasGuardHook, false, 'a file-protection hook is not a destructive-command guard');
+    for (const command of ['bash ~/.claude/hooks/protect_env.sh', '"node" "/h/protect-secrets.mjs"', 'node protect-files.mjs --strict']) {
+      assert.equal(measureOf(risky, inv({ hooks: { total: 1, events: { PreToolUse: 1 }, commands: [hook(command)] } })).context.hasGuardHook, false, command);
+    }
+  });
+
+  it('a protect-* hook that blocks rm or deletes is a destructive-command guard', () => {
+    const risky = sessions({ forcePushes: 2, destructive: 3 });
+    for (const command of ['bash ~/.claude/hooks/protect-file-deletion.sh', 'bash ~/.claude/hooks/protect-paths-from-rm.sh', 'node protect-main.mjs', 'bash ~/.claude/hooks/protect-git.sh', 'node ~/.claude/hooks/protect-dangerous-commands.mjs',
+      'bash ~/.claude/hooks/branch-protection.sh', 'bash ~/.claude/hooks/protect-push.sh', 'bash ~/.claude/hooks/protect-reset-hard.sh', 'node ~/.claude/hooks/protectMain.mjs', 'node ~/.claude/hooks/block-force-push.mjs', 'node ~/.claude/hooks/guard-destructive.mjs']) {
+      const m = measureOf(risky, inv({ hooks: { total: 1, events: { PreToolUse: 1 }, commands: [hook(command)] } }));
+      assert.equal(m.context.hasGuardHook, true, command);
+      assert.equal(rec(m, 'hooks.guard-destructive'), undefined, command);
+    }
+  });
+
+  it('hooks that only protect secrets, env or files do not count as a destructive-command guard (guard-destructive is still offered)', () => {
+    const risky = sessions({ forcePushes: 2, destructive: 3 });
+    for (const command of ['node ~/.claude/hooks/protect-secrets.mjs', 'node ~/.claude/hooks/protect-files.mjs', 'bash ~/.claude/hooks/protect_env.sh', 'bash ~/.claude/hooks/protect-env-vars.sh',
+      'node ~/.claude/hooks/protect-secrets-hook.mjs', 'bash ~/.claude/hooks/protect-file-edits.sh', 'bash ~/.claude/hooks/secrets-guard.sh']) {
+      const m = measureOf(risky, inv({ hooks: { total: 1, events: { PreToolUse: 1 }, commands: [hook(command)] } }));
+      assert.equal(m.context.hasGuardHook, false, command);
+      assert.ok(rec(m, 'hooks.guard-destructive'), command);
+    }
   });
 
   it('guard-destructive is not offered when the user has a guard of their own (including a "protect-*" hook)', () => {
@@ -994,6 +1017,9 @@ describe('triggers read the real measure (round 10)', () => {
     const viaAgents = measureOf(sessions({ subagents: { 'helper-kit:executor': 4 } }), pruneInv());
     assert.deepEqual(viaAgents.skills.unusedPlugins, []);
     assert.equal(rec(viaAgents, 'skills.prune-unused'), undefined);
+    const viaSlash = measureOf(sessions({ slashCommands: { 'helper-kit:ship': 2 } }), pruneInv());
+    assert.deepEqual(viaSlash.skills.unusedPlugins, [], 'a plugin whose slash command ran is in use');
+    assert.equal(rec(viaSlash, 'skills.prune-unused'), undefined);
   });
 
   it('skills.prune-unused does not offer a plugin that ships hooks (disabling it would switch them off)', () => {

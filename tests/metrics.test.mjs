@@ -10,7 +10,7 @@ import path from 'node:path';
 import { readInsights } from '../scripts/lib/insights.mjs';
 import { inventory } from '../scripts/lib/inventory.mjs';
 import { detectLang } from '../scripts/lib/i18n.mjs';
-import { METRIC_DOCS, MEASURE_VERSION, MIN_SESSIONS_FOR_UNUSED, SAFE_VERBS, buildMeasure, suggestAllowRules } from '../scripts/lib/metrics.mjs';
+import { METRIC_DOCS, MEASURE_VERSION, MIN_SESSIONS_FOR_UNUSED, SAFE_VERBS, buildMeasure, isGuardHookCommand, suggestAllowRules } from '../scripts/lib/metrics.mjs';
 import { loadCatalog, resolvePath } from '../scripts/lib/recipes.mjs';
 import { commandVerb, hookKey, newSessionSummary, scanTranscripts } from '../scripts/lib/transcripts.mjs';
 import { PROJECTS_FIXTURE, USAGE_DATA_FIXTURE, cleanupTempDirs, makeTempDir, materializeHome, setEnv, writeJson, writeText } from './helpers.mjs';
@@ -797,6 +797,21 @@ describe('context', () => {
     assert.equal(measure.context.settingsLanguage, null);
     assert.equal(measure.context.cleanupPeriodDays, null);
   });
+
+  it('isGuardHookCommand: destructive-command guards yes, secrets/env/file protection no', () => {
+    const guards = ['protect-main.mjs', 'protect-file-deletion.sh', 'protect-paths-from-rm.sh', 'protect-git.sh', 'protect-dangerous-commands.mjs', 'branch-protection.sh', 'protect-push.sh',
+      'protect-reset-hard.sh', 'protectMain.mjs', 'block-force-push.mjs', 'guard-destructive.mjs', 'protect-database.sh', 'protect.sh', 'command-guard.sh', 'block-force.sh',
+      'protect-files-from-deletion.sh', 'protect-sensitive-commands.sh'];
+    for (const g of guards) {
+      for (const cmd of [`bash ~/.claude/hooks/${g}`, `node "C:\\Users\\u\\.claude\\hooks\\${g}" --strict`, `"node" "/state/kaizen/hooks/${g}"`]) assert.equal(isGuardHookCommand(cmd), true, cmd);
+    }
+    const others = ['protect-secrets.mjs', 'protect-files.mjs', 'protect_env.sh', 'protect-env-vars.sh', 'protect-secrets-hook.mjs', 'protect-file-edits.sh', 'secrets-guard.sh', 'env-guard.mjs', 'files-guard.sh',
+      'protect-env-prod.sh', 'format-on-edit.mjs', 'notify.sh', 'protect-files-main.sh', 'protect-secrets-from-git.sh', 'protect-env-on-push.sh', 'protect-sensitive-files.sh', 'protect-secrets-main-branch.sh'];
+    for (const o of others) assert.equal(isGuardHookCommand(`bash ~/.claude/hooks/${o}`), false, o);
+    assert.equal(isGuardHookCommand('node /home/git/hooks/protect-secrets.mjs'), false, 'a directory name does not count');
+    assert.equal(isGuardHookCommand('node ~/guard/hooks/log.mjs'), false, 'a guard directory does not make the script a guard');
+    assert.equal(isGuardHookCommand(''), false);
+  });
 });
 
 describe('quality', () => {
@@ -1011,6 +1026,14 @@ describe('suggestAllowRules', () => {
     assert.equal(suggestAllowRules({ 'git diff': 5 }, { exclude: ['Bash(git diff)'] }).length, 1, 'an exact rule allows only that command line');
   });
 
+  it('treats a blanket Bash rule and a bare-* suffix rule as covering', () => {
+    const verbs = { 'git status': 5, 'git diff': 5, ls: 5 };
+    assert.deepEqual(suggestAllowRules(verbs, { exclude: ['Bash'] }), []);
+    assert.deepEqual(suggestAllowRules(verbs, { exclude: ['Bash(*)'] }), []);
+    assert.deepEqual(suggestAllowRules(verbs, { exclude: ['Bash(git diff*)'] }).map((r) => r.rule).sort(), ['Bash(git status:*)', 'Bash(ls:*)']);
+    assert.equal(suggestAllowRules({ 'git diff': 5 }, { exclude: ['Bash(git diff)'] }).length, 1, 'still exact-only');
+  });
+
   it('never suggests unsafe or unknown verbs, however often they ran', () => {
     assert.deepEqual(suggestAllowRules({ rm: 50, curl: 50, sudo: 50, 'git push': 50, 'git reset': 50, 'docker rm': 50, bash: 50, sh: 50 }), []);
   });
@@ -1153,6 +1176,12 @@ describe('unused skills and plugins', () => {
 
   it('keeps a plugin out of unusedPlugins when only its MCP server was called', () => {
     const skills = run({ mcp: { plugin_idle_server: { calls: 1, tools: { t: 1 } } } });
+    assert.deepEqual(skills.unusedPlugins, ['demo@fixture-market']);
+    assert.deepEqual(skills.pluginUsage.idle, { skills: 1, used: 0 });
+  });
+
+  it('keeps a plugin out of unusedPlugins when only its slash command (plugin:cmd) was run', () => {
+    const skills = run({ slashCommands: { 'idle:ship': 1 } });
     assert.deepEqual(skills.unusedPlugins, ['demo@fixture-market']);
     assert.deepEqual(skills.pluginUsage.idle, { skills: 1, used: 0 });
   });

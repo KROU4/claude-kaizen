@@ -261,6 +261,31 @@ function shortProjectName(cwd) {
   return parts.slice(-2).join('/');
 }
 
+// Words of a hook script name that make a "protect*"/"*guard" hook a destructive-command guard / a non-destructive one.
+const GUARD_POS = new Set(['rm', 'delete', 'deletion', 'force', 'main', 'master', 'branch', 'push', 'reset', 'git', 'dangerous', 'destructive']);
+const GUARD_NEG = new Set(['secret', 'secrets', 'env', 'dotenv', 'file', 'files', 'key', 'keys', 'credential', 'credentials', 'path', 'paths']);
+const GUARD_DEL = new Set(['rm', 'delete', 'deletion', 'force']); // the only words that make "protect-<secrets|env|files>-.." a destructive-command guard
+
+/**
+ * Is this hook command a destructive-command guard? Judged per script name (directories do not count): guard|block-force|
+ * destructive|dangerous, or protect* whose next word is not secrets/env/files/keys/..; a positive word (rm, force, main,
+ * git, push, ...) anywhere in the name wins, a negative one ("secrets-guard", "protect-env-vars") rules a bare guard out.
+ */
+export function isGuardHookCommand(command) {
+  for (const raw of String(command).split(/["'\s]+/)) {
+    const name = raw.split(/[\\/]/).pop();
+    const w = name.replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+    const pos = w.some((x) => GUARD_POS.has(x));
+    const viaGuard = /guard|block[-_]?force|destructive|dangerous/i.test(name) && (pos || !w.some((x) => GUARD_NEG.has(x)));
+    const p = w.findIndex((x) => x.startsWith('protect'));
+    // protect-<secrets|env|files|keys..>-<anything> is a file/secret protector unless a deletion word is present (main/git/push do not count);
+    // "protect-sensitive-<x>" is judged by <x> ("-files" no, "-commands" yes)
+    const nx = w[p + 1] === 'sensitive' ? w[p + 2] : w[p + 1];
+    if (viaGuard || (p >= 0 && (GUARD_NEG.has(nx) ? w.some((x) => GUARD_DEL.has(x)) : true))) return true;
+  }
+  return false;
+}
+
 /**
  * Strict allowlist for the "read-only" permission recipe. `Bash(<verb>:*)` is a prefix match, so a verb is listed only
  * when EVERY invocation starting with it is read-only: no runners (npm run, npx, make, uv run, python/node, test
@@ -276,9 +301,12 @@ export const SAFE_VERBS = new Set([
 
 export function suggestAllowRules(bashVerbs, { minCount = 3, exclude = [] } = {}) {
   const have = new Set(exclude);
-  // `Bash(git:*)` / `Bash(git *)` already allow every `git ...` verb; an exact `Bash(git diff)` allows only itself.
-  const prefixes = exclude.map((r) => /^Bash\((.+?)(?::\*| \*)\)$/.exec(String(r))).filter(Boolean).map((m) => m[1].trim());
-  const covered = (verb) => prefixes.some((p) => verb === p || verb.startsWith(p + ' '));
+  if (exclude.some((r) => r === 'Bash' || r === 'Bash(*)')) return []; // a blanket Bash rule allows every command
+  // `Bash(git:*)` / `Bash(git *)` already allow every `git ...` verb, `Bash(git diff*)` every `git diff...`; an exact `Bash(git diff)` allows only itself.
+  const ms = exclude.map((r) => /^Bash\((.+?)(:\*| \*|\*)\)$/.exec(String(r))).filter(Boolean);
+  const prefixes = ms.filter((m) => m[2] !== '*').map((m) => m[1].trim());
+  const rawPrefixes = ms.filter((m) => m[2] === '*').map((m) => m[1]);
+  const covered = (verb) => prefixes.some((p) => verb === p || verb.startsWith(p + ' ')) || rawPrefixes.some((p) => verb.startsWith(p));
   const out = [];
   for (const [verb, n] of Object.entries(bashVerbs)) {
     if (n < minCount || !SAFE_VERBS.has(verb)) continue;
@@ -690,8 +718,10 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
   // A plugin is also in use through its subagents ('plugin:agent' spawn types) and its hooks, which disabling would switch off.
   const pluginsWithSubagents = new Set(Object.keys(subagentsByType).filter((k) => k.includes(':')).map((k) => k.slice(0, k.indexOf(':'))));
   const pluginsWithHooks = new Set(inventory.hooks.commands.filter((c) => typeof c.scope === 'string' && c.scope.startsWith('plugin:')).map((c) => c.scope.slice(7)));
+  // ...and through its slash commands / skills ('plugin:name' keys), which have no SKILL.md in the inventory.
+  const pluginsWithSlash = new Set([...Object.keys(slash), ...Object.keys(skillsUsed)].filter((k) => k.includes(':')).map((k) => k.slice(0, k.indexOf(':'))));
   const unusedPlugins = (enoughUsage ? inventory.plugins.installed : [])
-    .filter((p) => pluginUsage[p.name] && pluginUsage[p.name].used === 0 && !Object.keys(mcpUsedByPlugin(S)).includes(p.name) && !pluginsWithSubagents.has(p.name) && !pluginsWithHooks.has(p.name) && !(p.components && p.components.hooks))
+    .filter((p) => pluginUsage[p.name] && pluginUsage[p.name].used === 0 && !Object.keys(mcpUsedByPlugin(S)).includes(p.name) && !pluginsWithSubagents.has(p.name) && !pluginsWithSlash.has(p.name) && !pluginsWithHooks.has(p.name) && !(p.components && p.components.hooks))
     .map((p) => `${p.name}@${p.marketplace}`);
   const skills = {
     used: topN(skillsUsed, 40),
@@ -756,7 +786,7 @@ export function buildMeasure({ sessions, inventory, insights, env, scan }) {
     hookCommandsText: inventory.hooks.commands.map((c) => `${c.event}:${c.command}`).join('\n').toLowerCase(),
     kaizenHooks: inventory.hooks.commands.filter((c) => /kaizen[\\/]hooks/i.test(c.command)).length,
     hasFormatterHook: inventory.hooks.commands.some((c) => /prettier|ruff|black|gofmt|rustfmt|format-on-edit|eslint --fix|biome/i.test(c.command)),
-    hasGuardHook: inventory.hooks.commands.some((c) => /guard|block-force|destructive|protect(?![-_.]?(?:secrets?|files?|env|keys?|paths?|credentials?)\b)/i.test(c.command)),
+    hasGuardHook: inventory.hooks.commands.some((c) => isGuardHookCommand(c.command)),
     hasNotifyHook: inventory.hooks.commands.some((c) => /notify|notification|telegram|ntfy|toast/i.test(c.command)) || !!inventory.hooks.events.Notification,
     hasSessionStartHook: !!inventory.hooks.events.SessionStart,
     hasPreCompactHook: !!inventory.hooks.events.PreCompact,
