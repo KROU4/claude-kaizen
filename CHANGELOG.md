@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [0.1.11] — 2026-11-03
+
+### Fixed
+- `guard-destructive` closes the indirect SQL routes listed in 0.1.10. SQL is followed through pipes, `$( )` / backticks, `>( )` feeds, `read` / `mapfile` / `printf -v` stores, PowerShell `( )` arguments and assignments, and `.sql` files written earlier in the same command and later fed to a client or script (`npx prisma db execute --file`, `python run.py q.sql`). Formatters and linters (`prettier`, `sqlfluff`, `pg_format`, …) reading such a file are not treated as running it.
+- `guard-destructive` sees destructive commands behind shell keywords and groups (`if …; then rm -rf /; fi`, `{ rm -rf /; }`, `! rm -rf /`, `for … do … done`) and behind PowerShell assignments (`$null = Remove-Item -Recurse -Force C:\`).
+- `guard-destructive` no longer loses the target to redirections: `rm -rf 2>&1 ~`, `rm -rf /&>/dev/null`, `>/dev/null rm -rf ~`, or a quoted `">"` before `&`.
+- `guard-destructive` handles more cmd.exe forms: `;` and `,` lists inside `cmd /c "rd /s /q …"`, `r^d` caret escapes, and `^&` kept as an argument. Inside a PowerShell `% { cmd /c rd … $_.FullName }`, member targets count as scoped.
+- `guard-destructive` recognises more wipes: `rails db:reset` / `db:migrate:reset` (also via `bundle exec`), `prisma migrate reset` via `npm exec` / `pnpm` / `yarn` / `bunx`, `redis-cli FLUSHALL` via `docker exec` / `kubectl exec` / `ssh`, `docker compose down -v`, `git restore .` (also with `--staged --worktree`), `git checkout -f`, `git switch --discard-changes` and `git stash clear`. `find` judges only its start paths, so `find . -xtype l -delete` passes and `find -L / -delete` is blocked. `--help` passes, but `chmod -R -h 777 /` does not.
+- `guard-destructive` stays linear on long or adversarial lines: thousands of `;`-separated SQL writes, `tee` chains, 800-stage pipelines and `drop /*` floods all finish in well under a second.
+- `verify-before-stop` fixes the 0.1.10 known issues. `mvn -DskipTests verify`, `-Dmaven.test.skip(.exec)=true`, `-Dsurefire.skip=true` and a profile named `test` (`mvn -P test spring-boot:run`) no longer count as test runs. `pnpm --filter web test`, `npm --prefix app test`, `npm run -w pkg test`, `yarn workspace web test`, `npm t` and `test:unit` / `test-unit` / `type-check` scripts now count.
+- `verify-before-stop` counts `turbo run … test`, `nx test`, `nx run app:test`, `nx run-many -t …`, `swift test`, `xcodebuild … test` and `prettier --check`, and follows `\` / backtick line continuations and quoted arguments. Text such as `echo "run mvn install"`, `--configuration=test` and `npm run lint-staged` is not taken for a check. All loops are bounded.
+
+### Known issues
+- `guard-destructive` is a heuristic, not a shell parser. Known gaps: values held in PowerShell variables (`$d = Get-Item ~; Remove-Item $d.FullName`), `git checkout HEAD -- <path>`, `find ~ -name '*' -delete`, `Invoke-Command { … }` / `. { … }` script blocks, and .NET calls such as `[IO.Directory]::Delete`.
+- `verify-before-stop` matches tool names such as `jest` or `eslint` anywhere in a command, so `npm i -D jest` counts as a check run.
+
 ## [0.1.10] — 2026-11-01
 
 ### Fixed
