@@ -16,7 +16,26 @@ const MODE_RAW = '{{mode}}';
 const PATTERN_RAW = '{{testPattern}}';
 const unset = (v) => typeof v !== 'string' || v.startsWith('{' + '{') || v.trim() === '';
 const MODE = !unset(MODE_RAW) && MODE_RAW.trim().toLowerCase() === 'remind' ? 'remind' : 'block';
-const DEFAULT_RE = /\b(?:pytest|unittest|tox|nox|(?:npm|pnpm|yarn|bun)(?:\.cmd|\.exe)?\s+(?:run\s+)?(?:test|lint|typecheck|check)|vitest|jest|mocha|playwright\s+test|go\s+(?:test|vet)|cargo\s+(?:test|clippy|check)|dotnet\s+test|mvnw?(?:\.cmd)?(?:\s+[^\s;&|<>]+)*?\s+(?:test|verify)(?![\w:.-])|gradlew?(?:\.bat)?(?![^;&|\n]*\s(?:-x|--exclude-task)(?:\s+|=)["']?(?:\S*:)?test\b)(?:\s+[^\s;&|<>]+)*?\s+(?:\S*:)?(?:test|check|build)(?![\w:.-])|phpunit|rspec|mix\s+test|make\s+(?:test|check|lint)|node\s+--test|ruff|eslint|tsc|mypy|pyright|flake8|pylint|golangci-lint|biome)\b/i;
+// Built from parts so each piece stays readable. Token loops never cross a line break and are bounded, so the match stays
+// linear on long or adversarial commands. T = one shell word, S = blanks on the same line.
+// T = one shell word (a quoted part counts as part of the word), S = blanks on the same line or a `\` / backtick line continuation.
+const T = `(?:[^\\s;&|<>"']|"[^"\\n]{0,400}"|'[^'\\n]{0,400}')+`, S = '(?:[ \\t]|[\\\\`]\\r?\\n)+';
+const SCRIPT = '(?:test|t|tests|lint|typecheck|type-check|check)(?!-(?:compile|staged)\\b)(?:[-:][\\w:-]+)?(?![\\w-])';
+const VALUE_FLAG = '(?:--prefix|-C|--dir|--filter|-F|-w|--workspace|--cwd)';
+const FLAGS = `(?:${S}(?:${VALUE_FLAG}(?:=${T}|${S}${T})|--?(?!-)(?!(?:prefix|C|dir|filter|F|w|workspace|cwd)(?![\\w-]))[\\w-]+(?:=${T})?))`;
+const NPM = `(?:npm|pnpm|yarn|bun)(?:\\.cmd|\\.exe)?(?:${FLAGS}|${S}workspace${S}${T}){0,24}${S}(?:run(?:-script)?${FLAGS}{0,8}${S})?${SCRIPT}`;
+// nx / turbo: a check only in a target position (`nx test app`, `nx run app:test`, `nx run-many -t build test`, `turbo run test`),
+// never as an option value (`--configuration=test`, `--filter=test`) or a configuration (`app:build:test`)
+const KW = '(?:test|lint|typecheck|type-check|check)';
+const MONO = `(?:nx${S}${KW}(?![\\w:-])|nx${S}run${S}[\\w@/.-]+:${KW}(?![\\w:-])|(?:nx${S}(?:run-many|affected)${S}(?:-t|--targets?)(?:=|${S})|turbo${S}run${S})(?:[\\w:-]+(?:,|${S})){0,8}?${KW}(?![\\w:-]))`;
+const SKIP = `(?![^;&|\\n]{0,2000}\\s["']?-D(?:skipTests|maven\\.test\\.skip(?:\\.exec)?|surefire\\.skip)(?:=true)?(?=[\\s"']|$))`;
+const NOT_VALUE = `(?<!(?:^|\\s)(?:-P|--activate-profiles|-pl|--projects|-f|--file|-s|--settings|-rf|-T)${S})`;
+// test / verify anywhere after mvn; package / install / deploy (common English words) only when mvn is in command position
+const MVN = `mvnw?(?:\\.cmd)?${SKIP}(?:${S}${T}){0,128}?${S}${NOT_VALUE}(?:test|verify)(?![\\w:.-])`;
+const MVN_LIFE = `(?<=(?:^|[;&|(\\n]|\\b(?:exec|sudo|then|do|time|env))[ \\t]*(?:[\\w.~:-]*[\\\\/])?)mvnw?(?:\\.cmd)?${SKIP}(?:${S}${T}){0,128}?${S}${NOT_VALUE}(?:package|install|deploy)(?![\\w:.-])`;
+const GRADLE = `gradlew?(?:\\.bat)?(?![^;&|\\n]{0,2000}\\s(?:-x|--exclude-task)(?:[ \\t]+|=)["']?(?:\\S*:)?test\\b)(?:${S}${T}){0,128}?${S}(?:\\S*:)?(?:test|check|build)(?![\\w:.-])`;
+const XCODE = `xcodebuild\\b[^;&|\\n]{0,400}?[ \\t]test(?:-without-building)?(?=[ \\t;&|)]|$)`;
+const DEFAULT_RE = new RegExp(`\\b(?:pytest|unittest|tox|nox|${NPM}|${MONO}|vitest|jest|mocha|playwright\\s+test|go\\s+(?:test|vet)|cargo\\s+(?:test|clippy|check|nextest)|dotnet\\s+test|swift\\s+test|${XCODE}|${MVN}|${MVN_LIFE}|${GRADLE}|prettier\\b[^;&|\\n]{0,200}?[ \\t]--check|phpunit|rspec|mix\\s+test|make\\s+(?:test|check|lint)|node\\s+--test|ruff|eslint|tsc|mypy|pyright|flake8|pylint|golangci-lint|biome)\\b`, 'i');
 const CODE_EXT = /\.(?:js|jsx|ts|tsx|mjs|cjs|py|go|rs|java|kt|cs|rb|php|swift|c|cpp|h|vue|svelte|sql|sh|ps1)$/i;
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 
@@ -107,16 +126,25 @@ function selftest() {
     check('tests ran -> silent', ev(transcript(user('fix'), edit('/p/a.ts'), result, bash('cd p && npm test -- --run'))) === null, 'expected silence');
     for (const c of ['npm.cmd test', 'pnpm.cmd run lint', 'yarn.cmd test', './mvnw test', 'mvnw.cmd verify', '.\\gradlew.bat test', './gradlew --no-daemon check', 'mvn -q verify',
       'mvn -pl core -am test', 'mvn -f x/pom.xml test', 'mvn -T 4 test', 'mvn -Dtest=FooTest#works test', 'mvn -X test', './gradlew test; echo', '(cd a && ./gradlew test)', 'bash -c "./gradlew test"',
-      './gradlew test&&echo ok', './gradlew test>build.log 2>&1', './gradlew :app:test', './gradlew -p backend test', './gradlew build', './gradlew test -x lint']) {
+      './gradlew test&&echo ok', './gradlew test>build.log 2>&1', './gradlew :app:test', './gradlew -p backend test', './gradlew build', './gradlew test -x lint', 'mvn clean install', 'mvn -B package', 'pnpm --filter web test', 'pnpm -r test', 'pnpm -C web run lint',
+      'npm --prefix web test', 'npm -w packages/api test', 'yarn workspace web test', 'npm t', 'npm run type-check', 'npm run test:unit', 'npx turbo run test', 'nx run-many -t test',
+      'npm run test-unit', 'npm run lint-fix', 'yarn test-e2e', 'npm run -s lint', 'mvn -DskipTests=false test', 'mvn -pl my-api-t test', 'nx run web:test', 'nx affected -t test',
+      'turbo run build test', 'swift test', 'pnpm --filter @scope/web test', './gradlew clean \\\n  test', 'mvn -B \\\n  -pl core -am \\\n  test', './mvnw clean `\r\n verify',
+      'mvn "-Dtest=FooTest" test', 'cd app && mvn clean install', './mvnw -B package', 'npm run -w packages/api test', 'nx test api', 'npx prettier --check src', 'xcodebuild -scheme App test']) {
       check(`tests ran (${c}) -> silent`, ev(transcript(user('fix'), edit('C:\\p\\src\\a.ts'), asst(use('PowerShell', { command: c })))) === null, 'expected silence');
     }
     for (const c of ['./gradlew bootRun 2>&1 | tee build.log', './gradlew assemble -x test', 'gradle wrapper && echo check', './mvnw spring-boot:run | tee test.log',
-      './gradlew build -x test', './gradlew clean build -x test', 'gradle build --exclude-task test', "./gradlew build -x 'test'", './gradlew test-compile']) {
+      './gradlew build -x test', './gradlew clean build -x test', 'gradle build --exclude-task test', "./gradlew build -x 'test'", './gradlew test-compile', 'mvn -DskipTests verify', 'mvn verify -DskipTests', 'mvn -Dmaven.test.skip=true install',
+      'mvn -P test spring-boot:run', 'mvn -q spring-boot:run -P test', 'npm run build', 'pnpm --filter web build', 'npm typescript', 'mvn -v\nnpm install', 'which mvn\nbrew install maven', 'npm --prefix tests install',
+      'pnpm --filter test build', 'yarn --cwd test install', 'npm run lint-staged', 'mvn -Dsurefire.skip=true verify', 'echo "Run mvn install first"',
+      'git commit -m "fix mvn deploy config"', 'mvn exec:java -Dexec.args="a install"', 'nx run app:build --configuration=test', 'turbo run build --filter=test',
+      'nx run-many -t build --exclude=lint', 'nx run web:build:test', 'xcodebuild -project test/App.xcodeproj build', 'mvn -Dmaven.test.skip.exec=true install']) {
       check(`not a test run (${c}) -> block`, ev(transcript(user('fix'), edit('/p/a.ts'), bash(c)))?.decision === 'block', 'expected block');
     }
     // linear time: a long flag list without a test goal must not backtrack exponentially
     const t0 = Date.now(), many = './gradlew ' + Array.from({ length: 40 }, (_, i) => `--flag-${i}`).join(' ') + ' bootRun';
-    ev(transcript(user('fix'), edit('/p/a.ts'), bash(many), bash('mvn ' + Array.from({ length: 40 }, (_, i) => `-Dk${i}=v`).join(' ') + ' exec:java')));
+    ev(transcript(user('fix'), edit('/p/a.ts'), bash(many), bash('mvn ' + Array.from({ length: 40 }, (_, i) => `-Dk${i}=v`).join(' ') + ' exec:java'),
+      bash('pnpm ' + Array.from({ length: 40 }, (_, i) => `--filter p${i}`).join(' ') + ' build')));
     check('40 flags judged quickly', Date.now() - t0 < 200, `${Date.now() - t0} ms`);
     check('echo of a test name is not a run', ev(transcript(user('fix'), edit('/p/a.ts'), bash('echo done')))?.decision === 'block', 'expected block');
     check('only docs/config edited -> silent', ev(transcript(user('docs'), edit('/p/README.md'), edit('/p/package.json'), edit('/p/x.yaml'))) === null, 'expected silence');
