@@ -316,7 +316,27 @@ export function recommend(catalog, measure, { lang = 'en', applied = new Set(), 
     });
   }
   recommended.sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
-  return { recommended, alreadyApplied, notApplicable };
+  if (includeAll) return { recommended, alreadyApplied, notApplicable };
+  // a custom draft does the job of a catalog recipe it names in `conflicts`, or of the catalog recipe writing the same
+  // thing (a skill, the `corrections` rules block): offer only the draft, so the console never shows both
+  const byId = new Map(catalog.recipes.map((r) => [r.id, r]));
+  const superseded = new Map();
+  for (const rec of recommended) {
+    if (!rec.id.startsWith('custom.')) continue;
+    const r = byId.get(rec.id);
+    const ids = [...(r.conflicts || [])];
+    for (const a of r.actions || []) {
+      if (a.type === 'skill') ids.push('skills.from-repeated-prompts');
+      if (a.type === 'claude-md.block' && a.id === 'corrections') ids.push('claude-md.corrections');
+    }
+    for (const id of ids) if (!id.startsWith('custom.') && !superseded.has(id)) superseded.set(id, rec.id);
+  }
+  const kept = recommended.filter((rec) => {
+    if (!superseded.has(rec.id)) return true;
+    notApplicable.push({ id: rec.id, reason: `superseded by ${superseded.get(rec.id)}` });
+    return false;
+  });
+  return { recommended: kept, alreadyApplied, notApplicable };
 }
 
 /** Actions may carry their own `when`; an action whose condition fails is skipped by apply and hidden from summaries. */

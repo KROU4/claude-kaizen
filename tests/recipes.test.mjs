@@ -783,6 +783,29 @@ describe('extra recipes files (recommend --add / apply --add)', () => {
       undo();
     }
   });
+
+  it('a recommended custom draft supersedes the catalog recipe it replaces, so the console offers only the draft', () => {
+    const base = { category: 'skills', impact: 'high', risk: 'low', title: { en: 'T', ru: 'T' }, why: { en: 'w', ru: 'w' }, when: true };
+    const cat = {
+      recipes: [
+        { ...base, id: 'skills.from-repeated-prompts', actions: [{ type: 'skill', name: '{params.name}', content: 'x' }] },
+        { ...base, id: 'claude-md.corrections', actions: [{ type: 'claude-md.block', id: 'corrections', content: 'x' }] },
+        { ...base, id: 'hooks.other', actions: [{ type: 'file', target: 'x', content: 'x' }] },
+        { ...base, id: 'hooks.named', actions: [{ type: 'file', target: 'y', content: 'y' }] },
+        { ...base, id: 'custom.skill-a', actions: [{ type: 'skill', name: 'a', content: 'a' }] },
+        { ...base, id: 'custom.corrections-rules', conflicts: ['hooks.named'], actions: [{ type: 'claude-md.block', id: 'corrections', content: 'r' }] },
+      ],
+    };
+    const res = recommend(cat, {});
+    assert.deepEqual(res.recommended.map((r) => r.id).sort(), ['custom.corrections-rules', 'custom.skill-a', 'hooks.other']);
+    const reasons = Object.fromEntries(res.notApplicable.map((n) => [n.id, n.reason]));
+    assert.equal(reasons['skills.from-repeated-prompts'], 'superseded by custom.skill-a');
+    assert.equal(reasons['claude-md.corrections'], 'superseded by custom.corrections-rules');
+    assert.equal(reasons['hooks.named'], 'superseded by custom.corrections-rules');
+    // a draft that is not recommended (already applied) supersedes nothing; --all lists everything
+    assert.ok(recommend(cat, {}, { applied: new Set(['custom.skill-a']) }).recommended.some((r) => r.id === 'skills.from-repeated-prompts'));
+    assert.equal(recommend(cat, {}, { includeAll: true }).recommended.length, 6);
+  });
 });
 
 describe('secret parameters', () => {
