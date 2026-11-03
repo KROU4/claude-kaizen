@@ -21,7 +21,9 @@ const isProtected = (name) => PROTECTED_RE.some((re) => re.test(name));
 
 const WELL_KNOWN = new Set(['node_modules', 'dist', 'build', 'out', 'target', 'coverage', 'tmp', 'temp', '.tmp', '.cache', '.next', '.nuxt', '.output', '.svelte-kit', '.turbo', '.parcel-cache', '.angular', '.gradle', '.terraform', '.nyc_output', '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache', '.tox', '.venv', 'venv', 'obj', '.vite', '.docusaurus', '.serverless', '.dart_tool', 'deriveddata', 'storybook-static', 'htmlcov', '.hypothesis', '.eggs', '.pnpm-store']);
 const SYSTEM_DIR = /^(?:bin|boot|dev|etc|lib|lib32|lib64|proc|root|sbin|sys|usr|var|windows|program files|program files \(x86\)|programdata|system|library|applications)$/i;
-const SQL_RE = /\b(?:drop\s+(?:table|database|schema)|truncate\s+table)\b/i;
+// `DROP/**/TABLE`: a block comment works as whitespace in SQL
+// (the comment body is bounded so an unterminated `/*` cannot make the scan quadratic)
+const SQL_RE = /\b(?:drop(?:\s|\/\*[^]{0,200}?\*\/)+(?:table|database|schema)|truncate(?:\s|\/\*[^]{0,200}?\*\/)+table)\b/i;
 // SQL clients are recognised by command name only (never by a path or message text); framework DB shells by their subcommand.
 const SQL_CLIENT = /^(?:psql|pgcli|mysql|mycli|mariadb|sqlite3?|litecli|sqlcmd|sqlplus|usql|mongosh?|duckdb|clickhouse-client|cockroach|snowsql|invoke-sqlcmd|prisma|alembic|knex|sequelize|dbshell|dbconsole)$/;
 const DB_SHELL_ARG = /^(?:dbshell|dbconsole|db:console)$/;
@@ -30,6 +32,8 @@ const TEXT_ONLY = new Set(['git', 'gh', 'echo', 'printf', 'grep', 'egrep', 'rg',
 const WRAPPERS = new Set(['sudo', 'doas', 'command', 'builtin', 'exec', 'nohup', 'time', 'env', 'nice', 'xargs', 'setsid', 'stdbuf']);
 const WIN = process.platform === 'win32';
 // Commands that run a program inside a container or on another host: a SQL client named in their arguments counts.
+// Tools that read a SQL file without running it.
+const LINTERS = new Set(['prettier', 'sqlfluff', 'eslint', 'biome', 'squawk', 'pg_format', 'sqlfmt', 'code']);
 const REMOTE = /^(?:docker|podman|nerdctl|docker-compose|kubectl|oc|ssh)$/;
 const DEVICE = /\/dev\/(?:sd[a-z]|hd[a-z]|vd[a-z]|xvd[a-z]|nvme\d|mmcblk\d|disk\d)/;
 
@@ -87,26 +91,37 @@ function tokenize(cmd, ps, bodies) {
   const esc = ps ? '`' : '\\';
   const text = stripHeredocs(cmd.replace(/\r\n?/g, '\n'), bodies, ps);
   const segs = [];
-  let toks = [], cur = '', has = false, q = null, bt = false;
+  let toks = [], cur = '', has = false, q = null, bt = false, qd = false;
   const subs = []; // open parens, true for a substitution ($( <( >( @() whose output feeds the command around it: `.sub`
-  const word = () => { if (has) toks.push(cur); cur = ''; has = false; };
-  const seg = (pipe) => { word(); if (toks.length) { toks.pipe = !!pipe; toks.sub = bt || subs.includes(true); segs.push(toks); } toks = []; };
+  // a quoted "<", ">", "{" or "}" is a plain word, never a redirection or a block: mark it with \u0002 so later checks can tell
+  const word = () => { if (has) toks.push(qd && /^[<>{}]/.test(cur) ? '\u0002' + cur : cur); cur = ''; has = false; qd = false; };
+  // `.feeds`: the command writes into a `>(...)` process, so its output reaches that process
+  const seg = (pipe, feeds) => { word(); if (toks.length) { toks.pipe = !!pipe; toks.sub = bt || subs.includes(true); toks.feeds = !!feeds; segs.push(toks); } toks = []; };
+  let lr = false; // the last character added was a plain (unquoted, unescaped) `<` or `>`
   for (let i = 0; i < text.length; i++) {
-    const c = text[i], n = text[i + 1];
+    const c = text[i], n = text[i + 1], wasRedir = lr;
+    lr = false;
     if (q) {
       if (c === q) q = null;
       else if (q === '"' && c === esc && n !== undefined && (ps || n === '"' || n === '\\')) { cur += n; i++; }
       else cur += c;
-    } else if (c === '"' || c === "'") { q = c; has = true; }
+    } else if (c === '"' || c === "'") { q = c; has = true; qd = true; }
     else if (c === esc && n === '\n') i++;
     else if (ps && c === '`' && n !== undefined) { cur += n; i++; has = true; }
+    // Bash `\;`, `\>`, `\&`, `\ `: the next character is literal (a backslash before an ordinary letter, as in C:\proj, stays)
+    else if (!ps && c === '\\' && n !== undefined && /[\s<>&|;()$`"'\\{}*?!#]/.test(n)) { cur += n; i++; has = true; }
+    // `2>&1`, `>&2` and a word-initial `&>file` are redirections, not the `&` separator (`rm -rf /&>x` is still `/` then `&>x`);
+    // PowerShell has only the `2>&1` / `*>&1` form
+    else if (c === '&' && (ps ? /^[\d*]?>$/.test(cur) && /\d/.test(n || '') : wasRedir || (n === '>' && !has))) { cur += c; has = true; }
     else if ('\n;|&()'.includes(c) || (!ps && c === '`')) {
-      const opens = c === '(' && /[$<>@]$/.test(cur);
-      seg(c === '|' && n !== '|');
+      // PowerShell: `python run.py (Write-Output …)` passes the expression's output as an argument (not after if/foreach/in/=/-op)
+      const psArg = ps && c === '(' && !has && toks.length && !/^(?:if|elseif|foreach|for|while|switch|until|in|return|=|-[a-z]+)$/i.test(toks[toks.length - 1]);
+      const opens = c === '(' && (/[$<>@]$/.test(cur) || psArg);
+      seg(c === '|' && n !== '|', c === '(' && /^>$|[^\d&]>$/.test(cur));
       if (c === '(') subs.push(opens); else if (c === ')') subs.pop(); else if (c === '`') bt = !bt;
     }
     else if (/\s/.test(c)) word();
-    else { cur += c; has = true; }
+    else { cur += c; has = true; lr = c === '<' || c === '>'; }
   }
   seg();
   return segs;
@@ -117,18 +132,47 @@ function unwrap(toks) {
   let i = 0;
   while (i < toks.length) {
     if (/^[A-Za-z_]\w*=/.test(toks[i])) i++;
-    else if (WRAPPERS.has(toks[i].toLowerCase())) { i++; while (i < toks.length && toks[i].startsWith('-')) i += /^-[ugnCpTRDUh]$/.test(toks[i]) ? 2 : 1; }
+    else if (/^(?:\d*|&)?[<>]{1,2}/.test(toks[i])) i += /^(?:\d*|&)?[<>]{1,2}$/.test(toks[i]) ? 2 : 1; // `>/dev/null rm -rf ~`
+    else if (toks[i] === 'bundle' && toks[i + 1] === 'exec') i += 2;
+    else if (/^g?timeout$/i.test(toks[i])) { // timeout [-s SIG] [-k T] [--preserve-status] DURATION cmd…
+      i++;
+      while (i < toks.length && toks[i].startsWith('-')) i += /^-[sk]$|^--(?:signal|kill-after)$/.test(toks[i]) ? 2 : 1;
+      if (i < toks.length && /^\d/.test(toks[i])) i++;
+    } else if (WRAPPERS.has(toks[i].toLowerCase())) { i++; while (i < toks.length && toks[i].startsWith('-')) i += /^-[ugnCpTRDUh]$/.test(toks[i]) ? 2 : 1; }
     else break;
   }
   return toks.slice(i);
 }
 
-function checkDelete(name, args, ps) {
+const baseName = (w) => w.split(/[\\/]/).pop().toLowerCase().replace(/\.(?:exe|com|cmd|bat)$/, '');
+// Leading words that only open a construct: Bash `if rm -rf /`, `then rm …`, `{ rm …`, `! rm …`; PowerShell `$x = Remove-Item …`,
+// `[void]$x = …`, `{ Remove-Item … }`, `ForEach-Object { … }`.
+const BASH_LEAD = new Set(['{', '}', '!', 'if', 'then', 'else', 'elif', 'do', 'while', 'until', 'time']);
+const PS_LEAD = new Set(['{', '}', 'if', 'elseif', 'else', 'foreach', 'for', 'while', 'do', 'switch', 'try', 'catch', 'finally', 'foreach-object', '%', 'where-object', '?']);
+function skipLead(toks, ps) {
+  let i = 0;
+  while (i < toks.length) {
+    const t = toks[i].toLowerCase();
+    // `[int]$x =`, `$x=`: each cast group matches one way only (no backtracking blow-up on `[a][a][a]…`)
+    if (ps && t.includes('$') && /^(?:\[[^\[\]\s]+(?:\[\])?\])*\$[\w:]+=?$/.test(t) && (t.endsWith('=') || toks[i + 1] === '=')) i += t.endsWith('=') ? 1 : 2;
+    else if ((ps ? PS_LEAD : BASH_LEAD).has(t) || (ps && /^-(?:process|begin|end)$/.test(t))) i++;
+    else break;
+  }
+  return toks.slice(i);
+}
+
+function checkDelete(name, args, ps, psVars = ps) {
   const cmdStyle = /^(?:del|erase|rmdir|rd)$/.test(name);
   const isRec = (a) => /^--recursive$/.test(a) || /^-[fFiIdvxPW]*[rR][fFiIdvxPWrR]*$/.test(a) || /^-rec\w*$/i.test(a) || (cmdStyle && /^\/s$/i.test(a));
   const isFlag = (a) => a.startsWith('-') || (cmdStyle && /^\/[a-z](?::\w+)?$/i.test(a));
-  let rec = false, skip = false, dashdash = false;
+  let rec = false, skip = false, dashdash = false, redir = false;
   const targets = [];
+  // Redirections are not targets: `2>&1` (split at `&` into `2>` and `1`), `2>nul`, `> log.txt`, `<in`; nor are `{` `}` of a block.
+  args = args.filter((a) => {
+    if (redir) { redir = false; return false; }
+    if (/^(?:\d*|&)?[<>]{1,2}$/.test(a)) { redir = true; return false; }
+    return !/^(?:\d*|&)?[<>]{1,2}\S/.test(a) && a !== '{' && a !== '}';
+  });
   // cmd.exe reads `/s/q` as two switches
   for (const a of cmdStyle ? args.flatMap((x) => (/^(?:\/[a-z])+$/i.test(x) ? x.match(/\/[a-z]/gi) : [x])) : args) {
     if (skip) skip = false;
@@ -139,9 +183,11 @@ function checkDelete(name, args, ps) {
   }
   // PowerShell `Remove-Item a, b` / `a,b` is an array of paths and cmd.exe splits `rd a,b` on commas; Bash expands `{a,b}`.
   const brace = (x) => { const m = /^(.*?)\{([^{}]*,[^{}]*)\}(.*)$/.exec(x); return m ? m[2].split(',').flatMap((s) => brace(m[1] + s + m[3])) : [x]; };
-  const list = ps || cmdStyle ? targets.flatMap((x) => x.split(cmdStyle ? /[,=]/ : ',')).filter(Boolean) : targets.flatMap(brace);
+  const list = (ps || cmdStyle ? targets.flatMap((x) => x.split(cmdStyle ? /[,=]/ : ',')).filter(Boolean) : targets.flatMap(brace)).map((x) => x.replace(/^\u0002/, ''));
   for (const t of rec ? list : []) {
-    const why = riskyTarget(t);
+    // PowerShell `$_.FullName`, `$d.Path`: a property of an unknown object; `$PWD.Path` / `$HOME.x` are the cwd / home itself
+    const member = psVars && /^\$(\w+)\.\w+$/.exec(t);
+    const why = member ? (/^(?:pwd|home|pshome)$/i.test(member[1]) ? 'the current or your home directory' : null) : riskyTarget(t);
     if (why) return `recursive delete of "${t}" (${why}) is not recoverable`;
   }
   return null;
@@ -156,6 +202,9 @@ function checkGit(args, ctx) {
   if (sub === 'reset' && has(/^--hard$/)) return 'git reset --hard throws away uncommitted work';
   if (sub === 'clean' && has(/^-[A-Za-z]*f|^--force$/) && !has(/^-[A-Za-z]*n|^--dry-run$/)) return 'git clean -f deletes untracked files for good';
   if (sub === 'checkout' && rest.includes('.')) return 'git checkout . discards all uncommitted changes';
+  if ((sub === 'checkout' || sub === 'switch') && has(/^(?:-[A-Za-z]*f[A-Za-z]*|--force|--discard-changes)$/)) return `git ${sub} --force discards uncommitted changes`;
+  if (sub === 'restore' && rest.some((a) => a === '.' || a === ':/') && (!has(/^(?:--staged|-S)$/) || has(/^(?:--worktree|-W)$/))) return 'git restore . discards all uncommitted changes';
+  if (sub === 'stash' && (rest[0] === 'clear')) return 'git stash clear deletes every stash for good';
   if (sub === 'branch' && has(/^-[A-Za-z]*D/)) return 'git branch -D deletes a branch even if it is unmerged';
   if (sub !== 'push') return null;
   const specs = rest.filter((a) => !a.startsWith('-')).slice(1);
@@ -170,14 +219,46 @@ function checkGit(args, ctx) {
 }
 
 function checkCommand(name, args, ctx, ps) {
-  if (/^(?:rm|del|erase|rmdir|rd|remove-item|ri)$/.test(name)) return checkDelete(name, args, ps);
+  // ctx.fromPs: a cmd /c line that PowerShell started, so `$_.FullName` was already expanded by PowerShell
+  if (/^(?:rm|del|erase|rmdir|rd|remove-item|ri)$/.test(name)) return checkDelete(name, args, ps, ps || ctx.fromPs);
   if (name === 'git') return checkGit(args, ctx);
   if (/^mkfs(?:\.\w+)?$/.test(name)) return `${name} would erase a filesystem`;
   if (/^(?:format-volume|clear-disk)$/.test(name) || (name === 'format' && args.some((a) => /^[a-z]:[\\/]?$/i.test(a)))) return 'formatting a disk or volume destroys all its data';
   if (name === 'dd' && args.some((a) => /^of=(?:\/dev\/|\\\\\.\\)/i.test(a))) return 'dd writing straight onto a device overwrites it';
+  if (name === 'find') {
+    // find with -delete / -exec rm and no filter predicate deletes everything under its start paths
+    let i = 0, del = false, filter = false;
+    while (i < args.length && /^-(?:[HLP]|O\d*)$/.test(args[i])) i++;
+    if (args[i] === '-D') i += 2;
+    const starts = [];
+    for (; i < args.length && !/^[-(!]/.test(args[i]); i++) starts.push(args[i]);
+    for (; i < args.length; i++) {
+      const a = args[i];
+      if (a === '-delete') del = true;
+      else if (/^-(?:exec|execdir|ok|okdir)$/.test(a)) {
+        if (/^(?:rm|del|rmdir|unlink)$/.test(baseName(args[i + 1] || '')) || (/^(?:sudo|doas)$/.test(args[i + 1] || '') && /^(?:rm|rmdir)$/.test(baseName(args[i + 2] || '')))) del = true;
+        while (i < args.length && args[i] !== ';' && args[i] !== '+') i++;
+      } else if (/^-(?:max|min)depth$/.test(a)) i++;
+      else if (/^-/.test(a) && !/^-(?:depth|xdev|mount|print0?|printf|fprint\w*|o|or|a|and|not|follow|daystart|noleaf|ignore_readdir_race|warn|nowarn|true)$/.test(a)) filter = true;
+    }
+    const bad = del && !filter && (starts.length ? starts : ['.']).find((t) => riskyTarget(t));
+    if (bad) return `find ${bad} with -delete/-exec rm and no filter deletes "${bad}" (${riskyTarget(bad)})`;
+  }
   if (name === 'chmod' && args.some((a) => /^-[A-Za-z]*R|^--recursive$/.test(a))) {
     const bad = args.filter((a) => !a.startsWith('-')).slice(1).find((t) => riskyTarget(t));
     if (bad) return `chmod -R on "${bad}" (${riskyTarget(bad)}) can break the whole system`;
+  }
+  // database / cache / volume wipes that are not SQL text (never for --help)
+  if (args.some((a) => /^(?:--help|help)$/.test(a)) || (name !== 'chmod' && args.includes('-h'))) return null;
+  if (name === 'dropdb') return 'dropdb deletes a whole database';
+  if (/^(?:rails|rake)$/.test(name) && args.some((a) => /^db:(?:drop|reset|purge|migrate:reset)$/.test(a))) return `${name} ${args.find((a) => /^db:/.test(a))} deletes the database`;
+  const runner = /^(?:npx|bunx|pnpx|pnpm|yarn|npm)$/.test(name) ? args.filter((a) => !a.startsWith('-') && !/^(?:dlx|exec|x)$/.test(a)) : null;
+  const pr = name === 'prisma' ? args : runner && runner[0] === 'prisma' ? runner.slice(1) : null;
+  if (pr && pr[0] === 'migrate' && pr[1] === 'reset') return 'prisma migrate reset drops the database';
+  if ((name === 'redis-cli' || (REMOTE.test(name) && args.includes('redis-cli'))) && args.some((a) => /^flush(?:all|db)$/i.test(a))) return 'redis FLUSHALL/FLUSHDB deletes the data for good';
+  if (REMOTE.test(name) && args.includes('dropdb')) return 'dropdb deletes a whole database';
+  if (/^(?:docker|podman|docker-compose)$/.test(name) && (name === 'docker-compose' || args[0] === 'compose') && args.includes('down') && args.some((a) => /^(?:-v|--volumes)$/.test(a))) {
+    return 'compose down -v deletes the named volumes and their data';
   }
   return null;
 }
@@ -189,7 +270,9 @@ function nested(name, args) {
   if (/^(?:bash|sh|zsh|dash|ksh)$/.test(name)) return (r = after(/^-[a-z]*c$/)) && r[0] ? [r[0], false] : null;
   if (name === 'eval') return [args.join(' '), false];
   if (/^(?:powershell|pwsh)$/.test(name)) return (r = after(/^-c(?:ommand)?$/i)) ? [r.join(' '), true] : null;
-  if (name === 'cmd') return (r = after(/^\/{1,2}[ck]$/i)) ? [r.join(' '), false] : null;
+  // cmd.exe: `;` is an argument delimiter (not a command separator) and `^` escapes the next character (r^d is rd); an escaped
+  // `^&` / `^|` / `^<` / `^>` is a literal argument, so it becomes a quoted word instead of a separator
+  if (name === 'cmd') return (r = after(/^\/{1,2}[ck]$/i)) ? [r.join(' ').replace(/\^([&|<>^])|\^(.)/g, (m, sp, ch) => (sp ? `"${sp}"` : ch)).replace(/;/g, ' '), false] : null;
   return null;
 }
 
@@ -218,15 +301,19 @@ function analyze(cmd, ps, ctx, depth = 0, bodies = []) {
   for (const raw of tokenize(cmd, ps, bodies)) {
     const toks = unwrap(raw);
     if (!toks.length) { info.push({ raw, name: '', f: null, args: [], assign: true }); continue; } // VAR=value only: can carry SQL text
-    const name = toks[0].split(/[\\/]/).pop().toLowerCase().replace(/\.(?:exe|com|cmd|bat)$/, '');
+    const name = baseName(toks[0]);
     names.push(name);
     const f = stdinScript(name, toks.slice(1));
+    // `name` stays the raw first word for the SQL rules below (an unknown word such as `while`, `{` or `$x` counts as a
+    // program that could run SQL); the destructive-command checks look past shell keywords and PowerShell assignments.
     info.push({ raw, name, f, args: toks.slice(1) });
+    const run = unwrap(skipLead(toks, ps));
+    const rname = run.length ? baseName(run[0]) : '';
     const toDevice = raw.some((t, i) => (/^\d*>>?$/.test(t) && DEVICE.test(raw[i + 1] || '')) || (/^\d*>>?\/dev\//.test(t) && DEVICE.test(t)));
-    const hit = checkCommand(name, toks.slice(1), ctx, ps) || (toDevice ? 'redirecting output onto a raw disk device destroys its data' : null);
+    const hit = (rname && checkCommand(rname, run.slice(1), ctx, ps)) || (toDevice ? 'redirecting output onto a raw disk device destroys its data' : null);
     if (hit) return hit;
-    const inner = depth < 2 ? nested(name, toks.slice(1)) : null;
-    const sub = inner && analyze(inner[0], inner[1], ctx, depth + 1, bodies);
+    const inner = depth < 2 && rname ? nested(rname, run.slice(1)) : null;
+    const sub = inner && analyze(inner[0], inner[1], ps || ctx.fromPs ? { ...ctx, fromPs: true } : ctx, depth + 1, bodies);
     if (sub) return sub;
   }
   if (depth < 2) {
@@ -257,22 +344,72 @@ function analyze(cmd, ps, ctx, depth = 0, bodies = []) {
   const SQL_MSG = 'SQL DROP/TRUNCATE cannot be undone';
   const client = (i) => SQL_CLIENT.test(i.name) || i.args.some((a) => DB_SHELL_ARG.test(a) || (REMOTE.test(i.name) && SQL_CLIENT.test(a.split(/[\\/]/).pop().toLowerCase())));
   const risky = (i) => !i.assign && (client(i) || !(TEXT_ONLY.has(i.name) || /^\u0001\d+\u0001$/.test(i.name)));
+  let anyRisky = null;
+  const someRisky = () => (anyRisky === null ? (anyRisky = info.some(risky)) : anyRisky);
+  // read / mapfile / declare / export / local / printf -v keep the text in a variable, like VAR=value
+  const stores = (i) => /^(?:read|mapfile|readarray|declare|typeset|local|export)$/.test(i.name) || (i.name === 'printf' && i.args.includes('-v'));
+  // chain[j]: the command at j, or anything it pipes into, can run SQL. Filled right to left once, so every lookup is O(1).
+  let chain = null;
+  const chainAt = (j) => {
+    if (!chain) {
+      chain = new Array(info.length).fill(false);
+      for (let x = info.length - 1; x >= 0; x--) chain[x] = risky(info[x]) || (info[x].raw.feeds && someRisky()) || (info[x].raw.pipe && x + 1 < info.length && chain[x + 1]);
+    }
+    return chain[j];
+  };
+  let later = null; // later[k]: some command after k can run SQL
+  const laterAt = (k) => {
+    if (!later) { later = new Array(info.length + 1).fill(false); for (let x = info.length - 1; x >= 0; x--) later[x] = later[x + 1] || risky(info[x]); }
+    return later[k + 1];
+  };
   const sinks = (k) => { // is the command at k, or anything it pipes into, able to run SQL?
-    if (info[k].assign) return info.slice(k + 1).some(risky); // `q="DROP TABLE x"; python run.py "$q"`
-    if (info[k].raw.sub) return info.some(risky); // `python run.py $(echo "DROP TABLE x")`: output feeds the command around it
+    if (info[k].assign || stores(info[k])) return laterAt(k); // `q="DROP TABLE x"; python run.py "$q"`
+    // `python run.py $(echo "DROP TABLE x")`, `echo "DROP TABLE x" > >(python run.py)`: output feeds another command
+    if (info[k].raw.sub || info[k].raw.feeds) return someRisky();
+    return chainAt(k);
+  };
+  // SQL written to a file (`> f`, `>> f`, `&> f`, tee / Set-Content / Out-File / Add-Content) and handed to a later command that
+  // names it: a .sql file to anything that can run it (or prints it into one: `cat q.sql | python run.py`), any file to a SQL
+  // client. Formatters and linters only read. Mentions are indexed once, so long lines stay linear.
+  let mentions = null;
+  const index = () => {
+    mentions = new Map();
+    info.forEach((i, j) => i.raw.forEach((x) => { const b = x.split(/[\\/=]/).pop().toLowerCase(); if (b) (mentions.get(b) || mentions.set(b, []).get(b)).push(j); }));
+  };
+  const tool = (i) => (/^(?:npx|bunx|pnpx|pnpm|yarn|npm|bun)$/.test(i.name) ? (i.args.find((a) => !a.startsWith('-') && !/^(?:dlx|exec|x)$/.test(a)) || '') : i.name).toLowerCase();
+  let rereads = 0;
+  const reread = (k) => {
+    if (++rereads > 64) return false;
+    const files = [];
     for (let j = k; j < info.length; j++) {
-      if (risky(info[j])) return true;
-      if (!info[j].raw.pipe) break;
+      const t = info[j].raw;
+      // the pipeline the text flows through (`echo … | tee f`), plus the `>f` left over when `echo x &>f` splits at `&`
+      if (j > k && !info[j - 1].raw.pipe && !(j === k + 1 && /^>/.test(t[0] || ''))) break;
+      t.forEach((x, p) => { const m = /^(?:\d*|&)>>?(?!&)(.*)$/.exec(x); if (m && (m[1] || t[p + 1])) files.push(m[1] || t[p + 1]); });
+      if (/^(?:tee|set-content|add-content|out-file|sc|ac)$/.test(info[j].name)) files.push(...info[j].args.filter((a) => !a.startsWith('-')));
+    }
+    const names = [...new Set(files.filter((f) => !/^(?:\/dev\/\w+|\$null|nul|con)$/i.test(f)).map((f) => f.split(/[\\/]/).pop().toLowerCase()).filter((b) => b && !/\s/.test(b)))];
+    if (!names.length) return false;
+    if (!mentions) index();
+    for (const b of names) {
+      for (const j of mentions.get(b) || []) {
+        if (j <= k) continue;
+        if (!/\.(?:sql|ddl|psql)$/.test(b) && !client(info[j])) continue;
+        // formatters, linters and file copies (`docker compose cp f db:/tmp/`) only read; what they pipe into still counts
+        if (LINTERS.has(tool(info[j])) || (REMOTE.test(info[j].name) && info[j].args.includes('cp'))) { if (info[j].raw.pipe && j + 1 < info.length && sinks(j + 1)) return true; continue; }
+        if (sinks(j)) return true;
+      }
     }
     return false;
   };
-  if (SQL_RE.test(stripHeredocs(cmd.replace(/\r\n?/g, '\n'), [], ps))) {
+  const text = stripHeredocs(cmd.replace(/\r\n?/g, '\n'), [], ps);
+  if (SQL_RE.test(text)) {
     if (info.some(client)) return SQL_MSG;
-    for (let k = 0; k < info.length; k++) if (SQL_RE.test(info[k].raw.join(' ')) && sinks(k)) return SQL_MSG;
+    for (let k = 0; k < info.length; k++) if (SQL_RE.test(info[k].raw.join(' ')) && (sinks(k) || reread(k))) return SQL_MSG;
   }
   for (let k = 0; k < info.length; k++) {
     const owned = [...info[k].raw.join(' ').matchAll(MARK)].map((m) => bodies[+m[1]] || '');
-    if (owned.some((b) => SQL_RE.test(b)) && sinks(k)) return SQL_MSG;
+    if (owned.some((b) => SQL_RE.test(b)) && (sinks(k) || reread(k))) return SQL_MSG;
   }
   return null;
 }
@@ -347,6 +484,44 @@ function selftest() {
   for (const c of good) check(c.replace(/\n/g, '\\n'), run('Bash', c) === null, 'expected silence');
   for (const c of psBad) check(`ps ${c.replace(/\n/g, '\\n')}`, run('PowerShell', c)?.hookSpecificOutput.permissionDecision === MODE, 'expected a block');
   for (const c of psGood) check(`ps ${c.replace(/\n/g, '\\n')}`, run('PowerShell', c) === null, 'expected silence');
+  // indirect SQL routes, shell keywords before a delete, redirections next to a delete (B = Bash, P = PowerShell)
+  const more = [
+    [1, 'B', 'echo "DROP TABLE users;" > down.sql && npx prisma db execute --file down.sql'], [1, 'P', 'Set-Content q.sql "DROP TABLE x"; python run.py q.sql'],
+    [1, 'B', 'echo "DROP TABLE x" | tee q.sql; python run.py q.sql'], [1, 'B', 'echo "DROP TABLE users" > >(python run.py)'], [1, 'B', 'printf -v Q "DROP TABLE x"; python run.py "$Q"'],
+    [1, 'P', 'python run.py (Write-Output "DROP TABLE x")'], [1, 'B', 'cmd /c "rd /s /q .\\out\\a;C:\\"'], [1, 'B', 'cmd //c "r^d /s /q C:\\"'],
+    [1, 'B', "echo 'DROP TABLE x' >q.sql; cat q.sql | python run.py"], [1, 'B', "echo 'DROP TABLE x' &>q.sql; python run.py q.sql"], [1, 'B', "echo 'DROP TABLE x;' > q.sql; pg_format q.sql | python run.py"],
+    [1, 'P', '$null = Remove-Item -Recurse -Force C:\\'], [1, 'P', 'if (Test-Path db.sqlite) { Remove-Item -Recurse -Force C:\\ }'], [1, 'P', 'Remove-Item -Recurse -Force $PWD.Path'],
+    [1, 'B', '{ rm -rf /; }'], [1, 'B', 'if [ -d "$DIR" ]; then rm -rf "$DIR"/; fi'], [1, 'B', 'for d in a; do rm -rf /; done'], [1, 'B', '! rm -rf /'],
+    [1, 'B', 'echo "DROP TABLE x;" | while read l; do python run.py "$l"; done'], [1, 'B', 'f() { echo "DROP TABLE x"; }; f | python run.py'], [1, 'B', 'rm -rf /&>/dev/null'],
+    [0, 'B', 'rg -l "drop table" migrations 2>/dev/null; npx tsc --noEmit 2>/dev/null'], [0, 'B', "cat > m/002.sql <<'EOF'\nDROP TABLE old_users;\nEOF\nnpx prettier --check m/002.sql"],
+    [0, 'B', 'npx prisma generate && git commit -m "fix: drop table legacy_users from schema"'], [0, 'B', 'rm -rf ./coverage ./dist 2>&1'], [0, 'B', 'cmd /c "rd /s /q dist 2>nul"'],
+    [0, 'B', 'rm -rf out/x > log.txt'], [0, 'B', 'if [ -d dist ]; then rm -rf dist; fi'], [0, 'P', "$n = (Get-ChildItem migrations | Select-String 'DROP TABLE').Count; Write-Host $n"],
+    [0, 'P', 'Get-ChildItem -Recurse -Filter node_modules | ForEach-Object { Remove-Item -Recurse -Force $_.FullName }'], [0, 'P', 'if (Test-Path dist) { Remove-Item -Recurse -Force dist }'],
+    [1, 'B', 'rm -rf 2>&1 ~'], [1, 'B', 'rm -rf ">" /'], [1, 'B', "rm -rf '<' ~"], [1, 'B', 'timeout 60 rm -rf ~'], [1, 'B', `timeout -s KILL 300 git push --force origin ${PROTECTED[0]}`],
+    [1, 'B', 'find / -mindepth 1 -delete'], [1, 'B', 'find ~ -exec rm -rf {} +'], [1, 'B', 'git checkout -f main'], [1, 'B', 'git restore .'], [1, 'B', 'git stash clear'],
+    [1, 'B', 'dropdb prod'], [1, 'B', 'bin/rails db:drop'], [1, 'B', 'npx prisma migrate reset --force'], [1, 'B', 'redis-cli FLUSHALL'], [1, 'B', 'psql -c "DROP/**/TABLE x"'],
+    [0, 'B', "find . -name '*.pyc' -delete"], [0, 'B', 'find ./build -type f -exec rm {} +'], [0, 'B', 'git restore --staged .'], [0, 'B', 'git restore src/a.ts'], [0, 'B', 'git stash pop'],
+    [0, 'B', 'rails db:migrate'], [0, 'B', 'npx prisma migrate dev'], [0, 'B', 'git commit -m "chore: drop table legacy_users, export new schema" && npm test'],
+    [0, 'B', 'export PGHOST=localhost; grep -rl "DROP TABLE" migrations; npm run build'], [0, 'P', 'git commit -m "fix: drop table users (legacy)"; npm test'],
+    [0, 'P', "Select-String -Pattern 'DROP TABLE' (Get-ChildItem -Recurse *.sql)"], [0, 'B', 'echo "drop table x" > out; npx tsc --outDir out'],
+    [0, 'B', "cat > test/g.test.js <<'EOF'\nexpect(guard('DROP TABLE x'))\nEOF\nnpx vitest run test/g.test.js"],
+    [0, 'P', 'Get-ChildItem C:\\tmp -Directory -Filter "x-stale-*" | % { cmd /c rd /s /q $_.FullName 2>&1 | Out-Null }'],
+    [1, 'P', 'Remove-Item -Recurse -Force 2>&1 C:\\'], [1, 'B', 'echo "a>"& rm -rf ~'], [1, 'B', 'echo a\\>&rm -rf ~'], [1, 'B', 'cmd /c "rd /s /q build ^& C:\\"'],
+    [1, 'B', '>/dev/null rm -rf ~'], [1, 'B', 'bundle exec rails db:reset'], [1, 'B', 'rails db:migrate:reset'], [1, 'B', 'npm exec prisma migrate reset'],
+    [1, 'B', 'docker exec redis redis-cli FLUSHALL'], [1, 'B', 'docker compose down -v'], [1, 'B', 'git restore --staged --worktree .'], [1, 'B', 'find / -exec sudo rm -rf {} +'],
+    [1, 'B', 'chmod -R -h 777 /'], [1, 'B', 'find ~ -exec rm -rf {} \\;'],
+    [0, 'B', 'find . -xtype l -delete'], [0, 'B', 'find -L build -delete'], [0, 'B', 'find . -lname "*old*" -delete'], [0, 'B', 'dropdb --help'], [0, 'B', 'npx prisma migrate reset --help'],
+    [0, 'B', "cat > m/002_down.sql <<'EOF'\nDROP TABLE x;\nEOF\ndocker compose cp m/002_down.sql db:/tmp/"], [0, 'B', 'docker compose down'], [0, 'B', 'rm -rf C:\\proj\\dist'],
+  ];
+  // linear time on long or adversarial lines
+  const t0 = Date.now();
+  for (const c of ['[a]'.repeat(40) + '!', 'echo "drop table x" > a; '.repeat(2000), 'echo "drop table x" | tee a; '.repeat(2000),
+    'echo "drop table x" > q.sql | '.repeat(800) + 'cat', 'drop /*'.repeat(10000)]) run('PowerShell', c), run('Bash', c);
+  check('long lines judged quickly', Date.now() - t0 < 2000, `${Date.now() - t0} ms`);
+  for (const [block, t, c] of more) {
+    const r = run(t === 'P' ? 'PowerShell' : 'Bash', c);
+    check(`${t} ${c.replace(/\n/g, '\\n')}`, block ? r?.hookSpecificOutput.permissionDecision === MODE : r === null, block ? 'expected a block' : 'expected silence');
+  }
   check('ps Remove-Item C:\\',!!run('PowerShell', 'Remove-Item -Recurse -Force C:\\'), 'expected a block');
   check('ps Remove-Item $env:X\\..', !!run('PowerShell', 'Remove-Item -Recurse -Force "$env:BUILD\\.."'), 'expected a block');
   check('ps Remove-Item $env:X\\..\\site', run('PowerShell', 'Remove-Item -Recurse -Force "$env:BUILD\\..\\site"') === null, 'expected silence');
