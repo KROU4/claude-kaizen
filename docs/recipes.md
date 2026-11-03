@@ -162,7 +162,7 @@ Generated from `recipes/catalog.json` (31 recipes). Do not edit by hand; run `no
 *Всегда отвечать на вашем языке (определён: {locale.lang})*
 
 - Impact: **high**, risk: low, scope: user
-- Why: You write most prompts in a non-English language but no rule or setting says so, so replies drift to English after long turns. One rule plus the `language` setting fixes it everywhere.
+- Why: You write most prompts in a non-English language, but the CLAUDE.md rule and the `language` setting are not both in place, so replies can drift to English after long turns. Kaizen adds only the missing one: the rule, the setting, or both.
 - Trigger: `{"all":[{"metric":"locale.lang","eq":"ru"},{"any":[{"metric":"context.claudeMdHints.language","falsy":true},{"metric":"context.settingsLanguage","falsy":true}]}]}`
 - Actions: settings.set language; claude-md.block
 

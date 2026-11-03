@@ -194,7 +194,7 @@
       "scope": ["user"],
       "defaultScope": "user",
       "title": { "en": "Always answer in your language (detected: {locale.lang})", "ru": "Всегда отвечать на вашем языке (определён: {locale.lang})" },
-      "why": { "en": "You write most prompts in a non-English language but no rule or setting says so, so replies drift to English after long turns. One rule plus the `language` setting fixes it everywhere.", "ru": "Большинство запросов вы пишете не на английском, но ни правило, ни настройка об этом не говорят — после длинных ходов ответы сползают в английский. Одно правило плюс настройка `language` закрывают это везде." },
+      "why": { "en": "You write most prompts in a non-English language, but the CLAUDE.md rule and the `language` setting are not both in place, so replies can drift to English after long turns. Kaizen adds only the missing one: the rule, the setting, or both.", "ru": "Большинство запросов вы пишете не на английском, но правило в CLAUDE.md и настройка `language` заданы не обе, поэтому после длинных ходов ответы могут сползать в английский. Kaizen добавит только недостающее: правило, настройку или обе." },
       "evidence": { "en": "{locale.cyrillicShare|pct} of your prompt text is Cyrillic; CLAUDE.md language rule: {context.claudeMdHints.language}; settings.language: {context.settingsLanguage}.", "ru": "{locale.cyrillicShare|pct} текста ваших запросов — кириллица; правило о языке в CLAUDE.md: {context.claudeMdHints.language}; settings.language: {context.settingsLanguage}." },
       "when": { "all": [ { "metric": "locale.lang", "eq": "ru" }, { "any": [ { "metric": "context.claudeMdHints.language", "falsy": true }, { "metric": "context.settingsLanguage", "falsy": true } ] } ] },
       "actions": [
