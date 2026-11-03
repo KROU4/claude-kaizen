@@ -1,6 +1,6 @@
 {
   "name": "claude-kaizen",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "Continuous improvement for Claude Code: measure how you really work, pick the fixes, let it configure hooks, skills, agents and rules for you.",
   "type": "module",
   "license": "MIT",

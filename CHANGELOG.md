@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [0.1.12] — 2026-11-03
+
+Found on the first real `/kaizen:start` run after installing 0.1.11.
+
+### Fixed
+- `recommend`: a recommended analyst draft supersedes the catalog recipe it replaces. `custom.skill-*` replaces `skills.from-repeated-prompts`, `custom.corrections-rules` replaces `claude-md.corrections`, and so does any id in a draft's `conflicts`. The replaced recipe moves to `notApplicable` ("superseded by …"), so the console no longer offers both. `recommend --all` still lists everything.
+- `claude-md.language`: when the CLAUDE.md rule already exists and only the `language` setting is missing, the explanation no longer claims that neither is set. It says Kaizen adds only what is missing.
+
 ## [0.1.11] — 2026-11-03
 
 ### Fixed
